@@ -18,6 +18,7 @@ pub mod check_finite;
 pub mod tower_block_attention;
 
 pub mod dense_mlp;
+pub mod gated_residual;
 pub mod sparse_mlp;
 
 pub mod dynamic_grouped_conv;

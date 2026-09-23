@@ -34,6 +34,7 @@ The Qwen guide owns whole-model composition. The other guides own the named comp
 | Embedding, normalization, and unembedding | [Model primitives](executor_model_primitives.md) |
 | GQA | [GQA](executor_gqa.md), [kernel selection](gqa_sdpa_selection.md) |
 | Gated DeltaNet | [GDN](executor_gdn.md) |
+| Gated residual | [GR](executor_gated_residual.md) |
 | Dense MLP | [Dense MLP](executor_dense_mlp.md) |
 | MoE | [MoE](executor_moe.md) |
 | Sampling and rejection sampling | [Sampling](executor_sampling.md) |

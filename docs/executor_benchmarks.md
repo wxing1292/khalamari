@@ -46,7 +46,7 @@ Backend Criterion targets:
 
 ```text
 dense_mlp  sparse_mlp  moe  gqa_split_kv  gqa_bidi_block_sdpa  gdn_attn  gdn_state_io
-embedding  unembedding  norm  affine_quantized_matmul  matmul_bf16  buffer_io
+embedding  unembedding  norm  gated_residual  affine_quantized_matmul  matmul_bf16  buffer_io
 ```
 
 `rejection_sampling` is the backend custom-CLI target. Model-executor targets:
@@ -86,6 +86,9 @@ Treat a concurrent compute dispatch and a multi-queue overlap as separate measur
 
 ## Target meanings
 
+- `gated_residual` measures GR read, write, composition, and fused/unfused dependent chains with synthetic BF16 weights.
+  Each submission records 32 invocations at four branches, hidden dimension 2560, and low-rank dimension 320.
+  See the [GR contract](executor_gated_residual.md#verification-and-measurement) for shapes and measurement scope.
 - The backend `moe` target includes `route_replay128`. The `gdn_attn` target includes `replay128` cases.
   These cases record 128 component invocations per submission.
   This case amortizes submission overhead when single-invocation wall-time samples are noisy.

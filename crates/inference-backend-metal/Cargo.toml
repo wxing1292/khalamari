@@ -78,6 +78,11 @@ path = "benches/norm.rs"
 harness = false
 
 [[bench]]
+name = "gated_residual"
+path = "benches/gated_residual.rs"
+harness = false
+
+[[bench]]
 name = "embedding"
 path = "benches/head/embedding.rs"
 harness = false

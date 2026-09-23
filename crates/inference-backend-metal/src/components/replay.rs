@@ -1,3 +1,4 @@
+use crate::components::gated_residual;
 use crate::components::residual_add;
 use crate::components::residual_add_rms_norm;
 use crate::components::rms_norm;
@@ -31,6 +32,22 @@ impl ReplayRecorder {
             ReplayOpKind::Opaque(op) => {
                 self.flush_pending();
                 op.record_into(&mut self.inner, barrier_before);
+            },
+            ReplayOpKind::GatedResidualWrite(op) => {
+                self.push_pending(PendingReplayOp::GatedResidualWrite { op, barrier_before });
+            },
+            ReplayOpKind::GatedResidualRead(op) => {
+                if let Some((write, write_barrier_before)) = self.pop_gated_residual_write(&op) {
+                    self.flush_pending();
+                    record_pending(
+                        &mut self.inner,
+                        op.with_write(write),
+                        write_barrier_before || barrier_before,
+                    );
+                } else {
+                    self.flush_pending();
+                    record_pending(&mut self.inner, op, barrier_before);
+                }
             },
             ReplayOpKind::ResidualAdd(op) => self.push_pending(PendingReplayOp::ResidualAdd { op, barrier_before }),
             ReplayOpKind::ResidualAddWithCapture(op) => {
@@ -71,6 +88,22 @@ impl ReplayRecorder {
         self.pending.pop()
     }
 
+    fn pop_gated_residual_write(
+        &mut self,
+        read: &gated_residual::ReadInvocation<'_>,
+    ) -> Option<(gated_residual::WriteReplayOp, bool)> {
+        let Some(PendingReplayOp::GatedResidualWrite { op, .. }) = self.pending.last() else {
+            return None;
+        };
+        if !op.can_fuse(read) {
+            return None;
+        }
+        let Some(PendingReplayOp::GatedResidualWrite { op, barrier_before }) = self.pop() else {
+            panic!("pending replay op changed after GR write check");
+        };
+        Some((op, barrier_before))
+    }
+
     fn pop_residual_add(&mut self, rms_norm: &rms_norm::ReplayOp) -> Option<(residual_add::ReplayOp, bool)> {
         let Some(PendingReplayOp::ResidualAdd { op, .. }) = self.pending.last() else {
             return None;
@@ -105,6 +138,9 @@ impl ReplayRecorder {
     fn flush_pending(&mut self) {
         for operator in self.pending.drain(..) {
             match operator {
+                PendingReplayOp::GatedResidualWrite { op, barrier_before } => {
+                    record_pending(&mut self.inner, op, barrier_before);
+                },
                 PendingReplayOp::ResidualAdd { op, barrier_before } => {
                     record_pending(&mut self.inner, op.into_replay(), barrier_before);
                 },
@@ -138,6 +174,8 @@ pub struct ReplayOp<'a> {
 }
 
 enum ReplayOpKind<'a> {
+    GatedResidualRead(gated_residual::ReadInvocation<'a>),
+    GatedResidualWrite(gated_residual::WriteReplayOp),
     Opaque(OpaqueReplayOp<'a>),
     ResidualAdd(residual_add::ReplayOp),
     ResidualAddWithCapture(residual_add::CaptureReplayOp),
@@ -151,6 +189,18 @@ impl<'a> ReplayOp<'a> {
     {
         Self {
             kind: ReplayOpKind::Opaque(OpaqueReplayOp::new(operator)),
+        }
+    }
+
+    pub fn gated_residual_read(invocation: gated_residual::ReadInvocation<'a>) -> Self {
+        Self {
+            kind: ReplayOpKind::GatedResidualRead(invocation),
+        }
+    }
+
+    pub fn gated_residual_write(invocation: gated_residual::WriteInvocation<'a>) -> Self {
+        Self {
+            kind: ReplayOpKind::GatedResidualWrite(invocation.into_replay_op()),
         }
     }
 
@@ -181,6 +231,10 @@ impl<'a> ReplayOp<'a> {
 }
 
 enum PendingReplayOp {
+    GatedResidualWrite {
+        op: gated_residual::WriteReplayOp,
+        barrier_before: bool,
+    },
     ResidualAdd {
         op: residual_add::ReplayOp,
         barrier_before: bool,

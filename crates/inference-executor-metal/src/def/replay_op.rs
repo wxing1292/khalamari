@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use inference_backend_metal::components::gated_residual;
 use inference_backend_metal::components::residual_add;
 use inference_backend_metal::components::rms_norm;
 use inference_backend_metal::metal::Operator;
@@ -146,6 +147,18 @@ impl<'a> ReplayOp<'a> {
     {
         Self {
             inner: inference_backend_metal::components::ReplayOp::opaque(operator),
+        }
+    }
+
+    pub fn gated_residual_read(invocation: gated_residual::ReadInvocation<'a>) -> Self {
+        Self {
+            inner: inference_backend_metal::components::ReplayOp::gated_residual_read(invocation),
+        }
+    }
+
+    pub fn gated_residual_write(invocation: gated_residual::WriteInvocation<'a>) -> Self {
+        Self {
+            inner: inference_backend_metal::components::ReplayOp::gated_residual_write(invocation),
         }
     }
 

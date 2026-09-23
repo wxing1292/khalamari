@@ -2,6 +2,7 @@ pub mod attn;
 pub mod backend;
 pub mod checkpoint;
 pub mod def;
+pub mod gated_residual;
 pub mod model;
 pub mod mlp;
 pub mod reference;
