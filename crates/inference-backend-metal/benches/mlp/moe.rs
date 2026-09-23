@@ -15,6 +15,7 @@ use inference_backend_metal::metal::Device;
 use inference_backend_metal::metal::Dtype;
 use inference_backend_metal::metal::ReplayProgram;
 use inference_backend_metal::metal::ReplayProgramBuilder;
+use inference_backend_metal::metal::ReplayU32;
 use inference_backend_metal::metal::Stream;
 use inference_backend_metal::operators::affine_quantized;
 use inference_backend_metal::operators::softmax;
@@ -57,17 +58,24 @@ fn bench_moe(c: &mut Criterion) {
     let mut group = c.benchmark_group("metal/moe");
 
     for num_tokens in BENCH_TOKENS {
-        let routing = RoutingFixture::new(&device, num_tokens);
-        group.throughput(Throughput::Elements(num_tokens as u64));
-        group.bench_function(
-            format!("{MOE_PROFILE}/route/num_tokens{num_tokens}/experts{NUM_EXPERTS}/topk{TOPK_EXPERTS}"),
-            |b| {
-                b.iter(|| {
-                    routing.replay();
-                    black_box(&routing.expert_probs);
-                });
-            },
-        );
+        for num_invocations in [1, 128] {
+            let routing = RoutingFixture::new(&device, num_tokens, num_invocations);
+            let path = if num_invocations == 1 {
+                "route".to_owned()
+            } else {
+                format!("route_replay{num_invocations}")
+            };
+            group.throughput(Throughput::Elements(num_tokens as u64 * num_invocations as u64));
+            group.bench_function(
+                format!("{MOE_PROFILE}/{path}/num_tokens{num_tokens}/experts{NUM_EXPERTS}/topk{TOPK_EXPERTS}"),
+                |b| {
+                    b.iter(|| {
+                        routing.replay();
+                        black_box(&routing.expert_probs);
+                    });
+                },
+            );
+        }
 
         let combine = CombineFixture::new(&device, num_tokens);
         group.throughput(Throughput::Elements(num_tokens as u64 * HIDDEN_DIM as u64));
@@ -140,7 +148,7 @@ struct RoutingFixture {
 }
 
 impl RoutingFixture {
-    fn new(device: &Device, num_tokens: u32) -> Self {
+    fn new(device: &Device, num_tokens: u32, num_invocations: usize) -> Self {
         let config = routing::Config {
             num_experts: NUM_EXPERTS,
             num_experts_per_token: TOPK_EXPERTS,
@@ -154,7 +162,15 @@ impl RoutingFixture {
         let expert_probs = Buffer::new_zeroed(device, config.expert_probs_bytes(shape));
         let stream = Stream::new(device);
         let kernel = routing::Compute::new(device, config);
-        let replay = build_routing_replay(&stream, &kernel, shape, &router_probs, &expert_indices, &expert_probs);
+        let replay = build_routing_replay(
+            &stream,
+            &kernel,
+            shape,
+            &router_probs,
+            &expert_indices,
+            &expert_probs,
+            num_invocations,
+        );
         let fixture = Self {
             stream,
             kernel,
@@ -255,17 +271,20 @@ fn build_routing_replay(
     router_probs: &Buffer,
     expert_indices: &Buffer,
     expert_probs: &Buffer,
+    num_invocations: usize,
 ) -> ReplayProgram {
     let mut builder = stream.create_replay_program();
-    builder.record(kernel.invoke(
-        shape,
-        inference_backend_metal::metal::ReplayU32::Fixed(shape.num_total_tokens),
-        routing::Buffers {
-            router_probs,
-            expert_indices,
-            expert_probs,
-        },
-    ));
+    for _ in 0..num_invocations {
+        builder.record(kernel.invoke(
+            shape,
+            ReplayU32::Fixed(shape.num_total_tokens),
+            routing::Buffers {
+                router_probs,
+                expert_indices,
+                expert_probs,
+            },
+        ));
+    }
     builder.build()
 }
 

@@ -86,6 +86,10 @@ Treat a concurrent compute dispatch and a multi-queue overlap as separate measur
 
 ## Target meanings
 
+- The backend `moe` target includes `route_replay128`. The `gdn_attn` target includes `replay128` cases.
+  These cases record 128 component invocations per submission.
+  This case amortizes submission overhead when single-invocation wall-time samples are noisy.
+  Compare the same repeat count and token shape. Keep this diagnostic separate from full MoE forward measurements.
 - `norm` measures standalone RMSNorm and residual-add RMSNorm variants.
   The `rms-only/replay64` cases record 64 standalone BF16 RMSNorm commands in one replay.
   This method amortizes command submission and wait overhead for kernel-level comparisons.

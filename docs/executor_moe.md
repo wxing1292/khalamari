@@ -364,8 +364,15 @@ The combine kernels do not change topology with token count, so they add no toke
 policy.
 The parameterized `GatedMoE` replay composes these leaf APIs on the token-major path.
 
-The current routing kernel supports at most 256 experts and at most 16 selected experts per token.
-`moe::routing::Shape::validate()` treats other shapes as internal contract violations and panics.
+Routing fixes `num_experts`, `num_experts_per_token`, and `norm_topk_prob` during initialization.
+The generated Metal source specializes these values. Submission supplies only the active token count.
+The 256-thread reduction scans expert groups before each reduction, so expert count can exceed 256.
+Selected-expert arrays use the configured top-k. They have no fixed top-16 capacity.
+Initialization requires `0 < num_experts_per_token <= num_experts` and checks the device shared-memory limit.
+The executor softmax still limits `num_experts` to 4096. Shape validation also checks the shader index domain.
+Invalid internal configurations panic at the owning boundary.
+Ties select the smaller expert ID. Routing preserves BF16 probability and accumulation semantics.
+It renormalizes only when `norm_topk_prob` is enabled, top-k exceeds one, and the selected sum is positive.
 
 Production callers may allocate scratch with the executor's maximum token capacity.
 The private `Selector::select(&Registry, ...)` operation selects a registered execution variant from the current
@@ -662,16 +669,22 @@ Recommendation: Justify that change with full MoE wrapper numbers, not only isol
 Focused leaf tests record one total capacity into an isolated test cache.
 They replay all legal active-token counts in non-monotonic order and compare the active logical domain with CPU
 references.
-The routing test covers normalized and non-normalized top-k probabilities.
+The routing test covers normalized and non-normalized top-k probabilities, including 512 experts with top-10 and top-17.
+It also covers non-power-of-two expert counts, top-1, top-k equal to expert count, and high expert IDs.
+Explicit fixtures check cross-group ties, zero probabilities, and unchanged inactive output rows.
 The sparse MLP test covers token-major and expert-major layouts, including the token-major fast-down topology.
 The combine test covers paths with and without shared experts.
 The expert-major layout test compares expert counts, expert offsets, route-map invariants, packed input, and both
 scatter paths with CPU references.
 It does not require a stable route order inside one expert group.
-The leaf tests do not use inactive output or scratch tails as an oracle.
+The routing boundary test checks inactive output rows separately from active-output correctness.
 The full `GatedMoE` replay test uses isolated test caches and CPU composition references. It covers token-major capacity
 `4` and expert-major capacity `8`. It replays every legal active token count in non-monotonic order. It runs with and
-without shared experts. A separate routing replay test uses non-uniform router weights and checks active logits,
+without shared experts, including 512-expert top-10 and top-17 configurations.
+Router and expert weights vary so the complete output depends on expert selection and expert strides.
+The full-output check uses `1e-6 + 0.02 * abs(reference)` tolerance for BF16 rounding against F32 reference intermediates.
+It also verifies that experts in the upper half of the configured range participate.
+A separate routing replay test uses non-uniform router weights and checks active logits,
 probabilities, expert indices, and expert probabilities against the CPU routing reference.
 Replay infrastructure tests own generic replay-parameter validation.
 
@@ -685,6 +698,9 @@ cargo bench --bench sparse_mlp
 ```
 
 The benches include Metal replay/ICB cases for MoE routing/combine.
+`route_replay128` records 128 routing invocations in one submission to amortize host submission and wait overhead.
+Its reported time covers the full submission. Divide by 128 for the mean time per routing invocation.
+This diagnostic does not represent complete model throughput.
 They include token-major sparse expert forward paths.
 Synthetic forward cases record router projection, routing, sparse expert MLP, shared expert MLP, shared gate, and
 scatter/combine.

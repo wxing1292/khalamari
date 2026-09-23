@@ -16,39 +16,42 @@ kernel void moe_route_topk(
     device uint* expert_indices [[buffer(1)]],
     device float* expert_probs [[buffer(2)]],
     constant uint& num_active_tokens [[buffer(3)]],
-    constant uint& num_experts [[buffer(4)]],
-    constant uint& num_experts_per_token [[buffer(5)]],
-    constant uint& norm_topk_prob [[buffer(6)]],
     uint token [[threadgroup_position_in_grid]],
     uint tid [[thread_index_in_threadgroup]]
 ) {
     if (token >= num_active_tokens) return;
     const uint base = token * num_experts;
-    threadgroup float candidate_probs[256];
-    threadgroup uint candidate_experts[256];
-    threadgroup float selected_probs[16];
-    threadgroup uint selected_experts[16];
+    threadgroup float candidate_probs[required_threads];
+    threadgroup uint candidate_experts[required_threads];
+    threadgroup float selected_probs[num_experts_per_token];
+    threadgroup uint selected_experts[num_experts_per_token];
     for (uint slot = 0; slot < num_experts_per_token; ++slot) {
         float prob = -1.0f;
         uint expert_id = UINT_MAX;
-        if (tid < num_experts) {
+        // Group coordinates keep the final iteration inside u32 even at the expert-count limit.
+        for (uint group = 0; group < num_expert_groups; ++group) {
+            const uint expert = group * required_threads + tid;
+            if (expert >= num_experts) break;
             bool already_selected = false;
             for (uint prev = 0; prev < slot; ++prev) {
-                if (selected_experts[prev] == tid) {
+                if (selected_experts[prev] == expert) {
                     already_selected = true;
                     break;
                 }
             }
             if (!already_selected) {
-                prob = read_bf16(router_probs, base + tid);
-                expert_id = tid;
+                const float candidate = read_bf16(router_probs, base + expert);
+                if (candidate > prob || (candidate == prob && expert < expert_id)) {
+                    prob = candidate;
+                    expert_id = expert;
+                }
             }
         }
         candidate_probs[tid] = prob;
         candidate_experts[tid] = expert_id;
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
-        for (uint stride = 128; stride > 0; stride >>= 1) {
+        for (uint stride = required_threads / 2; stride > 0; stride >>= 1) {
             if (tid < stride) {
                 const float rhs_prob = candidate_probs[tid + stride];
                 const uint rhs_expert = candidate_experts[tid + stride];

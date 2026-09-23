@@ -112,8 +112,7 @@ pub fn moe_routing_from_bf16_probs_reference(
     assert_eq!(router_probs.len(), num_tokens * num_experts);
     assert!(num_experts_per_token > 0);
     assert!(num_experts_per_token <= num_experts);
-    assert!(num_experts <= 256);
-    assert!(num_experts_per_token <= 16);
+    assert!(u32::try_from(num_experts).is_ok());
 
     let router_probs = router_probs
         .iter()

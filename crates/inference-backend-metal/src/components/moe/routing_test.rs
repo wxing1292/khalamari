@@ -16,19 +16,76 @@ const ACTIVE_SEQUENCE: [u32; 8] = [1, 8, 3, 7, 2, 6, 4, 5];
 #[test]
 fn test_replay_matches_reference_across_active_counts_and_normalization_modes() {
     let mut cache = ReplayTestCache::new();
-    for norm_topk_prob in [false, true] {
-        let fixture = RoutingFixture::new(norm_topk_prob);
-        let key = (fixture.shape.num_total_tokens, norm_topk_prob);
-        let (_, cache_hit) = cache.record(key, || fixture.replay());
-        assert!(!cache_hit);
-        for (case_index, num_active_tokens) in ACTIVE_SEQUENCE.into_iter().enumerate() {
-            let probs = fixture.write_probs(0x5A17_920B_u32.wrapping_add(case_index as u32));
-            let (replay, cache_hit) = cache.record(key, || unreachable!());
-            assert!(cache_hit);
-            fixture.submit(replay, num_active_tokens);
-            fixture.assert_active_output(&probs, num_active_tokens);
+    for (num_experts, num_experts_per_token) in [(8, 3), (256, 16), (257, 1), (511, 10), (512, 10), (512, 17), (33, 33)]
+    {
+        for norm_topk_prob in [false, true] {
+            let fixture = RoutingFixture::new(Config {
+                num_experts,
+                num_experts_per_token,
+                norm_topk_prob,
+            });
+            let key = (
+                fixture.shape.num_total_tokens,
+                num_experts,
+                num_experts_per_token,
+                norm_topk_prob,
+            );
+            let (_, cache_hit) = cache.record(key, || fixture.replay());
+            assert!(!cache_hit);
+            for (case_index, num_active_tokens) in ACTIVE_SEQUENCE.into_iter().enumerate() {
+                let probs = fixture.write_probs(0x5A17_920B_u32.wrapping_add(case_index as u32));
+                let (replay, cache_hit) = cache.record(key, || unreachable!());
+                assert!(cache_hit);
+                fixture.submit(replay, num_active_tokens);
+                fixture.assert_active_output(&probs, num_active_tokens);
+            }
         }
     }
+}
+
+#[test]
+fn test_high_expert_ids_ties_zero_probs_and_inactive_tail() {
+    for norm_topk_prob in [false, true] {
+        let fixture = RoutingFixture::new(Config {
+            num_experts: 512,
+            num_experts_per_token: 10,
+            norm_topk_prob,
+        });
+        let mut probs = vec![0.0; 8 * 512];
+        // Both candidates of a thread can win in different slots. Ties span groups.
+        probs[511] = 0.5;
+        probs[255] = 0.25;
+        probs[256] = 0.25;
+        fixture.router_probs.write_typed(0, &bf16_bits(&probs));
+        fixture.expert_indices.write_typed(0, &[u32::MAX; 80]);
+        fixture.expert_probs.write_typed(0, &[-1.0_f32; 80]);
+        let replay = fixture.replay();
+        fixture.submit(&replay, 2);
+        fixture.assert_active_output(&probs, 2);
+        assert_eq!(
+            fixture.expert_indices.read_typed::<u32>(0, 10),
+            [511, 255, 256, 0, 1, 2, 3, 4, 5, 6]
+        );
+        assert_eq!(
+            fixture.expert_indices.read_typed::<u32>(10, 10),
+            (0..10).collect::<Vec<_>>()
+        );
+        assert_eq!(fixture.expert_indices.read_typed::<u32>(20, 60), vec![u32::MAX; 60]);
+        assert_eq!(fixture.expert_probs.read_typed::<f32>(20, 60), vec![-1.0; 60]);
+    }
+}
+
+#[test]
+#[should_panic(expected = "MoE routing top-k arrays must fit device shared memory")]
+fn test_init_rejects_topk_arrays_above_device_memory() {
+    KernelConstants::from_config(
+        Config {
+            num_experts: 4096,
+            num_experts_per_token: 4096,
+            norm_topk_prob: true,
+        },
+        32 * 1024,
+    );
 }
 
 struct RoutingFixture {
@@ -42,14 +99,9 @@ struct RoutingFixture {
 }
 
 impl RoutingFixture {
-    fn new(norm_topk_prob: bool) -> Self {
+    fn new(config: Config) -> Self {
         let device = Device::system_default();
         let stream = Stream::new(&device);
-        let config = Config {
-            num_experts: 8,
-            num_experts_per_token: 3,
-            norm_topk_prob,
-        };
         let shape = Shape { num_total_tokens: 8 };
         Self {
             router_probs: Buffer::new_zeroed(&device, config.router_probs_bytes(shape)),

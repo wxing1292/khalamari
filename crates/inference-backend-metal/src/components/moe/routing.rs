@@ -22,10 +22,20 @@ struct KernelConstants {
 }
 
 impl KernelConstants {
-    fn current() -> Self {
-        Self {
+    fn from_config(config: Config, max_threadblock_memory_bytes: usize) -> Self {
+        config.validate();
+        let constants = Self {
             thread_block: ThreadBlockConstants { required_threads: 256 },
-        }
+        };
+        // Candidate and selected arrays each store one F32 probability and one u32 expert ID.
+        let memory_bytes = (u64::from(constants.thread_block.required_threads)
+            + u64::from(config.num_experts_per_token))
+            * (size_of::<f32>() + size_of::<u32>()) as u64;
+        assert!(
+            memory_bytes <= max_threadblock_memory_bytes as u64,
+            "MoE routing top-k arrays must fit device shared memory"
+        );
+        constants
     }
 }
 
@@ -44,13 +54,8 @@ pub struct Config {
 impl Config {
     pub fn validate(self) {
         assert!(self.num_experts > 0);
-        assert!(self.num_experts <= 256, "MoE routing supports at most 256 experts");
         assert!(self.num_experts_per_token > 0);
         assert!(self.num_experts_per_token <= self.num_experts);
-        assert!(
-            self.num_experts_per_token <= 16,
-            "MoE routing supports at most 16 experts per token"
-        );
     }
 
     pub fn num_routes(self, shape: Shape) -> usize {
@@ -125,11 +130,24 @@ pub struct Compute {
 
 impl Compute {
     pub fn new(device: &crate::metal::Device, config: Config) -> Self {
-        config.validate();
+        let constants = KernelConstants::from_config(config, device.max_threadblock_memory_length());
+        let source_constants = format!(
+            "using namespace metal;\nconstant uint num_experts = {num_experts}u;\nconstant uint num_experts_per_token \
+             = {num_experts_per_token}u;\nconstant bool norm_topk_prob = {norm_topk_prob};\nconstant uint \
+             required_threads = {required_threads}u;\nconstant uint num_expert_groups = {num_expert_groups}u;",
+            num_experts = config.num_experts,
+            num_experts_per_token = config.num_experts_per_token,
+            norm_topk_prob = config.norm_topk_prob,
+            required_threads = constants.thread_block.required_threads,
+            num_expert_groups = config.num_experts.div_ceil(constants.thread_block.required_threads),
+        );
+        let source = MOE_ROUTING_SOURCE.replacen("using namespace metal;", &source_constants, 1);
+        let kernel = CompiledKernel::new(device, &source, "moe_route_topk");
+        assert!(kernel.static_threadblock_memory_length() <= device.max_threadblock_memory_length());
         Self {
             config,
-            constants: KernelConstants::current(),
-            kernel: CompiledKernel::new(device, MOE_ROUTING_SOURCE, "moe_route_topk"),
+            constants,
+            kernel,
         }
     }
 
@@ -173,9 +191,6 @@ impl Operator for Invocation<'_> {
             Some(key) => recorder.bind_u32(3, key, 1, self.shape.num_total_tokens),
             None => recorder.set_u32(3, self.shape.num_total_tokens),
         }
-        recorder.set_u32(4, self.kernel.config.num_experts);
-        recorder.set_u32(5, self.kernel.config.num_experts_per_token);
-        recorder.set_u32(6, u32::from(self.kernel.config.norm_topk_prob));
         recorder.dispatch_threadblocks(
             (self.shape.num_total_tokens as usize, 1, 1),
             (self.kernel.constants.thread_block.required_threads as usize, 1, 1),

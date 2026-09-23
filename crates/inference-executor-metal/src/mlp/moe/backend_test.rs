@@ -47,9 +47,16 @@ fn test_selector_returns_registered_variant_at_crossover() {
 
 #[test]
 fn test_routing_replay_matches_reference_across_active_counts() {
+    assert_routing_replay_matches_reference(8, 3);
+    assert_routing_replay_matches_reference(512, 10);
+}
+
+fn assert_routing_replay_matches_reference(num_experts: usize, num_experts_per_token: usize) {
     let device = Device::system_default();
     let stream = inference_backend_metal::metal::Stream::new(&device);
-    let (core, metal) = routing_test_config(true);
+    let (mut core, metal) = routing_test_config(true);
+    core.num_experts = num_experts;
+    core.num_experts_per_token = num_experts_per_token;
     let moe = GatedMoE::new(&device, core.clone(), metal);
     let router_config = affine_config_with_bits(core.num_experts, core.hidden_dim, metal.router_bits, metal);
     let num_total_tokens = 8_u32;
@@ -161,12 +168,20 @@ fn test_routing_replay_matches_reference_across_active_counts() {
 
 #[test]
 fn test_full_replay_matches_reference_across_active_counts_and_topologies() {
+    assert_full_replay_matches_reference(8, 2);
+    assert_full_replay_matches_reference(512, 10);
+    assert_full_replay_matches_reference(512, 17);
+}
+
+fn assert_full_replay_matches_reference(num_experts: usize, num_experts_per_token: usize) {
     let device = Device::system_default();
     let stream = inference_backend_metal::metal::Stream::new(&device);
     let runtime = MetalReplayRuntime::new(&stream);
 
     for with_shared_experts in [false, true] {
-        let (core, metal) = full_test_config(with_shared_experts);
+        let (mut core, metal) = full_test_config(with_shared_experts);
+        core.num_experts = num_experts;
+        core.num_experts_per_token = num_experts_per_token;
         let moe = GatedMoE::new(&device, core.clone(), metal);
         let weights = FullMoETestWeights::new(&device, &core, metal);
         let max_tokens = 8_u32;
@@ -205,10 +220,30 @@ fn test_full_replay_matches_reference_across_active_counts_and_topologies() {
                     .wait();
 
                 let active_values = num_active_tokens as usize * core.hidden_dim;
-                let actual = read_bf16_values(&next_hidden_state, output_elements);
+                let actual = read_bf16_values(&next_hidden_state, active_values);
                 let expected =
                     full_moe_reference(&core, metal, &all_hidden[..active_values], num_active_tokens as usize);
-                assert_close(&actual[..active_values], &expected, 0.05);
+                assert_eq!(actual.len(), expected.len());
+                // The reference keeps F32 intermediates. Allow BF16 rounding without hiding small outputs.
+                for (index, (&actual, &expected)) in actual.iter().zip(&expected).enumerate() {
+                    let tolerance = 1.0e-6 + 0.02 * expected.abs();
+                    assert!(
+                        (actual - expected).abs() <= tolerance,
+                        "full MoE mismatch at {index}: actual={actual} expected={expected} tolerance={tolerance}"
+                    );
+                }
+                if num_active_tokens == max_tokens {
+                    let expert_indices = scratch
+                        .bindings()
+                        .routing
+                        .expert_indices
+                        .read_typed::<u32>(0, num_active_tokens as usize * core.num_experts_per_token);
+                    assert!(
+                        expert_indices
+                            .iter()
+                            .any(|&expert| expert as usize >= core.num_experts / 2)
+                    );
+                }
             }
         }
     }
@@ -261,7 +296,7 @@ impl FullMoETestWeights {
         let router_config =
             affine_config_with_bits(router_shape.out_dim, router_shape.in_dim, metal.router_bits, metal);
         Self {
-            router_weight: filled_u8_buffer(device, router_config.weight_bytes(), 9),
+            router_weight: Buffer::from_slice(device, &full_router_weights(router_config)),
             router_scales: filled_bf16_buffer(device, router_config.scale_or_bias_bytes(), 0.000_976_562_5),
             router_biases: Buffer::new_zeroed(device, router_config.scale_or_bias_bytes()),
             topk_experts: FullMoESparseTestWeights::new(device, topk_experts_config(core, metal)),
@@ -347,7 +382,7 @@ impl FullMoESparseTestWeights {
             up_weight: filled_u8_buffer(device, gate_up_weight_bytes, 11),
             up_scales: filled_bf16_buffer(device, gate_up_param_bytes, 0.000_976_562_5),
             up_biases: Buffer::new_zeroed(device, gate_up_param_bytes),
-            down_weight: filled_u8_buffer(device, down_weight_bytes, 13),
+            down_weight: Buffer::from_slice(device, &full_down_weights(num_experts, down_weight_bytes)),
             down_scales: filled_bf16_buffer(device, down_param_bytes, 0.000_976_562_5),
             down_biases: Buffer::new_zeroed(device, down_param_bytes),
         }
@@ -481,10 +516,23 @@ fn routing_test_config(norm_topk_prob: bool) -> (GatedMoECore, GatedMoEMetalConf
     )
 }
 
+fn full_router_weights(config: affine_quantized::Config) -> Vec<u8> {
+    let bytes_per_expert = config.weight_bytes() / config.n as usize;
+    (0..config.n)
+        .flat_map(|expert| std::iter::repeat_n(if expert >= config.n / 2 { 18 } else { 9 }, bytes_per_expert))
+        .collect()
+}
+
+fn full_down_weights(num_experts: usize, num_weight_bytes: usize) -> Vec<u8> {
+    (0..num_experts)
+        .flat_map(|expert| std::iter::repeat_n(13 + (expert % 7) as u8, num_weight_bytes / num_experts))
+        .collect()
+}
+
 fn full_moe_reference(core: &GatedMoECore, metal: GatedMoEMetalConfig, hidden: &[f32], num_tokens: usize) -> Vec<f32> {
     assert_eq!(hidden.len(), num_tokens * core.hidden_dim);
     let router_config = affine_config_with_bits(core.num_experts, core.hidden_dim, metal.router_bits, metal);
-    let router_weights = vec![9_u8; router_config.weight_bytes()];
+    let router_weights = full_router_weights(router_config);
     let router_scales = vec![0.000_976_562_5; router_config.scale_or_bias_bytes() / size_of::<u16>()];
     let router_biases = vec![0.0; router_scales.len()];
     let router_logits = cpu_router_logits(
@@ -532,7 +580,7 @@ fn full_moe_reference(core: &GatedMoECore, metal: GatedMoEMetalConfig, hidden: &
             up_weight: &vec![11_u8; gate_up_weight_len],
             up_scales: &vec![0.000_976_562_5; gate_up_param_len],
             up_biases: &vec![0.0; gate_up_param_len],
-            down_weight: &vec![13_u8; down_weight_len],
+            down_weight: &full_down_weights(core.num_experts, down_weight_len),
             down_scales: &vec![0.000_976_562_5; down_param_len],
             down_biases: &vec![0.0; down_param_len],
         },
