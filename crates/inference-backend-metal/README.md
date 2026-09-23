@@ -110,6 +110,7 @@ The uncached mode applies `F_NOCACHE` for positional I/O and `F_GLOBAL_NOCACHE` 
 Both methods return one `BufferIOFile` that owns the POSIX and Metal handles for the same file.
 
 `BufferIO::file_to_buffer` uses a serial Metal I/O queue (`MTLIOCommandQueue`).
+The queue follows the [synchronous concurrency contract](../../docs/model_state_io.md#bufferio).
 It divides ranges larger than 1 GiB into serial commands.
 On the supported Apple Silicon path, Metal I/O rejects a command when its size reaches 2 GiB.
 `BufferIO::buffer_to_file` writes directly from shared `MTLBuffer` storage with positional file I/O.

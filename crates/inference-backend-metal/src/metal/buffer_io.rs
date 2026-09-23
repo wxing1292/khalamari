@@ -54,6 +54,8 @@ impl BufferIO {
     pub fn new(device: &Device) -> Self {
         let descriptor = MTLIOCommandQueueDescriptor::new();
         descriptor.setType(MTLIOCommandQueueType::Serial);
+        // Each command buffer contains one synchronous load. Bound each queue's I/O worker allocation.
+        descriptor.setMaxCommandsInFlight(1);
         let queue = device
             .as_raw()
             .newIOCommandQueueWithDescriptor_error(&descriptor)
@@ -297,6 +299,30 @@ mod tests {
     use super::*;
 
     static NEXT_TEST_FILE_ID: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn test_file_to_buffer_with_multiple_queues() {
+        let device = Device::system_default();
+        // Keep enough independent owners alive to expose excessive Metal I/O worker allocation.
+        let queues = (0..32).map(|_| BufferIO::new(&device)).collect::<Vec<_>>();
+        let values = (1_u32..=32).collect::<Vec<_>>();
+        let source = Buffer::from_slice(&device, &values);
+        let restored = Buffer::new_zeroed(&device, 4);
+        let file_path = test_file_path();
+        let file = queues[0].create(&file_path, BufferIOFileCacheMode::Cached).unwrap();
+        queues[0]
+            .buffer_to_file(&source, 0, &file, 0, source.len_bytes_u64())
+            .unwrap();
+        file.sync_all().unwrap();
+
+        for (index, queue) in queues.iter().enumerate() {
+            queue.file_to_buffer(&file, index as u64 * 4, &restored, 0, 4).unwrap();
+            assert_eq!(restored.read_typed::<u32>(0, 1), [values[index]]);
+        }
+
+        drop(file);
+        std::fs::remove_file(file_path).unwrap();
+    }
 
     #[test]
     fn test_buffer_file_round_trip_preserves_selected_range() {

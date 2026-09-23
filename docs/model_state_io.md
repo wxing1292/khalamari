@@ -361,6 +361,12 @@ It is not an executor-core trait.
 This queue is independent from the `MTL4CommandQueue` in the compute `Stream`.
 `MetalRuntime` owns one compute `Stream` and one `BufferIO`.
 
+The I/O queue sets `maxCommandsInFlight` to `1`.
+Each command buffer contains one load, and the caller waits for completion before it submits the next chunk.
+The serial queue type controls command ordering; it does not replace this concurrency limit.
+The limit bounds I/O worker allocation when multiple `BufferIO` owners coexist.
+The regression test keeps 32 independent queues alive and verifies a read through each queue.
+
 `BufferIO::create` creates a new output file with an explicit `BufferIOFileCacheMode`.
 `BufferIO::open` opens an existing input file with the same explicit mode.
 Both methods return one `BufferIOFile`.
@@ -508,7 +514,7 @@ It must not publish a partial placement change.
 
 The following details remain open:
 
-- The `BufferIO` concurrency and queue-count policy.
+- The concurrency and queue-count policy for future asynchronous `BufferIO` transfers.
 - Batched Metal command submission for many noncontiguous selected read ranges.
 - Vectored positional writes for many noncontiguous selected write ranges.
 - Uncached range alignment and other filesystem tuning.
