@@ -6,6 +6,7 @@ use inference_backend_metal::metal::Device;
 use inference_backend_metal::metal::ReplayU32;
 use inference_executor_core::attn::GDNCore;
 use inference_executor_core::attn::GDNReplayShape;
+use inference_executor_core::attn::gdn::GDNOutputGate;
 use inference_runtime_core::compute::ExecutorHibernationPlan;
 
 use super::GDNRequestStateTable;
@@ -921,5 +922,6 @@ fn core(model_layer_index: usize) -> GDNCore {
         v_head_dim: 4,
         conv_kernel_size: 3,
         q_scale: 1.0,
+        output_gate: GDNOutputGate::Silu,
     }
 }

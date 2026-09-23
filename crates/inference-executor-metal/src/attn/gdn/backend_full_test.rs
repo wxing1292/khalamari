@@ -8,6 +8,7 @@ use inference_backend_metal::metal::ReplayArguments;
 use inference_backend_metal::metal::ReplayU32;
 use inference_backend_metal::metal::Stream;
 use inference_executor_core::attn::GDNCore;
+use inference_executor_core::attn::gdn::GDNOutputGate;
 use inference_executor_core::attn::gdn::reference::GDNRecurrentReferenceInput;
 use inference_executor_core::attn::gdn::reference::gdn_output_norm_gate_reference;
 use inference_executor_core::attn::gdn::reference::gdn_recurrent_reference;
@@ -46,10 +47,22 @@ const STATE_CANARY: f32 = -0.75;
 
 #[test]
 fn test_replay_matches_cpu_reference_across_independent_active_domains() {
+    assert_replay_matches_cpu_reference(GDNOutputGate::Silu);
+}
+
+#[test]
+fn test_sigmoid_gate_replay_matches_cpu_reference_across_independent_active_domains() {
+    assert_replay_matches_cpu_reference(GDNOutputGate::Sigmoid);
+}
+
+fn assert_replay_matches_cpu_reference(output_gate: GDNOutputGate) {
     let device = Device::system_default();
     let stream = Stream::new(&device);
     let runtime = MetalReplayRuntime::new(&stream);
-    let core = fixture_core();
+    let core = GDNCore {
+        output_gate,
+        ..fixture_core()
+    };
     let config = fixture_config();
     let component = GDN::new(&device, core.clone(), config);
     let scratch = component.new_scratch(NUM_TOTAL_TOKENS as usize);
@@ -444,6 +457,7 @@ fn fixture_core() -> GDNCore {
         v_head_dim: V_HEAD_DIM,
         conv_kernel_size: CONV_KERNEL_SIZE,
         q_scale: (QK_HEAD_DIM as f32).sqrt().recip(),
+        output_gate: GDNOutputGate::Silu,
     }
 }
 

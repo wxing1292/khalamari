@@ -2,6 +2,7 @@ use std::mem::size_of;
 
 use half::bf16;
 use inference_executor_core::attn::gdn::GDNCore;
+use inference_executor_core::attn::gdn::GDNOutputGate;
 use inference_executor_core::attn::gdn::reference::GDNRecurrentReferenceInput;
 use inference_executor_core::attn::gdn::reference::gdn_output_norm_gate_reference;
 use inference_executor_core::attn::gdn::reference::gdn_recurrent_reference;
@@ -12,6 +13,7 @@ use super::Compute;
 use super::ComputeConstants;
 use super::Config;
 use super::MixedInvocation;
+use super::OutputGate;
 use super::Shape;
 use super::chunkwise;
 use super::recurrent;
@@ -83,6 +85,7 @@ fn test_shape_rejects_shader_count_overflow() {
         conv_kernel_size: 2,
         q_scale: 1.0,
         norm_eps: 1.0e-6,
+        output_gate: OutputGate::Silu,
     };
     let shape = Shape {
         num_total_reqs: 1,
@@ -342,6 +345,7 @@ fn test_candidate_state_preserves_distinct_source_slots() {
         conv_kernel_size: 3,
         q_scale: 128.0_f32.sqrt().recip(),
         norm_eps: 1.0e-6,
+        output_gate: OutputGate::Silu,
     };
     let shape = fixture_shape(NUM_REQS as u32, (NUM_REQS * ROWS_PER_REQ) as u32);
     let kernels = Compute::new(&device, config);
@@ -382,6 +386,10 @@ fn test_candidate_state_preserves_distinct_source_slots() {
         v_head_dim: config.v_head_dim as usize,
         conv_kernel_size: config.conv_kernel_size as usize,
         q_scale: config.q_scale,
+        output_gate: match config.output_gate {
+            OutputGate::Silu => GDNOutputGate::Silu,
+            OutputGate::Sigmoid => GDNOutputGate::Sigmoid,
+        },
     };
     let source_conv = fixture_values(NUM_REQS * conv_stride, 0.015625, 17);
     let source_recurrent = fixture_values(NUM_REQS * recurrent_stride, 0.0078125, 19);
@@ -772,6 +780,19 @@ fn test_mixed_replay_matches_reference_across_prefill_decode_counts() {
 }
 
 #[test]
+fn test_sigmoid_gate_replay_matches_reference_across_prefill_decode_counts() {
+    assert_mixed_replay(
+        Config {
+            output_gate: OutputGate::Sigmoid,
+            ..fixture_config()
+        },
+        4,
+        48,
+        &[(0, &[1]), (1, &[17, 2, 3]), (2, &[5, 11, 4, 2]), (0, &[1, 4, 2, 3])],
+    );
+}
+
+#[test]
 fn test_chunkwise_replay_across_head_dimensions() {
     // Cover padded V rows and multiple V blocks, including wider Q/K heads.
     for (qk_head_dim, v_head_dim) in [(32, 4), (128, 128), (192, 32), (256, 8), (256, 128)] {
@@ -1017,6 +1038,10 @@ fn assert_mixed_replay(config: Config, num_total_reqs: usize, num_total_tokens: 
                         hidden_dim: config.v_head_dim as usize,
                         qk_head_dim: config.qk_head_dim as usize,
                         v_head_dim: config.v_head_dim as usize,
+                        output_gate: match config.output_gate {
+                            OutputGate::Silu => GDNOutputGate::Silu,
+                            OutputGate::Sigmoid => GDNOutputGate::Sigmoid,
+                        },
                         ..fixture_core(fixture_shape(1, (prefix_end - begin) as u32))
                     };
                     let prefix_cu = [0, (prefix_end - begin) as u32];
@@ -1755,6 +1780,7 @@ fn fixture_config() -> Config {
         conv_kernel_size: 3,
         q_scale: 1.0,
         norm_eps: 1.0e-6,
+        output_gate: OutputGate::Silu,
     }
 }
 
@@ -1768,6 +1794,7 @@ fn fixture_core(_shape: Shape) -> GDNCore {
         v_head_dim: fixture_config().v_head_dim as usize,
         conv_kernel_size: fixture_config().conv_kernel_size as usize,
         q_scale: 1.0,
+        output_gate: GDNOutputGate::Silu,
     }
 }
 

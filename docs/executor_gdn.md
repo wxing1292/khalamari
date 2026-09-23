@@ -59,6 +59,17 @@ recurrent_states          [L, S, Hv, Dv, Dqk]
 conv_states               [L, S, Cqkv, Ks]
 ```
 
+`GDNCore.output_gate` selects `GDNOutputGate::Silu` or `GDNOutputGate::Sigmoid` during initialization.
+The executor lowers this choice into backend `compute::Config.output_gate`.
+The generated Metal source fixes the activation for the component lifetime.
+Output normalization computes `RMSNorm(recurrent_output) * gate(z)` before the output projection.
+The Qwen35 configuration builder selects SiLU explicitly.
+The choice does not change recurrence gates, state storage, or replay submission arguments.
+Both activations have CPU-reference and full-component replay coverage for Prefill and Decode.
+The backend `gdn_attn` benchmark includes `replay128` cases to amortize submission overhead.
+These cases repeat the same forward from immutable source-state slots 128 times per submission.
+Their reported time covers all 128 invocations.
+
 `conv_qkv` contains the short-convolution output after SiLU. It is not the raw convolution accumulation.
 The state arena stores BF16. State arithmetic uses F32.
 

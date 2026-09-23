@@ -9,6 +9,7 @@ use inference_backend_metal::metal::ReplayU32;
 use inference_backend_metal::operators::affine_quantized;
 use inference_executor_core::attn::GDNCore;
 use inference_executor_core::attn::GDNReplayShape;
+use inference_executor_core::attn::gdn::GDNOutputGate;
 use inference_executor_core::backend::recorder::Recorder;
 
 use crate::attn::gdn::batch_metadata::GDNMetadataBuffers;
@@ -419,6 +420,10 @@ fn compute_config(core: &GDNCore, config: GDNMetalConfig) -> backend_compute::Co
             .expect("GDN conv_kernel_size must fit u32"),
         q_scale: core.q_scale,
         norm_eps: config.norm_eps,
+        output_gate: match core.output_gate {
+            GDNOutputGate::Silu => backend_compute::OutputGate::Silu,
+            GDNOutputGate::Sigmoid => backend_compute::OutputGate::Sigmoid,
+        },
     }
 }
 

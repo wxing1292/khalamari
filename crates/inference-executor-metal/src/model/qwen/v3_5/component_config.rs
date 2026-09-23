@@ -4,6 +4,7 @@ use inference_backend_metal::components::rms_norm_rope::RopeScaling;
 use inference_backend_metal::metal::Dtype;
 use inference_executor_core::attn::GDNCore;
 use inference_executor_core::attn::GQACore;
+use inference_executor_core::attn::gdn::GDNOutputGate;
 use inference_executor_core::def::ModelExecutorError;
 use inference_executor_core::mlp::dense::DenseMLPCore;
 use inference_executor_core::mlp::moe::GatedMoECore;
@@ -91,6 +92,7 @@ pub fn derive_qwen35_gdn_configs(
         v_head_dim: text.linear_value_head_dim,
         conv_kernel_size: text.linear_conv_kernel_dim,
         q_scale: (text.linear_key_head_dim as f32).sqrt().recip(),
+        output_gate: GDNOutputGate::Silu,
     };
     core.validate();
     let metal = GDNMetalConfig {

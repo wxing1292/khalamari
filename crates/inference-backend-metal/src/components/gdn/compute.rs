@@ -125,6 +125,14 @@ struct KernelSetConstants {
 struct ComputeConstants {
     model: ModelGeometry,
     kernels: KernelSetConstants,
+    output_gate: OutputGate,
+}
+
+/// Initialization-time activation for the projected output gate.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OutputGate {
+    Silu,
+    Sigmoid,
 }
 
 /// Construction input for the generic GDN compute graph.
@@ -155,6 +163,7 @@ pub struct Config {
     pub conv_kernel_size: u32,
     pub q_scale: f32,
     pub norm_eps: f32,
+    pub output_gate: OutputGate,
 }
 
 impl Config {
@@ -265,6 +274,7 @@ impl ComputeConstants {
             .expect("GDN chunkwise V-row tile must divide Dv and fit device shared memory");
         let constants = Self {
             model: config.model_geometry(),
+            output_gate: config.output_gate,
             kernels: KernelSetConstants {
                 short_conv: KernelConstants {
                     thread_block: ThreadBlockConstants {
@@ -451,7 +461,8 @@ fn source(constants: ComputeConstants) -> String {
          {qk_head_dim}u;\nconstant uint num_v_heads = {num_v_heads}u;\nconstant uint v_head_dim = \
          {v_head_dim}u;\nconstant uint conv_kernel_size = {conv_kernel_size}u;\nconstant uint qkv_dim = \
          {qkv_dim}u;\nconstant uint conv_state_len = {conv_state_len}u;\nconstant uint \
-         output_norm_gate_required_threads = {output_norm_gate_required_threads}u;",
+         output_norm_gate_required_threads = {output_norm_gate_required_threads}u;\nconstant bool \
+         output_gate_is_sigmoid = {output_gate_is_sigmoid};",
         num_qk_heads = model.num_qk_heads,
         qk_head_dim = model.qk_head_dim,
         num_v_heads = model.num_v_heads,
@@ -460,6 +471,7 @@ fn source(constants: ComputeConstants) -> String {
         qkv_dim = model.qkv_dim(),
         conv_state_len = model.conv_state_len(),
         output_norm_gate_required_threads = constants.kernels.output_norm_gate.thread_block.required_threads,
+        output_gate_is_sigmoid = constants.output_gate == OutputGate::Sigmoid,
     );
     let common_source = GDN_COMPUTE_SOURCE.replacen("using namespace metal;", &source_constants, 1);
     format!(
@@ -700,7 +712,7 @@ impl Compute {
     /// Output norm + gate execution:
     ///
     /// ```text
-    /// recurrent_output [T, Hv, Dv] -> RMS norm * SiLU(z)
+    /// recurrent_output [T, Hv, Dv] -> RMS norm * configured output gate(z)
     ///   -> norm_gated_output [T, Hv, Dv]
     /// OutputNormGateThreadBlockTask / threadblock:
     ///   { flat_token_index, v_head_index }

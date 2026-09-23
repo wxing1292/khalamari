@@ -29,27 +29,35 @@ fn bench_gdn_attn(c: &mut Criterion) {
     let mut group = c.benchmark_group("metal/gdn-attn");
 
     for (batch, tokens) in GDN_CASES {
-        let fixture = GDNFixture::new(&device, batch, tokens);
-        let num_tokens = batch * tokens;
-        group.throughput(Throughput::Elements(num_tokens as u64));
-        group.bench_function(
-            format!("core-ragged_recurrent/replay/batch{batch}/tokens{tokens}"),
-            |b| {
-                b.iter(|| {
-                    fixture.run_with_state_replay();
-                    black_box(&fixture.norm_gated_output);
-                });
-            },
-        );
-        group.bench_function(
-            format!("forward_candidate_state_update/replay/batch{batch}/tokens{tokens}"),
-            |b| {
-                b.iter(|| {
-                    fixture.run_forward_candidate_state_update_replay();
-                    black_box(&fixture.recurrent_state_arena);
-                });
-            },
-        );
+        for num_invocations in [1, 128] {
+            let fixture = GDNFixture::new(&device, batch, tokens, num_invocations);
+            let path = if num_invocations == 1 {
+                "replay".to_owned()
+            } else {
+                format!("replay{num_invocations}")
+            };
+            group.throughput(Throughput::Elements(
+                batch as u64 * tokens as u64 * num_invocations as u64,
+            ));
+            group.bench_function(
+                format!("core-ragged_recurrent/{path}/batch{batch}/tokens{tokens}"),
+                |b| {
+                    b.iter(|| {
+                        fixture.run_with_state_replay();
+                        black_box(&fixture.norm_gated_output);
+                    });
+                },
+            );
+            group.bench_function(
+                format!("forward_candidate_state_update/{path}/batch{batch}/tokens{tokens}"),
+                |b| {
+                    b.iter(|| {
+                        fixture.run_forward_candidate_state_update_replay();
+                        black_box(&fixture.recurrent_state_arena);
+                    });
+                },
+            );
+        }
     }
 
     group.finish();
@@ -64,7 +72,7 @@ struct GDNFixture {
 }
 
 impl GDNFixture {
-    fn new(device: &Device, batch: u32, tokens: u32) -> Self {
+    fn new(device: &Device, batch: u32, tokens: u32, num_invocations: usize) -> Self {
         let shape = backend_compute::Shape {
             num_total_reqs: batch,
             num_total_tokens: batch * tokens,
@@ -77,6 +85,7 @@ impl GDNFixture {
             conv_kernel_size: GDN_CONV_KERNEL_SIZE,
             q_scale: 1.0 / (GDN_QK_HEAD_DIM as f32).sqrt(),
             norm_eps: 1.0e-6,
+            output_gate: backend_compute::OutputGate::Silu,
         };
         let cu_token_values = (0..=shape.num_total_reqs)
             .map(|req_index| (req_index * tokens) as i32)
@@ -156,7 +165,7 @@ impl GDNFixture {
             recurrent_output: &recurrent_output,
             norm_gated_output: &norm_gated_output,
         };
-        let with_state_replay = build_gdn_with_state_replay(&stream, &kernels, shape, buffers);
+        let with_state_replay = build_gdn_with_state_replay(&stream, &kernels, shape, buffers, num_invocations);
         let forward_candidate_state_update_replay = build_gdn_forward_candidate_state_update_replay(
             &stream,
             &kernels,
@@ -166,6 +175,7 @@ impl GDNFixture {
                 flat_conv_state_write_slots: &candidate_dst_slot_ids,
                 ..buffers
             },
+            num_invocations,
         );
 
         let fixture = Self {
@@ -196,14 +206,17 @@ fn build_gdn_with_state_replay(
     kernels: &backend_compute::Compute,
     shape: backend_compute::Shape,
     buffers: backend_compute::Buffers<'_>,
+    num_invocations: usize,
 ) -> ReplayProgram {
     let mut builder = stream.create_replay_program();
-    builder.record(kernels.invoke(
-        shape,
-        buffers,
-        ReplayU32::Fixed(shape.num_total_reqs),
-        ReplayU32::Fixed(shape.num_total_tokens),
-    ));
+    for _ in 0..num_invocations {
+        builder.record(kernels.invoke(
+            shape,
+            buffers,
+            ReplayU32::Fixed(shape.num_total_reqs),
+            ReplayU32::Fixed(shape.num_total_tokens),
+        ));
+    }
     builder.build()
 }
 
@@ -212,14 +225,17 @@ fn build_gdn_forward_candidate_state_update_replay(
     kernels: &backend_compute::Compute,
     shape: backend_compute::Shape,
     buffers: backend_compute::Buffers<'_>,
+    num_invocations: usize,
 ) -> ReplayProgram {
     let mut builder = stream.create_replay_program();
-    builder.record(kernels.invoke_with_candidate_state_update(
-        shape,
-        buffers,
-        ReplayU32::Fixed(shape.num_total_reqs),
-        ReplayU32::Fixed(shape.num_total_tokens),
-    ));
+    for _ in 0..num_invocations {
+        builder.record(kernels.invoke_with_candidate_state_update(
+            shape,
+            buffers,
+            ReplayU32::Fixed(shape.num_total_reqs),
+            ReplayU32::Fixed(shape.num_total_tokens),
+        ));
+    }
     builder.build()
 }
 

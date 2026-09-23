@@ -216,8 +216,9 @@ kernel void gdn_compute_output_norm_gate_bf16(
          v_dim_index += output_norm_gate_required_threads) {
         const uint output_index = token_head_base + v_dim_index;
         const float z_value = z[output_index];
-        const float silu_z = z_value / (1.0f + metal::exp(-z_value));
+        const float denominator = 1.0f + metal::exp(-z_value);
+        const float gate = output_gate_is_sigmoid ? 1.0f / denominator : z_value / denominator;
         const float normalized_value = recurrent_output[output_index] * inv_rms * float(norm_weight[v_dim_index]);
-        norm_gated_output[output_index] = bfloat16_t(normalized_value * silu_z);
+        norm_gated_output[output_index] = bfloat16_t(normalized_value * gate);
     }
 }

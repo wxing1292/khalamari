@@ -15,6 +15,7 @@ use inference_backend_metal::metal::ReplayU32;
 use inference_backend_metal::metal::Stream;
 use inference_backend_metal::operators::affine_quantized;
 use inference_executor_core::attn::GDNCore;
+use inference_executor_core::attn::gdn::GDNOutputGate;
 use inference_executor_metal::attn::gdn::backend::GDN;
 use inference_executor_metal::attn::gdn::backend::GDNInput;
 use inference_executor_metal::attn::gdn::backend::GDNLayerStateBindings;
@@ -168,6 +169,7 @@ impl<'a> RealGDNFixture<'a> {
             v_head_dim: GDN_V_HEAD_DIM,
             conv_kernel_size: GDN_CONV_KERNEL_SIZE,
             q_scale: (GDN_QK_HEAD_DIM as f32).sqrt().recip(),
+            output_gate: GDNOutputGate::Silu,
         };
         let config = GDNMetalConfig {
             group_size: GROUP_SIZE,
@@ -695,6 +697,7 @@ fn gdn_compute_config() -> backend_compute::Config {
             .try_into()
             .expect("GDN conv kernel size must fit u32"),
         q_scale: (GDN_QK_HEAD_DIM as f32).sqrt().recip(),
+        output_gate: backend_compute::OutputGate::Silu,
         norm_eps: GDN_EPS,
     }
 }

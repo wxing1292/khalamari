@@ -1,6 +1,7 @@
 //! CPU reference implementation for Gated DeltaNet primitive tests.
 
 use crate::attn::gdn::GDNCore;
+use crate::attn::gdn::GDNOutputGate;
 use crate::reference::sigmoid_reference;
 use crate::reference::silu_reference;
 use crate::reference::softplus_reference;
@@ -202,7 +203,13 @@ pub fn gdn_output_norm_gate_reference(
                 .iter()
                 .zip(z_row)
                 .zip(norm_weight)
-                .map(|((&value, &gate), &weight)| value * inv_rms * weight * silu_reference(gate)),
+                .map(|((&value, &gate), &weight)| {
+                    let gate = match core.output_gate {
+                        GDNOutputGate::Silu => silu_reference(gate),
+                        GDNOutputGate::Sigmoid => sigmoid_reference(gate),
+                    };
+                    value * inv_rms * weight * gate
+                }),
         );
     }
     output
@@ -238,6 +245,27 @@ mod tests {
             v_head_dim: 2,
             conv_kernel_size: 3,
             q_scale: 1.0,
+            output_gate: GDNOutputGate::Silu,
+        }
+    }
+
+    #[test]
+    fn test_output_gate_activation_after_norm() {
+        let mut core = core();
+        let recurrent = [1.0; 6];
+        let z = [-2.0, -1.0, 0.0, 0.0, 1.0, 2.0];
+        let inv_rms = (1.0_f32 + 1.0e-6).sqrt().recip();
+        for output_gate in [GDNOutputGate::Silu, GDNOutputGate::Sigmoid] {
+            core.output_gate = output_gate;
+            let actual = gdn_output_norm_gate_reference(&core, &recurrent, &z, &[1.0; 2], 1.0e-6);
+            for (&value, &z) in actual.iter().zip(&z) {
+                let numerator = match output_gate {
+                    GDNOutputGate::Silu => z,
+                    GDNOutputGate::Sigmoid => 1.0,
+                };
+                let expected = inv_rms * numerator / (1.0 + (-z).exp());
+                assert!((value - expected).abs() < 1.0e-6);
+            }
         }
     }
 

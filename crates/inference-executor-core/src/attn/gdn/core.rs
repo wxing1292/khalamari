@@ -1,4 +1,11 @@
-/// Immutable GDN tensor geometry in canonical ABI order.
+/// Activation applied to the projected output gate after RMS normalization.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GDNOutputGate {
+    Silu,
+    Sigmoid,
+}
+
+/// Immutable GDN semantics and tensor geometry in canonical ABI order.
 ///
 /// ```text
 /// projected/conv Q: [T, Hqk, Dqk]
@@ -22,6 +29,7 @@ pub struct GDNCore {
     pub v_head_dim: usize,
     pub conv_kernel_size: usize,
     pub q_scale: f32,
+    pub output_gate: GDNOutputGate,
 }
 
 impl GDNCore {
@@ -133,6 +141,7 @@ mod tests {
             v_head_dim: 2,
             conv_kernel_size: 2,
             q_scale: 1.0,
+            output_gate: super::GDNOutputGate::Silu,
         }
         .validate();
     }
