@@ -45,15 +45,7 @@ template <typename T, int group_size, int bits, int qmm_min_rows>
       scales + weight_row * (K / group_size),
       biases + weight_row * (K / group_size), x + long(route) * K, Xs, Ws, K,
       short(end - route), num_cols, simd_gid, simd_lid);
-  for (auto it = result.begin(); it != result.end(); ++it) {
-    if (!result.is_valid_element(it)) continue;
-    const auto coordinate = it.get_multidimensional_index();
-    const uint row = coordinate[1];
-    const int n = simd_gid * 16 + coordinate[0];
-    if (route + row < end && n < num_cols) {
-      y[long(route + row) * N + col + n] = T(*it);
-    }
-  }
+  result.store_result_safe(y + long(route) * N + col, N, short2(num_cols, end - route));
 }
 
 template <typename T, int group_size, int bits, int qmm_min_rows>
@@ -110,20 +102,13 @@ template <typename T, int group_size, int bits, int qmm_min_rows>
       up_scales + weight_row * (K / group_size),
       up_biases + weight_row * (K / group_size), x + long(route) * K, Xs, Ws, K,
       short(end - route), num_cols, simd_gid, simd_lid);
-  // Both projections use the same tile factory and therefore the same layout.
-  auto up_it = up.begin();
-  for (auto it = gate.begin(); it != gate.end(); ++it, ++up_it) {
-    if (!gate.is_valid_element(it)) continue;
-    const auto coordinate = it.get_multidimensional_index();
-    const uint row = coordinate[1];
-    const int n = simd_gid * 16 + coordinate[0];
-    if (route + row < end && n < num_cols) {
-      // Match the sparse MLP activation's storage-dtype rounding stages.
-      const T g = T(*it);
-      const T u = T(*up_it);
-      const T sigmoid = T(1.0f / (1.0f + exp(-float(g))));
-      const T silu = T(float(g) * float(sigmoid));
-      y[long(route + row) * N + col + n] = T(float(silu) * float(u));
-    }
+  // Preserve the sparse MLP activation's storage-dtype rounding stages.
+  for (short i = 0; i < decltype(gate.Ctile)::kElemsPerTile; ++i) {
+    const T g = T(gate.Ctile.elems()[i]);
+    const T u = T(up.Ctile.elems()[i]);
+    const T sigmoid = T(1.0f / (1.0f + exp(-float(g))));
+    const T silu = T(float(g) * float(sigmoid));
+    gate.Ctile.elems()[i] = float(T(float(silu) * float(u)));
   }
+  gate.store_result_safe(y + long(route) * N + col, N, short2(num_cols, end - route));
 }

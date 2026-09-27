@@ -492,9 +492,9 @@ impl ExpertMajorKernels {
         let qmm_name = format!("{entry}_qmm");
         let template = template_definition(&qmm_name, &qmm_name, &args);
         let source = affine_quantized_source(&format!(
-            "{MIXED_AFFINE_SOURCE}\n{TENSOR_OPS_SOURCE}\n{EXPERT_MAJOR_TENSOR_OPS_SOURCE}\n{template}"
+            "{MIXED_AFFINE_SOURCE}\n{STEEL_SOURCE}\n{EXPERT_MAJOR_STEEL_SOURCE}\n{template}"
         ));
-        let qmm = CompiledKernel::new_tensor_ops(device, &source, &qmm_name);
+        let qmm = CompiledKernel::new(device, &source, &qmm_name);
         validate_qmm_pipeline(device, Dtype::Float32, KernelKind::QmmBm8Bn32, &qmm);
         let qmv_name = format!("{entry}_qmv");
         let template = template_definition(&qmv_name, &qmv_name, &args);
@@ -1913,9 +1913,9 @@ fn affine_quantized_source(template_definition: &str) -> String {
 
 const EXPERT_MAJOR_QMV_SOURCE: &str = include_str!("metal/affine_quantized_expert_major_qmv.metal");
 
-const EXPERT_MAJOR_TENSOR_OPS_SOURCE: &str = include_str!("metal/affine_quantized_expert_major_tensor_ops.metal");
+const EXPERT_MAJOR_STEEL_SOURCE: &str = include_str!("metal/affine_quantized_expert_major_steel.metal");
 
-const TENSOR_OPS_SOURCE: &str = include_str!("metal/affine_quantized_tensor_ops.metal");
+const STEEL_SOURCE: &str = include_str!("metal/affine_quantized_steel.metal");
 
 const QMM_STEEL_SOURCE: &str = include_str!("metal/affine_quantized_qmm_steel.metal");
 

@@ -8,7 +8,6 @@ use objc2_metal::MTLCompileOptions;
 use objc2_metal::MTLComputePipelineDescriptor;
 use objc2_metal::MTLComputePipelineState;
 use objc2_metal::MTLDevice;
-use objc2_metal::MTLLanguageVersion;
 use objc2_metal::MTLLibrary;
 use objc2_metal::MTLPipelineOption;
 
@@ -19,12 +18,6 @@ pub struct CompiledKernel {
     pipeline: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
 }
 
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-struct CompilerKey {
-    device: usize,
-    language_version: MTLLanguageVersion,
-}
-
 struct CompiledLibrary {
     library: Retained<ProtocolObject<dyn MTLLibrary>>,
     pipelines: HashMap<String, Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
@@ -32,26 +25,13 @@ struct CompiledLibrary {
 
 thread_local! {
     // Compare complete source text. Hash collisions must not select another shader.
-    static LIBRARY_CACHE: RefCell<HashMap<CompilerKey, HashMap<String, CompiledLibrary>>> =
+    static LIBRARY_CACHE: RefCell<HashMap<usize, HashMap<String, CompiledLibrary>>> =
         RefCell::new(HashMap::new());
 }
 
 impl CompiledKernel {
     pub fn new(device: &Device, source: &str, function_name: &str) -> Self {
-        Self::compile(device, source, function_name, MTLCompileOptions::new())
-    }
-
-    pub fn new_tensor_ops(device: &Device, source: &str, function_name: &str) -> Self {
-        let options = MTLCompileOptions::new();
-        options.setLanguageVersion(MTLLanguageVersion::Version4_0);
-        Self::compile(device, source, function_name, options)
-    }
-
-    fn compile(device: &Device, source: &str, function_name: &str, options: Retained<MTLCompileOptions>) -> Self {
-        let key = CompilerKey {
-            device: device.as_raw() as *const _ as *const () as usize,
-            language_version: options.languageVersion(),
-        };
+        let key = device.as_raw() as *const _ as *const () as usize;
         let pipeline = LIBRARY_CACHE.with(|cache| {
             let mut cache = cache.borrow_mut();
             let libraries = cache.entry(key).or_default();
@@ -59,7 +39,7 @@ impl CompiledKernel {
                 return library.pipeline(device, function_name);
             }
             let mut library = CompiledLibrary {
-                library: compile_library(device, source, &options),
+                library: compile_library(device, source),
                 pipelines: HashMap::new(),
             };
             let pipeline = library.pipeline(device, function_name);
@@ -115,17 +95,14 @@ impl CompiledLibrary {
     }
 }
 
-fn compile_library(
-    device: &Device,
-    source: &str,
-    options: &MTLCompileOptions,
-) -> Retained<ProtocolObject<dyn MTLLibrary>> {
+fn compile_library(device: &Device, source: &str) -> Retained<ProtocolObject<dyn MTLLibrary>> {
+    let options = MTLCompileOptions::new();
     // Match MLX JIT compilation so MLX-derived qdot/math kernels keep parity.
     #[allow(deprecated)]
     options.setFastMathEnabled(false);
     device
         .as_raw()
-        .newLibraryWithSource_options_error(&NSString::from_str(source), Some(options))
+        .newLibraryWithSource_options_error(&NSString::from_str(source), Some(&options))
         .expect("Metal library compile failed")
 }
 
@@ -143,16 +120,9 @@ mod tests {
         let source = "#include <metal_stdlib>\nusing namespace metal;\nkernel void add(device uint* v [[buffer(0)]], \
                       uint i [[thread_position_in_grid]]) { v[i] += 1; }\nkernel void multiply(device uint* v \
                       [[buffer(0)]], uint i [[thread_position_in_grid]]) { v[i] *= 2; }";
-        let compile = |source: &str, name: &str| {
-            let options = MTLCompileOptions::new();
-            options.setLanguageVersion(MTLLanguageVersion::Version3_1);
-            CompiledKernel::compile(&device, source, name, options)
-        };
+        let compile = |source: &str, name: &str| CompiledKernel::new(&device, source, name);
         let add = compile(source, "add");
-        let key = CompilerKey {
-            device: device.as_raw() as *const _ as *const () as usize,
-            language_version: MTLLanguageVersion::Version3_1,
-        };
+        let key = device.as_raw() as *const _ as *const () as usize;
         let library = LIBRARY_CACHE.with(|cache| cache.borrow()[&key][source].library.clone());
         let multiply = compile(source, "multiply");
         let add_again = compile(source, "add");
@@ -164,20 +134,18 @@ mod tests {
             assert_eq!(cached.pipelines.len(), 2);
         });
         let changed = compile(&source.replace("+= 1", "+= 3"), "add");
-        let tensor_ops = CompiledKernel::new_tensor_ops(&device, source, "multiply");
         assert!(!std::ptr::eq(add.as_raw(), changed.as_raw()));
-        assert!(!std::ptr::eq(multiply.as_raw(), tensor_ops.as_raw()));
         let stream = Stream::new(&device);
         let values = Buffer::from_slice(&device, &[1_u32, 2, 3]);
         let mut recorder = stream.create_replay_program();
-        for kernel in [&add_again, &multiply, &changed, &tensor_ops] {
+        for kernel in [&add_again, &multiply, &changed] {
             recorder.record_with_barrier_before(Invocation {
                 kernel,
                 values: &values,
             });
         }
         stream.submit_replay(&recorder.build()).wait();
-        assert_eq!(values.read_typed::<u32>(0, 3), [14, 18, 22]);
+        assert_eq!(values.read_typed::<u32>(0, 3), [7, 9, 11]);
     }
 
     struct Invocation<'a> {

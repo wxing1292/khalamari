@@ -450,11 +450,10 @@ Each active QMM thread block covers up to eight rows of one expert and 32 output
 The recorded grid contains one candidate per route and output-column tile. `expert_offsets` identifies the starts
 of eight-row tiles within each expert. Other candidates return before loading operands or reaching a barrier.
 Different expert tiles can execute independently.
-The gate/up and down stages reuse `affine_qmm_tile` from `operators/metal/affine_quantized_tensor_ops.metal`.
-Their manual accumulator access follows the shared
-[cooperative tensor access contract](engineering_conventions.md#metal-cooperative-tensor-access).
+The gate/up and down stages reuse `affine_qmm_tile` from `operators/metal/affine_quantized_steel.metal`.
+The helper uses Steel `BlockMMA` with native 8x8 SIMDgroup matrix operations.
 F32 operands use a 32-element K tile. For group size 64, each thread block uses 5760 bytes: an `8 × 36` input tile
-and a `32 × 36` weight tile. Gate/up reuses this scratch across its two projections and keeps both F32 cooperative
+and a `32 × 36` weight tile. Gate/up reuses this scratch across its two projections and keeps both F32 REGISTER
 accumulators for the fused activation. Short-segment QMV retains its paired gate/up dot products within each SIMDgroup.
 The private `ExpertMajorKernels` owner compiles and selects both families for gate/up and down. Each stage retains
 its own buffer bindings.
@@ -761,7 +760,7 @@ Top-k ordering differences alone are not a performance target.
 Route probability semantics must identify logits or already-softmaxed probabilities.
 They must also identify whether routing renormalizes selected top-k probabilities.
 
-Token-major QMV and expert-major TensorOps QMM must match the sparse CPU reference within its numerical tolerance.
+Token-major QMV and expert-major Steel QMM must match the sparse CPU reference within its numerical tolerance.
 Expert QMM uses F32 dequantized operands and accumulators. QMV applies scale and bias to packed-weight dot products.
 The different F32 reduction orders can change output bits.
 The sparse activation retains its existing storage-dtype rounding stages.

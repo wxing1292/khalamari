@@ -64,7 +64,7 @@ See [Execution Resources](#execution-resources) for retention and residency, and
 
 ### Compilation reuse
 
-`CompiledKernel` caches libraries by Metal device, complete source text, and MSL language version.
+`CompiledKernel` caches libraries by Metal device and complete source text.
 Each cached library owns its pipelines, indexed by function name.
 Different entry points in the same source reuse one library.
 The library and pipeline caches belong to the compiling thread and live until that thread exits.
@@ -74,19 +74,13 @@ The affine quantized operator shares one expanded header prefix across its speci
 Header paths and contents must remain fixed after their first use. Restart the process to use changed headers.
 These caches do not persist across process restarts.
 
-### TensorOps kernels
+### Kernel compilation
 
-`CompiledKernel::new_tensor_ops` compiles TensorOps source with MSL 4.0. The pipeline cache includes the language version.
-Both compiler paths disable fast math and retain indirect-command-buffer support.
-TensorOps commands use the existing recorder and Stream. They do not use the separate Apple Neural Engine framework.
-
-All manual cooperative tensor access follows the repository's
-[validity and layout contract](../../docs/engineering_conventions.md#metal-cooperative-tensor-access).
-
-Apple's [inline ML sample](https://developer.apple.com/documentation/metal/running-inline-ml-operations-in-a-shader-with-metal-4)
-provides tiled matmul building blocks. The [WWDC26 attention session](https://developer.apple.com/videos/play/wwdc2026/330/)
-describes cooperative tensors, row reductions, and attention composition.
-The project supplies its own paged-cache, mixed-request, and GDN state-boundary integration.
+`CompiledKernel::new` uses one compiler configuration with fast math disabled and indirect-command-buffer support.
+Dense MLP, routed MoE, and GQA use Steel SIMDgroup matrix operations.
+GDN uses register recurrence. These paths share the existing recorder and Stream.
+Kernel initialization checks the selected pipeline's SIMD width, thread limit, and SMEM capacity.
+The M3 source has no TensorOps compiler mode or GPU-family selector.
 
 ### GPU timestamps
 
