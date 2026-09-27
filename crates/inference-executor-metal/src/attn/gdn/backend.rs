@@ -1,5 +1,4 @@
 use inference_backend_metal::components::gdn::compute as backend_compute;
-use inference_backend_metal::components::gdn::qkvabz_split as backend_qkvabz_split;
 use inference_backend_metal::metal::Buffer;
 use inference_backend_metal::metal::Device;
 use inference_backend_metal::metal::Dtype;
@@ -129,11 +128,7 @@ pub type GDNOutput<'a> = &'a Buffer;
 /// hidden_state (BF16)
 ///   -> qkvabz
 ///   -> scratch.qkvabz (BF16)
-///   -> qkvabz_to_qkv_a_b_z
-///      |- scratch.qkv (BF16)
-///      |- scratch.a (BF16)
-///      |- scratch.b (BF16)
-///      `- scratch.z (BF16)
+///   -> QKV/A/B/Z column views (offset + row stride, no copy)
 ///             |
 ///             v
 ///          compute (BF16 storage, F32 arithmetic)
@@ -152,7 +147,6 @@ pub struct GDN {
     device: Device,
     core: GDNCore,
     qkvabz: affine_quantized::Matmul,
-    qkvabz_to_qkv_a_b_z: backend_qkvabz_split::Compute,
     compute: backend_compute::Compute,
     output: affine_quantized::Matmul,
 }
@@ -184,7 +178,6 @@ impl GDN {
                     config,
                 ),
             ),
-            qkvabz_to_qkv_a_b_z: backend_qkvabz_split::Compute::new(device, qkvabz_split_config(&core)),
             compute: backend_compute::Compute::new(device, compute_config(&core, config)),
             output: affine_quantized::Matmul::new(
                 device,
@@ -341,25 +334,11 @@ impl ReplayLayer for GDN {
             0,
         );
         recorder.record_with_barrier_before(ReplayOp::opaque(qkvabz));
-        let split_shape = backend_qkvabz_split::Shape {
-            num_total_tokens: shape.num_total_tokens,
-        };
-        let split_buffers = backend_qkvabz_split::Buffers {
-            qkvabz: scratch.qkvabz,
-            qkv: scratch.qkv,
-            a: scratch.a,
-            b: scratch.b,
-            z: scratch.z,
-        };
-        let split = self
-            .qkvabz_to_qkv_a_b_z
-            .invoke(split_shape, split_buffers, active_tokens);
-        recorder.record_with_barrier_before(ReplayOp::opaque(split));
         let compute_buffers = backend_compute::Buffers {
-            qkv: scratch.qkv,
-            a: scratch.a,
-            b: scratch.b,
-            z: scratch.z,
+            qkv: scratch.qkvabz,
+            a: scratch.qkvabz,
+            b: scratch.qkvabz,
+            z: scratch.qkvabz,
             conv_weight: weights.conv_weight,
             norm_weight: weights.norm_weight,
             a_log: weights.a_log,
@@ -410,6 +389,7 @@ impl ReplayLayer for GDN {
 
 fn compute_config(core: &GDNCore, config: GDNMetalConfig) -> backend_compute::Config {
     backend_compute::Config {
+        projection_layout: backend_compute::ProjectionLayout::PackedQkvabz,
         num_qk_heads: core.num_qk_heads.try_into().expect("GDN query/key heads must fit u32"),
         qk_head_dim: core.qk_head_dim.try_into().expect("GDN qk_head_dim must fit u32"),
         num_v_heads: core.num_v_heads.try_into().expect("GDN num_v_heads must fit u32"),
@@ -432,13 +412,6 @@ fn compute_shape(shape: GDNReplayShape) -> backend_compute::Shape {
         num_total_reqs: shape.num_total_reqs,
         num_total_tokens: shape.num_total_tokens,
     }
-}
-
-fn qkvabz_split_config(core: &GDNCore) -> backend_qkvabz_split::Config {
-    let qkv_dim = core.qkv_dim().try_into().expect("GDN qkv_dim must fit u32");
-    let num_v_heads = core.num_v_heads.try_into().expect("GDN num_v_heads must fit u32");
-    let v_dim = core.v_dim().try_into().expect("GDN v_dim must fit u32");
-    backend_qkvabz_split::Config::new(qkv_dim, num_v_heads, v_dim)
 }
 
 fn affine_config(

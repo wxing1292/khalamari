@@ -5,10 +5,6 @@ use inference_executor_core::attn::GDNCore;
 
 pub struct GDNScratch {
     qkvabz: Buffer,
-    qkv: Buffer,
-    a: Buffer,
-    b: Buffer,
-    z: Buffer,
     conv_qkv: Buffer,
     recurrent_output: Buffer,
     norm_gated_output: Buffer,
@@ -17,10 +13,6 @@ pub struct GDNScratch {
 #[derive(Clone, Copy)]
 pub struct GDNScratchBindings<'a> {
     pub qkvabz: &'a Buffer,
-    pub qkv: &'a Buffer,
-    pub a: &'a Buffer,
-    pub b: &'a Buffer,
-    pub z: &'a Buffer,
     pub conv_qkv: &'a Buffer,
     pub recurrent_output: &'a Buffer,
     pub norm_gated_output: &'a Buffer,
@@ -38,10 +30,6 @@ impl GDNScratch {
 
         Self {
             qkvabz: Buffer::new_zeroed_elements(device, tensor_elements(core.qkvabz_dim()), Dtype::Bfloat16),
-            qkv: Buffer::new_zeroed_elements(device, tensor_elements(core.qkv_dim()), Dtype::Bfloat16),
-            a: Buffer::new_zeroed_elements(device, tensor_elements(core.num_v_heads), Dtype::Bfloat16),
-            b: Buffer::new_zeroed_elements(device, tensor_elements(core.num_v_heads), Dtype::Bfloat16),
-            z: Buffer::new_zeroed_elements(device, tensor_elements(core.v_dim()), Dtype::Bfloat16),
             conv_qkv: Buffer::new_zeroed_elements(device, tensor_elements(core.qkv_dim()), Dtype::Bfloat16),
             recurrent_output: Buffer::new_zeroed_elements(device, tensor_elements(core.v_dim()), Dtype::Bfloat16),
             norm_gated_output: Buffer::new_zeroed_elements(device, tensor_elements(core.v_dim()), Dtype::Bfloat16),
@@ -51,10 +39,6 @@ impl GDNScratch {
     pub fn bindings(&self) -> GDNScratchBindings<'_> {
         GDNScratchBindings {
             qkvabz: &self.qkvabz,
-            qkv: &self.qkv,
-            a: &self.a,
-            b: &self.b,
-            z: &self.z,
             conv_qkv: &self.conv_qkv,
             recurrent_output: &self.recurrent_output,
             norm_gated_output: &self.norm_gated_output,

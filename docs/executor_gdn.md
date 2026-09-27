@@ -29,7 +29,6 @@ Metal sources live in `crates/inference-backend-metal/src/components/metal/`:
 - `gdn_compute_recurrent.metal`: final/candidate recurrent reference paths.
 - `gdn_compute_replay.metal`: recurrent outputs and the F32 replay log.
 - `gdn_state_replay.metal`: accepted-prefix recurrent and convolution commit.
-- `gdn_qkvabz_split.metal`: projection split.
 - `gdn_state_page_read.metal` and `gdn_state_page_write.metal`: immutable page I/O.
 
 Source separation does not add per-component replay caches or per-layer submissions.
@@ -69,6 +68,11 @@ Both activations have CPU-reference and full-component replay coverage for Prefi
 The backend `gdn_attn` benchmark includes `replay128` cases to amortize submission overhead.
 These cases repeat the same forward from immutable source-state slots 128 times per submission.
 Their reported time covers all 128 invocations.
+
+Production projections store one packed `[T, QKV + A + B + Z]` buffer.
+Short convolution, recurrence gates, and output gating read column offsets with the packed row stride.
+They do not copy projection outputs into separate tensors.
+`ProjectionLayout` fixes these offsets during initialization. Separate bindings remain available to standalone component callers.
 
 `conv_qkv` contains the short-convolution output after SiLU. It is not the raw convolution accumulation.
 The state arena stores BF16. State arithmetic uses F32.
@@ -116,7 +120,7 @@ The scheduler owns input construction. The executor validates request and token 
 The production graph is fixed:
 
 ```text
-QKVABZ projection -> split -> short convolution
+QKVABZ projection -> strided views -> short convolution
                               |             |
                    chunkwise prefix     replay suffix
                               |             |
@@ -343,7 +347,6 @@ The full-forward GDN benchmark reports `mixed_replay`. Its subcomponent keys are
 
 ```text
 qkvabz
-qkvabz-to-qkv-a-b-z
 compute_mixed_replay
 output
 ```

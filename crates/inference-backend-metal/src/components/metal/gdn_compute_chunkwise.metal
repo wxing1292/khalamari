@@ -170,13 +170,13 @@ kernel void gdn_compute_chunkwise_state_bf16(
                     bfloat(float(conv_qkv[k_value_index]) * k_inverse_norm);
             }
             if (lane == 0) {
-                const ulong gate_index = (ulong)flat_token_index * num_v_heads + v_head_index;
-                const float dt = float(a[gate_index]) + float(dt_bias[v_head_index]);
+                const ulong gate_index = (ulong)flat_token_index * input_gate_stride + v_head_index;
+                const float dt = float(a[input_a_offset + gate_index]) + float(dt_bias[v_head_index]);
                 const float softplus = dt > 20.0f ? dt : metal::log(1.0f + metal::exp(dt));
                 const float decay_rate = -metal::exp(float(a_log[v_head_index]));
                 q_inv_norm[token_index_in_chunk] = metal::rsqrt(q_square_sum + 1.0e-6f) * q_scale;
                 cumulative_log_decay[token_index_in_chunk] = decay_rate * softplus;
-                beta[token_index_in_chunk] = 1.0f / (1.0f + metal::exp(-float(b[gate_index])));
+                beta[token_index_in_chunk] = 1.0f / (1.0f + metal::exp(-float(b[input_b_offset + gate_index])));
             }
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);

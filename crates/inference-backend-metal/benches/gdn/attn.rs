@@ -78,6 +78,7 @@ impl GDNFixture {
             num_total_tokens: batch * tokens,
         };
         let config = backend_compute::Config {
+            projection_layout: backend_compute::ProjectionLayout::Separate,
             num_qk_heads: GDN_QK_HEADS,
             qk_head_dim: GDN_QK_HEAD_DIM,
             num_v_heads: GDN_V_HEADS,

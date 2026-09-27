@@ -78,6 +78,7 @@ fn test_candidate_register_v_rejects_incomplete_grouped_launch_at_init() {
 #[should_panic(expected = "GDN convolution exceeds the shader u32 count domain")]
 fn test_shape_rejects_shader_count_overflow() {
     let config = Config {
+        projection_layout: super::ProjectionLayout::Separate,
         num_qk_heads: 1,
         qk_head_dim: 32,
         num_v_heads: 1,
@@ -338,6 +339,7 @@ fn test_candidate_state_preserves_distinct_source_slots() {
     let device = Device::system_default();
     let stream = Stream::new(&device);
     let config = Config {
+        projection_layout: super::ProjectionLayout::Separate,
         num_qk_heads: 2,
         qk_head_dim: 128,
         num_v_heads: 4,
@@ -1773,6 +1775,7 @@ fn bf16_round_trip(values: &[f32]) -> Vec<f32> {
 
 fn fixture_config() -> Config {
     Config {
+        projection_layout: super::ProjectionLayout::Separate,
         num_qk_heads: 1,
         qk_head_dim: 32,
         num_v_heads: 1,

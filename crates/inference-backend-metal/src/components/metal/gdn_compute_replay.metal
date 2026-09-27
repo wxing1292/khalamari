@@ -115,9 +115,9 @@ kernel void gdn_compute_replay_bf16(
         }
 
         if (local_simdgroup_index == 0 && qk_dim_thread_index == 0) {
-            const ulong gate_index = (ulong)flat_token_index * num_v_heads + v_head_index;
-            const float beta = 1.0f / (1.0f + metal::exp(-b[gate_index]));
-            const float dt = a[gate_index] + float(dt_bias[v_head_index]);
+            const ulong gate_index = (ulong)flat_token_index * input_gate_stride + v_head_index;
+            const float beta = 1.0f / (1.0f + metal::exp(-b[input_b_offset + gate_index]));
+            const float dt = a[input_a_offset + gate_index] + float(dt_bias[v_head_index]);
             const float sp = dt > 20.0f ? dt : metal::log(1.0f + metal::exp(dt));
             const float decay_rate = -metal::exp(float(a_log[v_head_index]));
             shared_gate[0] = beta;

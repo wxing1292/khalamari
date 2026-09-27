@@ -4,14 +4,20 @@ use crate::components::gdn::state_replay;
 
 #[test]
 fn test_replay_commits_selected_prefixes_across_layers() {
-    for (qk_head_dim, v_head_dim) in [(64, 8), (128, 128), (256, 8)] {
-        assert_replay_commits(Config {
-            num_qk_heads: 2,
-            num_v_heads: 4,
-            qk_head_dim,
-            v_head_dim,
-            ..fixture_config()
-        });
+    for projection_layout in [
+        super::super::ProjectionLayout::Separate,
+        super::super::ProjectionLayout::PackedQkvabz,
+    ] {
+        for (qk_head_dim, v_head_dim) in [(64, 8), (128, 128), (256, 8)] {
+            assert_replay_commits(Config {
+                projection_layout,
+                num_qk_heads: 2,
+                num_v_heads: 4,
+                qk_head_dim,
+                v_head_dim,
+                ..fixture_config()
+            });
+        }
     }
 }
 
@@ -74,6 +80,13 @@ fn assert_replay_commits(config: Config) {
         ],
     );
     let kernels = Compute::new(&device, config);
+    let reference_kernels = Compute::new(
+        &device,
+        Config {
+            projection_layout: super::super::ProjectionLayout::Separate,
+            ..config
+        },
+    );
     let mut expected_outputs = Vec::new();
     for layer in 0..NUM_LAYERS {
         let qkv = bf16_buffer(
@@ -100,6 +113,24 @@ fn assert_replay_commits(config: Config) {
             &device,
             &fixture_values(config.num_recurrent_output_values(shape), 0.03125, 11),
         );
+        let widths = [
+            config.qkv_dim() as usize,
+            config.num_v_heads as usize,
+            config.num_v_heads as usize,
+            (config.num_v_heads * config.v_head_dim) as usize,
+        ];
+        let parts = [&qkv, &a, &b, &z]
+            .into_iter()
+            .zip(widths)
+            .map(|(buffer, width)| buffer.read_typed::<u16>(0, shape.num_total_tokens as usize * width))
+            .collect::<Vec<_>>();
+        let mut packed = Vec::new();
+        for token in 0..shape.num_total_tokens as usize {
+            for (part, width) in parts.iter().zip(widths) {
+                packed.extend_from_slice(&part[token * width..(token + 1) * width]);
+            }
+        }
+        let packed = Buffer::from_slice(&device, &packed);
         let conv_weight = bf16_buffer(
             &device,
             &fixture_values(
@@ -140,7 +171,7 @@ fn assert_replay_commits(config: Config) {
             norm_gated_output: &output,
         };
         let mut reference = stream.create_replay_program();
-        reference.record(kernels.invoke_with_candidate_state_update(
+        reference.record(reference_kernels.invoke_with_candidate_state_update(
             shape,
             buffers,
             ReplayU32::Fixed(2),
@@ -149,6 +180,17 @@ fn assert_replay_commits(config: Config) {
         stream.submit_replay(&reference.build()).wait();
         expected_outputs.push(read_bf16(&output, 0, config.num_recurrent_output_values(shape)));
         write_bf16(&output, 0, &vec![CANARY; config.num_recurrent_output_values(shape)]);
+        let input_buffers = if config.projection_layout == super::super::ProjectionLayout::PackedQkvabz {
+            Buffers {
+                qkv: &packed,
+                a: &packed,
+                b: &packed,
+                z: &packed,
+                ..buffers
+            }
+        } else {
+            buffers
+        };
         let mut forward = stream.create_replay_program();
         forward.record(kernels.invoke_with_replay(
             shape,
@@ -158,7 +200,7 @@ fn assert_replay_commits(config: Config) {
                 recurrent_state_arena: &recurrent,
                 flat_recurrent_state_write_slots: &replay_write,
                 flat_conv_state_write_slots: &replay_write,
-                ..buffers
+                ..input_buffers
             },
             ReplayBuffers {
                 alpha: &alpha,

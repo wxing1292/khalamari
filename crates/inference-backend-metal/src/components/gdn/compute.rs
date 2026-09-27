@@ -124,6 +124,7 @@ struct KernelSetConstants {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ComputeConstants {
     model: ModelGeometry,
+    projection_layout: ProjectionLayout,
     kernels: KernelSetConstants,
     output_gate: OutputGate,
 }
@@ -133,6 +134,14 @@ struct ComputeConstants {
 pub enum OutputGate {
     Silu,
     Sigmoid,
+}
+
+/// Physical storage of the projected inputs. Packed bindings all refer to the
+/// start of `[T, QKV + A + B + Z]`; kernels derive column offsets and row strides.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProjectionLayout {
+    Separate,
+    PackedQkvabz,
 }
 
 /// Construction input for the generic GDN compute graph.
@@ -156,6 +165,7 @@ pub enum OutputGate {
 /// initialization. `q_scale` and `norm_eps` remain kernel arguments.
 #[derive(Clone, Copy, Debug)]
 pub struct Config {
+    pub projection_layout: ProjectionLayout,
     pub num_qk_heads: u32,
     pub qk_head_dim: u32,
     pub num_v_heads: u32,
@@ -275,6 +285,7 @@ impl ComputeConstants {
         let constants = Self {
             model: config.model_geometry(),
             output_gate: config.output_gate,
+            projection_layout: config.projection_layout,
             kernels: KernelSetConstants {
                 short_conv: KernelConstants {
                     thread_block: ThreadBlockConstants {
@@ -307,7 +318,27 @@ impl ComputeConstants {
             },
         };
         constants.validate();
+        let _ = constants.projection_rows();
         constants
+    }
+
+    // (column offset, row stride, logical width), in BF16 elements.
+    fn projection_rows(self) -> [(u32, u32, u32); 4] {
+        let qkv = self.model.qkv_dim();
+        let heads = self.model.num_v_heads;
+        let v = self.model.num_v_heads * self.model.v_head_dim;
+        if self.projection_layout == ProjectionLayout::Separate {
+            return [(0, qkv, qkv), (0, heads, heads), (0, heads, heads), (0, v, v)];
+        }
+        let b = qkv.checked_add(heads).expect("GDN packed B offset must fit u32");
+        let z = b.checked_add(heads).expect("GDN packed Z offset must fit u32");
+        let stride = z.checked_add(v).expect("GDN packed row stride must fit u32");
+        [
+            (0, stride, qkv),
+            (qkv, stride, heads),
+            (b, stride, heads),
+            (z, stride, v),
+        ]
     }
 
     fn validate(self) {
@@ -456,6 +487,13 @@ impl Shape {
 
 fn source(constants: ComputeConstants) -> String {
     let model = constants.model;
+    let rows = constants.projection_rows();
+    let projection_constants = format!(
+        "constant uint input_qkv_stride = {}u;\nconstant uint input_gate_stride = {}u;\nconstant uint input_z_stride \
+         = {}u;\nconstant uint input_a_offset = {}u;\nconstant uint input_b_offset = {}u;\nconstant uint \
+         input_z_offset = {}u;\n",
+        rows[0].1, rows[1].1, rows[3].1, rows[1].0, rows[2].0, rows[3].0,
+    );
     let source_constants = format!(
         "using namespace metal;\n\nconstant uint num_qk_heads = {num_qk_heads}u;\nconstant uint qk_head_dim = \
          {qk_head_dim}u;\nconstant uint num_v_heads = {num_v_heads}u;\nconstant uint v_head_dim = \
@@ -473,7 +511,11 @@ fn source(constants: ComputeConstants) -> String {
         output_norm_gate_required_threads = constants.kernels.output_norm_gate.thread_block.required_threads,
         output_gate_is_sigmoid = constants.output_gate == OutputGate::Sigmoid,
     );
-    let common_source = GDN_COMPUTE_SOURCE.replacen("using namespace metal;", &source_constants, 1);
+    let common_source = GDN_COMPUTE_SOURCE.replacen(
+        "using namespace metal;",
+        &format!("{source_constants}\n{projection_constants}"),
+        1,
+    );
     format!(
         "{common_source}\n{}\n{}",
         recurrent::source(constants),
@@ -967,22 +1009,22 @@ fn validate_buffers(constants: ComputeConstants, shape: Shape, buffers: &Buffers
             "GDN {name} byte offset must be BF16-aligned"
         );
     }
-    assert!(
-        buffers.qkv.len_bytes() >= model.num_qkv_values(shape) * size_of::<u16>(),
-        "GDN qkv buffer is too small"
-    );
-    assert!(
-        buffers.a.len_bytes() >= shape.num_total_tokens as usize * model.num_v_heads as usize * size_of::<u16>(),
-        "GDN a buffer is too small"
-    );
-    assert!(
-        buffers.b.len_bytes() >= shape.num_total_tokens as usize * model.num_v_heads as usize * size_of::<u16>(),
-        "GDN b buffer is too small"
-    );
-    assert!(
-        buffers.z.len_bytes() >= model.num_recurrent_output_values(shape) * size_of::<u16>(),
-        "GDN z buffer is too small"
-    );
+    for ((name, buffer), (offset, stride, width)) in [
+        ("qkv", buffers.qkv),
+        ("a", buffers.a),
+        ("b", buffers.b),
+        ("z", buffers.z),
+    ]
+    .into_iter()
+    .zip(constants.projection_rows())
+    {
+        // Positive u32 dimensions and a validated row layout fit u64 elements.
+        let end = offset as u64 + (shape.num_total_tokens as u64 - 1) * stride as u64 + width as u64;
+        assert!(
+            buffer.len_bytes_u64() / bf16_bytes >= end,
+            "GDN {name} buffer is too small"
+        );
+    }
     assert_eq!(
         buffers.conv_weight.len_bytes(),
         model.num_conv_weight_values() * size_of::<u16>()

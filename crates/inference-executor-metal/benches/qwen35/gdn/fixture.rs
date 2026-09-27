@@ -6,7 +6,6 @@ use std::time::Instant;
 
 use half::bf16;
 use inference_backend_metal::components::gdn::compute as backend_compute;
-use inference_backend_metal::components::gdn::qkvabz_split as backend_qkvabz_split;
 use inference_backend_metal::metal::Buffer;
 use inference_backend_metal::metal::Device;
 use inference_backend_metal::metal::Dtype;
@@ -131,10 +130,6 @@ struct RealGDNFixture<'a> {
     next_conv_state: Buffer,
     recurrent_state_arena: Buffer,
     qkvabz: Buffer,
-    qkv: Buffer,
-    a: Buffer,
-    b: Buffer,
-    z: Buffer,
     conv_qkv: Buffer,
     recurrent_output: Buffer,
     norm_gated_output: Buffer,
@@ -227,10 +222,6 @@ impl<'a> RealGDNFixture<'a> {
             ),
         );
         let qkvabz = Buffer::new_zeroed(device, num_tokens as usize * GDN_QKVABZ_DIM * size_of::<u16>());
-        let qkv = Buffer::new_zeroed(device, num_tokens as usize * GDN_CONV_DIM * size_of::<u16>());
-        let a = Buffer::new_zeroed(device, num_tokens as usize * GDN_V_HEADS * size_of::<u16>());
-        let b = Buffer::new_zeroed(device, num_tokens as usize * GDN_V_HEADS * size_of::<u16>());
-        let z = Buffer::new_zeroed(device, num_tokens as usize * GDN_V_DIM * size_of::<u16>());
         let conv_qkv = Buffer::new_zeroed(device, num_tokens as usize * GDN_CONV_DIM * size_of::<u16>());
         let recurrent_output = Buffer::new_zeroed(device, num_tokens as usize * GDN_V_DIM * size_of::<u16>());
         let norm_gated_output = Buffer::new_zeroed(device, num_tokens as usize * GDN_V_DIM * size_of::<u16>());
@@ -251,10 +242,6 @@ impl<'a> RealGDNFixture<'a> {
                 next_hidden_state: &next_hidden_state,
                 scratch: GDNScratchBindings {
                     qkvabz: &qkvabz,
-                    qkv: &qkv,
-                    a: &a,
-                    b: &b,
-                    z: &z,
                     conv_qkv: &conv_qkv,
                     recurrent_output: &recurrent_output,
                     norm_gated_output: &norm_gated_output,
@@ -296,10 +283,6 @@ impl<'a> RealGDNFixture<'a> {
             next_conv_state,
             recurrent_state_arena,
             qkvabz,
-            qkv,
-            a,
-            b,
-            z,
             conv_qkv,
             recurrent_output,
             norm_gated_output,
@@ -461,14 +444,6 @@ impl<'a> RealGDNFixture<'a> {
         let mut builder = self.stream.create_replay_program();
         let qkvabz_config = gdn_qkvabz_affine_config();
         let qkvabz = affine_quantized::Matmul::new(device, qkvabz_config);
-        let qkvabz_to_qkv_a_b_z = backend_qkvabz_split::Compute::new(
-            device,
-            backend_qkvabz_split::Config::new(
-                GDN_CONV_DIM.try_into().expect("GDN qkv_dim must fit u32"),
-                GDN_V_HEADS.try_into().expect("GDN V heads must fit u32"),
-                GDN_V_DIM.try_into().expect("GDN V dim must fit u32"),
-            ),
-        );
         let compute = backend_compute::Compute::new(device, gdn_compute_config());
         let output_config = gdn_output_affine_config();
         let output = affine_quantized::Matmul::new(device, output_config);
@@ -487,28 +462,15 @@ impl<'a> RealGDNFixture<'a> {
             &self.weights.qkvabz_biases,
             0,
         ));
-        builder.record_with_barrier_before(qkvabz_to_qkv_a_b_z.invoke(
-            backend_qkvabz_split::Shape {
-                num_total_tokens: self.num_tokens,
-            },
-            backend_qkvabz_split::Buffers {
-                qkvabz: &self.qkvabz,
-                qkv: &self.qkv,
-                a: &self.a,
-                b: &self.b,
-                z: &self.z,
-            },
-            ReplayU32::Fixed(self.num_tokens),
-        ));
         let compute_shape = backend_compute::Shape {
             num_total_reqs: self.num_reqs,
             num_total_tokens: self.num_tokens,
         };
         let compute_buffers = backend_compute::Buffers {
-            qkv: &self.qkv,
-            a: &self.a,
-            b: &self.b,
-            z: &self.z,
+            qkv: &self.qkvabz,
+            a: &self.qkvabz,
+            b: &self.qkvabz,
+            z: &self.qkvabz,
             conv_weight: &self.weights.conv_weight,
             norm_weight: &self.weights.norm_weight,
             a_log: &self.weights.a_log,
@@ -557,14 +519,6 @@ impl<'a> RealGDNFixture<'a> {
         let device = &self.device;
         let qkvabz_config = gdn_qkvabz_affine_config();
         let qkvabz = affine_quantized::Matmul::new(device, qkvabz_config);
-        let qkvabz_to_qkv_a_b_z = backend_qkvabz_split::Compute::new(
-            device,
-            backend_qkvabz_split::Config::new(
-                GDN_CONV_DIM.try_into().expect("GDN qkv_dim must fit u32"),
-                GDN_V_HEADS.try_into().expect("GDN V heads must fit u32"),
-                GDN_V_DIM.try_into().expect("GDN V dim must fit u32"),
-            ),
-        );
         let compute = backend_compute::Compute::new(device, gdn_compute_config());
         let output_config = gdn_output_affine_config();
         let output = affine_quantized::Matmul::new(device, output_config);
@@ -586,31 +540,15 @@ impl<'a> RealGDNFixture<'a> {
                 0,
             ),
         );
-        let split_replay = build_single_invocation_replay(
-            &self.stream,
-            qkvabz_to_qkv_a_b_z.invoke(
-                backend_qkvabz_split::Shape {
-                    num_total_tokens: self.num_tokens,
-                },
-                backend_qkvabz_split::Buffers {
-                    qkvabz: &self.qkvabz,
-                    qkv: &self.qkv,
-                    a: &self.a,
-                    b: &self.b,
-                    z: &self.z,
-                },
-                ReplayU32::Fixed(self.num_tokens),
-            ),
-        );
         let compute_shape = backend_compute::Shape {
             num_total_reqs: self.num_reqs,
             num_total_tokens: self.num_tokens,
         };
         let compute_buffers = backend_compute::Buffers {
-            qkv: &self.qkv,
-            a: &self.a,
-            b: &self.b,
-            z: &self.z,
+            qkv: &self.qkvabz,
+            a: &self.qkvabz,
+            b: &self.qkvabz,
+            z: &self.qkvabz,
             conv_weight: &self.weights.conv_weight,
             norm_weight: &self.weights.norm_weight,
             a_log: &self.weights.a_log,
@@ -667,7 +605,6 @@ impl<'a> RealGDNFixture<'a> {
         );
 
         self.measure_subcomponent("qkvabz", &qkvabz_replay, warmup_iters, iters, runs);
-        self.measure_subcomponent("qkvabz-to-qkv-a-b-z", &split_replay, warmup_iters, iters, runs);
         self.measure_subcomponent("compute_mixed_replay", &compute_replay, warmup_iters, iters, runs);
         self.measure_subcomponent("output", &output_replay, warmup_iters, iters, runs);
     }
@@ -689,6 +626,7 @@ impl<'a> RealGDNFixture<'a> {
 
 fn gdn_compute_config() -> backend_compute::Config {
     backend_compute::Config {
+        projection_layout: backend_compute::ProjectionLayout::PackedQkvabz,
         num_qk_heads: GDN_QK_HEADS.try_into().expect("GDN qk heads must fit u32"),
         qk_head_dim: GDN_QK_HEAD_DIM.try_into().expect("GDN qk head dim must fit u32"),
         num_v_heads: GDN_V_HEADS.try_into().expect("GDN V heads must fit u32"),

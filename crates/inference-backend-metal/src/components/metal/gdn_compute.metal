@@ -60,7 +60,7 @@ kernel void gdn_compute_short_conv(
                 const uint state_offset = (src_state_slot * qkv_dim + channel_index) * conv_state_len + state_index;
                 x = conv_state[conv_state_base + (ulong)state_offset];
             } else {
-                const uint input_offset = (flat_token_begin + uint(sequence_index)) * qkv_dim + channel_index;
+                const ulong input_offset = (ulong)(flat_token_begin + uint(sequence_index)) * input_qkv_stride + channel_index;
                 x = qkv[input_offset];
             }
             const uint weight_offset = channel_index * conv_kernel_size + kernel_index;
@@ -69,7 +69,7 @@ kernel void gdn_compute_short_conv(
         if constexpr (SaveReplay) {
             if (req_index >= num_active_chunkwise_requests) {
                 const uint replay_token_index = flat_token_index - cu_tokens[num_active_chunkwise_requests];
-                replay_qkv[(replay_token_offset + replay_token_index) * qkv_dim + channel_index] = qkv[global_linear_index];
+                replay_qkv[(replay_token_offset + replay_token_index) * qkv_dim + channel_index] = qkv[(ulong)flat_token_index * input_qkv_stride + channel_index];
             }
         }
         conv_qkv[global_linear_index] = bfloat16_t(acc / (1.0f + metal::exp(-acc)));
@@ -94,7 +94,7 @@ kernel void gdn_compute_short_conv(
                 (src_state_slot * qkv_dim + channel_index) * conv_state_len + src_state_index;
             x = conv_state[conv_state_base + (ulong)state_offset];
         } else {
-            const uint input_offset = (flat_token_begin + uint(sequence_index)) * qkv_dim + channel_index;
+            const ulong input_offset = (ulong)(flat_token_begin + uint(sequence_index)) * input_qkv_stride + channel_index;
             x = qkv[input_offset];
         }
         if (write_final_conv_state != 0 && state_slot != GDN_INVALID_STATE_SLOT_ID) {
@@ -155,7 +155,7 @@ kernel void gdn_compute_candidate_conv_state_bf16(
         const uint state_offset = (src_state_slot * qkv_dim + channel_index) * conv_state_len + src_state_index;
         x = conv_state[conv_state_base + (ulong)state_offset];
     } else {
-        const uint input_offset = (flat_token_begin + uint(sequence_index)) * qkv_dim + channel_index;
+        const ulong input_offset = (ulong)(flat_token_begin + uint(sequence_index)) * input_qkv_stride + channel_index;
         x = qkv[input_offset];
     }
     const uint dst_offset = (state_slot * qkv_dim + channel_index) * conv_state_len + state_index;
@@ -215,7 +215,7 @@ kernel void gdn_compute_output_norm_gate_bf16(
          v_dim_index < v_head_dim;
          v_dim_index += output_norm_gate_required_threads) {
         const uint output_index = token_head_base + v_dim_index;
-        const float z_value = z[output_index];
+        const float z_value = z[input_z_offset + (ulong)flat_token_index * input_z_stride + v_head_index * v_head_dim + v_dim_index];
         const float denominator = 1.0f + metal::exp(-z_value);
         const float gate = output_gate_is_sigmoid ? 1.0f / denominator : z_value / denominator;
         const float normalized_value = recurrent_output[output_index] * inv_rms * float(norm_weight[v_dim_index]);
