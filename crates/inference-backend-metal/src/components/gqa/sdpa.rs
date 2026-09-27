@@ -133,7 +133,7 @@ impl ExecutionVariant {
             && matches!(profile, (128, 8 | 16) | (256, 8 | 16 | 32))
             && config.q_heads_per_kv_head() <= 8
             && matches!(map.max_q_tokens, 8 | 16)
-            && matches!(map.kv_tokens_per_iteration, 8 | 16)
+            && matches!(map.kv_tokens_per_iteration, 8 | 16 | 32)
             && map.required_threads == map.max_q_tokens / 8 * map.max_q_heads * 32
             && map.required_threads <= 256
             && reduce.max_q_tokens == map.max_q_tokens
@@ -190,6 +190,9 @@ impl Registry {
                 }
             }
             variants.push(tiled_q_variant(config, full_q_heads));
+            if config.head_dim == 256 {
+                variants.push(ExecutionVariant::tiled_q(config, 8, 32, full_q_heads));
+            }
         }
         Self::from_variants(config, variants)
     }
@@ -234,7 +237,7 @@ fn supports_tiled_q(config: Config) -> bool {
 
 fn single_q_variant(config: Config) -> ExecutionVariant {
     let kv_tokens_per_iteration = config.head_dim.clamp(32, 256).next_power_of_two();
-    // TensorOps partitions KV tiles across SIMDgroups. Four groups retain enough
+    // SingleQ partitions KV tiles across SIMDgroups. Four groups retain enough
     // parallelism without the shared-memory cost of the former eight-group map.
     let required_threads = kv_tokens_per_iteration.min(128);
     let max_q_heads = config.q_heads_per_kv_head().min(8);
@@ -276,9 +279,9 @@ mod tests {
         let d128_page8 = Registry::new(config(128, 8, 8));
         let unsupported = Registry::new(config(256, 8, 4));
 
-        assert_eq!(d256_page32.variants().len(), 3);
-        assert_eq!(d256_page16.variants().len(), 3);
-        assert_eq!(d256_page8.variants().len(), 3);
+        assert_eq!(d256_page32.variants().len(), 4);
+        assert_eq!(d256_page16.variants().len(), 4);
+        assert_eq!(d256_page8.variants().len(), 4);
         assert_eq!(d128_page16.variants().len(), 2);
         assert_eq!(d128_page8.variants().len(), 2);
         assert_eq!(unsupported.variants().len(), 1);

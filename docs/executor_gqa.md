@@ -11,7 +11,7 @@ Use these sections for common tasks:
 | Understand kernel selection and replay capacity | [Backend constants and variants](#backend-constants-and-variants) and [Replay contract](#replay-contract) |
 | Trace tensors and page bindings | [Data flow and bindings](#data-flow-and-bindings) |
 | Select correctness checks and benchmarks | [Tests and benches](#tests-and-benches) |
-| Review measured FP8 conversion results | [FP8 KV-cache conversion evidence](#fp8-kv-cache-conversion-evidence) |
+| Check KV storage and numerical bounds | [FP8 KV-cache storage and validation](#fp8-kv-cache-storage-and-validation) |
 
 ## Source layout
 
@@ -96,8 +96,8 @@ crates/inference-backend-metal/src/components/
     gqa_fp8.metal                      shared packed FP8-to-BF16 decode
     gqa_split_kv_single_q_map.metal     Metal SplitKV SingleQ map source
     gqa_split_kv_single_q_reduce.metal  Metal SplitKV SingleQ reduce source
-    gqa_split_kv_tiled_q.metal          Metal SplitKV TiledQ map/reduce source
-    gqa_split_kv_tiled_q_tensor_ops.metal  Metal 4 TensorOps TiledQ map
+    gqa_split_kv_tiled_q_map.metal      Steel SplitKV TiledQ map source
+    gqa_split_kv_tiled_q_reduce.metal   Metal SplitKV TiledQ reduce source
     gqa_bidi_block_sdpa.metal         Metal bidirectional local-block SDPA partial-output source
     gqa_activation_gate.metal    Metal attention-output gate source
 ```
@@ -718,8 +718,8 @@ parallelism: KV split x KV head x Q-head range
 input: normalized Q plus paged K/V selected through the request page table
 output: partial attention states for one KV range, followed by one numerically stable reduce
 
-SingleQ    one Q token per range; TensorOps rows are Q heads
-TiledQ    several Q tokens per range; TensorOps rows are Q tokens
+SingleQ    one Q token per range; Steel matrix rows are Q heads
+TiledQ    several Q tokens per range; Steel matrix rows are Q tokens
 ```
 
 Both variants use GQA head sharing. If `G = Hq / Hkv`, KV head `k` supplies K/V to Q heads
@@ -784,82 +784,97 @@ reachable model variants are:
 
 For 35B, `TiledQ` uses `max_q_heads=4` below four useful tokens per Q-token range. It uses `max_q_heads=8` otherwise.
 
-Both Map kernels distinguish cooperative storage from the logical matrix tile.
-They follow the shared [cooperative tensor access contract](engineering_conventions.md#metal-cooperative-tensor-access).
-The logical score tile has eight rows and 16 columns. Each PV tile has eight rows and its configured output width.
-After the validity check, these extents bound the shared row statistics and workspace coordinates.
-Active head, token, and KV-range masks remain separate from storage validity.
+Both Map kernels use MLX Steel 8x8 fragments and native SIMDgroup matrix operations.
+QK multiplies BF16 or F32 Q by BF16 K and accumulates F32 scores.
+PV multiplies F32 softmax weights by BF16 V and accumulates an F32 output numerator.
+The Steel fragment layout supplies the lane coordinates for masking, row reductions, and stores.
+There is no TensorOps layout probe, architecture-name check, or alternate Map implementation.
+
+Kernel initialization validates shape, SIMD width, thread limits, and SMEM capacity.
+Replay recording validates borrowed buffer extents and parameter bounds once for that recorded graph.
+Cached replay submission supplies active counts without repeating static shape checks.
+Active head, token, and KV-range masks remain part of attention semantics.
 
 #### `SingleQ`
 
-`SingleQ` always uses `max_q_tokens=1`. Its Map uses Metal 4 TensorOps on every supported GPU.
+`SingleQ` always uses `max_q_tokens=1`.
 One block owns one Q token, one KV head, up to `max_q_heads` Q heads, and one KV split.
-The dispatch grid uses X for map task templates and Y for KV heads and Q-head ranges.
-The task capacity belongs to the dispatch shape. It does not specialize the shader.
+The dispatch grid uses X for Map task templates and Y for KV heads and Q-head ranges.
+Task capacity belongs to the dispatch shape. It does not specialize the shader.
 A new split capacity can reuse the compiled pipeline while it records a new replay.
-The existing task-template and partial-output layouts are unchanged.
 `kv_tokens_per_iteration` remains a planning input. The kernel processes its assigned range in 16-token tiles.
 
-Each SIMDgroup takes a disjoint sequence of 16-token tiles from the split. It retains its own F32 online-softmax state.
-The matrix rows are Q heads, padded to eight. The matrix operations are:
+Each SIMDgroup takes a disjoint sequence of 16-token tiles from the split.
+It loads one 8x8 Q fragment from GMEM for each QK dimension step.
+It does not retain the complete Q tile across KV iterations.
+It retains F32 online-softmax statistics and the output numerator in REGISTER.
+The matrix rows are Q heads, padded to eight.
+Each QK or PV operation consists of 8x8 SIMDgroup matrix operations.
 
 ```text
-QK: [8 Q heads, 64 dimensions] x [64 dimensions, 16 KV tokens]
-      -> [8 Q heads, 16 KV tokens] scores, accumulated across D/64 dimension tiles
-PV: [8 Q heads, 16 KV tokens] x [16 KV tokens, 64 dimensions]
-      -> [8 Q heads, 64 dimensions] output accumulator
+for each assigned 16-token KV tile:
+    GMEM Q -> REGISTER Q[8 Q heads, 8 dimensions], one fragment at a time
+    paged FP8 K -> SMEM BF16 K[16, 64], one dimension slice at a time
+    REGISTER Q x SMEM K^T -> REGISTER F32 scores[8, 16]
+    online softmax -> REGISTER F32 E, maximum, denominator
+    paged FP8 V -> the same SMEM region, one dimension slice at a time
+    REGISTER E x SMEM V -> REGISTER F32 output numerator[8, D]
+
+merge SIMDgroup states -> one partial state per Q head
 ```
 
-The final dimension tile can be incomplete. Query views and K/V staging pad it. Output stores use the actual head width.
-An incomplete head range pads Q rows. Masked rows do not write partial outputs or statistics.
-FP8 K/V tiles decode to BF16. Queries retain the configured F32 or BF16 dtype.
-Probabilities, softmax statistics, and accumulators stay in F32.
+The final dimension fragment can be incomplete. Query loads and K/V staging pad it with zero.
+Output stores use the actual head width. Inactive heads do not write partial states.
+Queries retain the configured F32 or BF16 dtype.
+Probabilities, statistics, and accumulators remain F32.
 
-Each SIMDgroup stages K and V into the same 2 KiB region at different times.
-After attention completes, that region holds one F32 output tile for the cross-SIMDgroup reduction.
-The block merges local maxima, exponential sums, and output numerators before writing one partial state per Q head.
+Each SIMDgroup reuses one 2 KiB SMEM region for K, V, and its final 8x64 F32 output tile.
+The block merges local maxima, exponential sums, and numerators before it writes its partial state.
 This merge adds no GPU command or CPU synchronization.
 
-A block needs `(num_simdgroups * (8*64 + 8*16 + 8*3) + 8*2) * sizeof(float)` bytes of threadgroup memory.
-The D=128 and D=256 production variants use 128 threads and 10,688 bytes.
-The supported 256-thread variant uses 21,312 bytes. This bound does not grow with head width.
-The number of cooperative output tiles does grow with head width; a D=256 head retains four 8x64 output tiles per SIMDgroup.
-The source uses named cooperative tensors and an array of thread pointers, as the GDN chunkwise owner does.
-MSL cannot create an array of cooperative tensors whose storage size depends on the device.
+A block needs `(num_simdgroups * (8*64 + 8*2) + 8*2) * sizeof(float)` SMEM bytes.
+The 128-thread production variant uses 8,512 bytes. The 256-thread variant uses 16,960 bytes.
+This SMEM footprint does not grow with head width. The output REGISTER payload grows with head width.
+Q loads retain only one fragment at a time to limit the live REGISTER payload.
 
 #### `TiledQ`
 
-`TiledQ` uses Metal 4 TensorOps on every supported GPU. There is no hardware flag or alternate SIMDgroup Map kernel.
-The request-shape selector still chooses SingleQ or TiledQ for the batch. It does not classify work from a prefill/decode label alone.
-Initialization validates the selected pipeline's storage, SIMD width, and thread-count limits.
-Token, Q-token-range, and map-task capacities belong to the dispatch shape and replay bindings.
-They do not specialize the Map or Reduce shader. New replay capacities reuse the compiled pipelines.
+The request-shape selector chooses SingleQ or TiledQ from the prepared batch.
+Token, Q-token-range, and Map task capacities belong to the dispatch shape and replay bindings.
+They do not specialize Map or Reduce shaders. New replay capacities reuse compiled pipelines.
+Map and Reduce compile independently. Only Map includes the Steel fragment definitions and FP8 decoder.
 
-One SIMDgroup owns one Q head and eight Q rows. QK uses an 8x16 score tile.
-PV uses 8x128 output tiles; D=256 retains two independent PV accumulators.
-The default KV iteration has 16 tokens. The supported eight-token iteration pads its TensorOps operand tile to 16.
-The kernel masks those padding columns before softmax and advances by the logical iteration length.
+One SIMDgroup owns one Q head and eight Q rows.
+It loads Q once from GMEM into REGISTER before the KV loop.
+Each score tile has eight rows and `kv_tokens_per_iteration` columns.
+The supported KV iteration widths are 8, 16, and 32 tokens. Each width uses complete 8x8 fragments.
+Each SIMDgroup retains its full `[8, D]` F32 output numerator in REGISTER.
 
 ```text
-paged FP8 K/V
-    -> shared BF16 K[16, D+8] and V[16, D+8]
-    -> QK TensorOps, per-query visible-range mask, online softmax
-    -> F32 probabilities x BF16 V
-    -> F32 cooperative output accumulators
-    -> partial BF16 output + F32 statistics
+GMEM Q -> REGISTER BF16 Q[8, D]
+
+for each KV tile:
+    paged FP8 K -> SMEM BF16 KV[KV width, D+8]
+    REGISTER Q x SMEM K^T -> REGISTER F32 scores
+    barrier: all SIMDgroups finish reading K
+    paged FP8 V -> the same SMEM KV region
+    visible-range mask + online softmax -> REGISTER F32 E, maximum, denominator
+    barrier: V staging completes
+    REGISTER E x SMEM V -> REGISTER F32 output numerator
+    barrier: all SIMDgroups finish reading V
+
+normalize -> GMEM BF16 partial output + F32 statistics
 ```
 
-K/V staging uses 8.5 KiB at D=128 and 16.5 KiB at D=256.
-Per-SIMDgroup probabilities and row statistics require an additional `(8*16 + 8*3) * sizeof(float)` bytes.
-Both workspaces are reused across KV iterations. The kernel does not double-buffer them.
-The shared FP8 decoder loads eight cache bytes and produces eight packed BF16 values.
-It converts subnormals with the exact expression `mantissa * 2^-9`.
-The decoder does not use a constant-address-space lookup table. This avoids the table-read Shader Validation error
-observed with ICB-capable pipelines. Signed zero and NaN encodings retain their existing bit patterns.
+K and V share one SMEM tile. The kernel does not double-buffer them.
+The working tile uses `kv_tokens_per_iteration * (D+8) * sizeof(bfloat)` bytes.
+The host reserves SMEM for at least 32 KV rows plus 19 F32 values per query row and head.
+The additional reservation limits threadblock residency. The kernel does not read or write the unused bytes.
+Softmax weights and row statistics remain in REGISTER.
 
-Cooperative-tensor iterators expose logical coordinates. QK and PV exchange row statistics through shared memory.
-The implementation does not assume a device-specific lane layout. `relaxed_precision` remains false.
-Cached prefixes, per-row visibility, causal masking, partial-state layout, and Reduce keep their existing contracts.
+The shared FP8 decoder loads eight cache bytes and produces eight packed BF16 values.
+It converts subnormals with `mantissa * 2^-9` and uses no constant-address-space lookup table.
+Cached prefixes, per-row visibility, causal masks, partial-state layout, and Reduce retain their contracts.
 The Map remains one command in the parent ICB and adds no submission or CPU wait.
 
 Both variants reduce partial attention states by rescaling them to one global maximum. `SingleQ` reduces flat
@@ -1065,11 +1080,10 @@ logical cache block that spans multiple physical page IDs, BF16 and F32 activati
 The cases validate compact KV-split indexing,
 online-softmax iteration merging, request slots, page-table lookup, and causal visibility.
 
-The TiledQ tests exercise the default TensorOps Map with both eight-token and sixteen-token KV iterations.
+The TiledQ tests exercise the Steel Map with 8-, 16-, and 32-token KV iterations.
 They use the production recorder and preserve one partial-state ABI.
 They cover all five supported `(D, tokens_per_page)` profiles, non-contiguous pages, a cached prefix, multiple KV
 heads, Q-head tails, multiple Q fragments, sliding visibility, fully masked rows, and padded replay capacity.
-These correctness tests do not measure M5 performance.
 
 `gqa/split_kv/tiled_q_test.rs` compares the BF16-output SplitKV TiledQ map and reduce variant, with an FP8 E4M3FN KV
 cache, against the same CPU reference. The replay test uses one isolated cache with a total token capacity
@@ -1278,74 +1292,18 @@ Debug in this order:
 3. Attention slice in a layer
 4. Layer ladder
 
-## FP8 KV-cache conversion evidence
+## FP8 KV-cache storage and validation
 
-FP8 E4M3FN reduces persistent GQA KV-cache bytes by exactly 50% relative to BF16. It doubles tokens per 32 KiB page.
-The page-ID table, page ownership, cache lifecycle, replay topology, SingleQ/TiledQ variant set, and model wiring stay
-in place. The conversion does not reduce BF16 activation scratch or F32 arithmetic storage.
+FP8 E4M3FN uses half the persistent GQA KV-cache bytes of BF16. It stores twice as many tokens per 32 KiB page.
+The page-ID table, page ownership, cache lifecycle, and replay topology use the same contracts.
+BF16 activation scratch and F32 arithmetic storage retain their own formats.
 
-The host conversion tests cover fixed encodings, saturation, ties-to-even, exhaustive finite-code round trips, and
-quantization error. For subnormal inputs, the absolute-error bound is `2^-10`. For normal inputs, the relative-error
-bound is `0.0625`. A Metal page-write test covers negative zero, subnormal values, tie values, finite maximum, finite
-overflow, and infinity.
+The host conversion tests cover fixed encodings, saturation, ties-to-even, exhaustive finite-code round trips, and quantization error.
+For subnormal inputs, the absolute-error bound is `2^-10`. For normal inputs, the relative-error bound is `0.0625`.
+A Metal page-write test covers negative zero, subnormal values, tie values, finite maximum, finite overflow, and infinity.
 
-The deterministic 64-token projected-GQA quality fixture compares FP8-cache output with a BF16-cache oracle. The
-fixture has no saturated values. The gate requires maximum absolute error `<= 0.025` and mean absolute error
-`<= 0.005`. The observed errors were `0.024282813` maximum and `0.0031357706` mean. SingleQ, TiledQ, BiDiBlockGQA, and
-the complete GQA owner retain their CPU-oracle parity tests.
+The deterministic 64-token projected-GQA quality fixture compares FP8-cache output with a BF16-cache oracle.
+The fixture requires no saturated values, maximum absolute error `<= 0.025`, and mean absolute error `<= 0.005`.
+SingleQ, TiledQ, BiDiBlockGQA, and the complete GQA owner also retain their CPU-oracle parity tests.
 
-An external RPC run used the Qwen3.6-27B 4-bit checkpoint and a 3,692-token prompt. A selected-hibernation snapshot
-retained one complete logical block. A scan of all 2,048 GQA pages in that block inspected 33,554,432 K bytes and
-33,554,432 V bytes. The maximum decoded magnitudes were 22 for K and 128 for V. The scan found no `+448` or `-448`
-saturation code and no NaN code. Thus, the observed block had at least 3.5 times range headroom. This result rules out
-E4M3FN saturation in this run. It is not a bound for all models or prompts.
-
-The upstream vLLM and SGLang interfaces reviewed on 2026-09-01 are not GQA-specific. Their default KV-cache dtype is
-`auto`. A normal checkpoint therefore keeps its model dtype. SGLang can select E4M3FN under `auto` when the quantization
-configuration declares FP8. On CUDA, vLLM maps `fp8` and `fp8_e4m3` to E4M3 and maps explicit `fp8_e5m2` to E5M2.
-SGLang maps explicit `fp8_e4m3` to `torch.float8_e4m3fn` and explicit `fp8_e5m2` to `torch.float8_e5m2`. Both support a
-unit-scale path, but both recommend calibrated or checkpoint-provided scales when available. See the vLLM
-[`CacheConfig`](https://github.com/vllm-project/vllm/blob/main/vllm/config/cache.py), vLLM
-[FP8 dispatch](https://github.com/vllm-project/vllm/blob/main/csrc/attention/dtype_fp8.cuh), vLLM
-[quantized KV-cache guide](https://github.com/vllm-project/vllm/blob/main/docs/features/quantization/quantized_kvcache.md),
-SGLang [KV-cache dtype mapping](https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/mem_cache/kv_cache_dtype.py),
-and SGLang [quantized KV-cache guide](https://github.com/sgl-project/sglang/blob/main/docs/docs/advanced_features/quantized_kv_cache.mdx).
-
-The packed-read measurement used clean source commit `732759e969ee9569b283286084cf4a0d7c6593a1`. The original FP8
-control used clean commit `18a1ce994337ffde970aa1ae6b8a523ed5e7f280`. The BF16 control used clean commit
-`e8f6d7f24cf9791d24ecc3cda539116772f03405`; its GQA source matches the parent of the FP8 conversion. The GDN changes
-at that control commit do not execute in this component benchmark.
-
-All measurements used the Qwen3.6-27B 4-bit checkpoint, macOS 27.0 build 26A5425a, and an arm64 Apple M3 Max with 48
-GB memory. No `PSI_*` environment variables were set. The screen was locked. Commands ran serially. These are normal
-wall-clock replay measurements. They do not use force-sync or profile-summary mode.
-
-The following results use an existing context of 4,096 tokens. Each value is a median across 11 timed samples. The
-packed FP8 values are the mean of two or three interleaved command medians. The controls use one adjacent command
-median.
-
-| Tokens | Metric | BF16 cache | Original FP8 | Packed FP8 | Packed vs original | Packed vs BF16 |
-| ---: | --- | ---: | ---: | ---: | ---: | ---: |
-| 1 | TiledQ Map/Reduce | 785.788 µs | 863.831 µs | 807.387 µs | -6.53% | +2.75% |
-| 1 | Full GQA replay | 977.861 µs | 1,072.759 µs | 1,001.020 µs | -6.69% | +2.37% |
-| 64 | TiledQ Map/Reduce | 1,666.346 µs | 2,075.997 µs | 1,816.607 µs | -12.49% | +9.02% |
-| 64 | Full GQA replay | 3,000.283 µs | 3,361.380 µs | 3,150.068 µs | -6.28% | +4.99% |
-
-The unchanged SingleQ subcomponent acted as a control during the one-token comparison. Its adjacent medians were
-430.345 µs for original FP8 and 432.240 µs for the packed-read source, a +0.44% difference. This result indicates that
-the TiledQ improvement does not come from a global GPU speed-state change.
-
-The packed path removes much of the original scalar staging cost. FP8 remains slower than BF16 on this device because
-Apple9 M3 Max does not expose native E4M3FN arithmetic to this custom shader. The current implementation performs a
-software decode. This classification follows from the local compiler capability probe and the interleaved component
-measurements.
-
-The exact commands were:
-
-```text
-cargo bench -p inference-executor-metal --bench qwen35_gqa -- --model-dir /Users/wenquanxing/Workspace/models/Qwen3.6-27B-4bit --gqa-model 27b --tokens 1 --contexts 4096 --num-reqs 1 --gqa-split-kv-variants single_q,tiled_q --subcomponents --gqa-subcomponents split-kv-single-q,split-kv-tiled-q --warmup-iters 100 --iters 200 --runs 11
-cargo bench -p inference-executor-metal --bench qwen35_gqa -- --model-dir /Users/wenquanxing/Workspace/models/Qwen3.6-27B-4bit --gqa-model 27b --tokens 64 --contexts 4096 --num-reqs 1 --gqa-split-kv-variants tiled_q --subcomponents --gqa-subcomponents split-kv-tiled-q --warmup-iters 100 --iters 100 --runs 11
-```
-
-Shared GPU serialization, benchmark metrics, and performance-evidence rules are in
-[`executor_benchmarks.md`](executor_benchmarks.md).
+Shared GPU serialization and benchmark methods are in [`executor_benchmarks.md`](executor_benchmarks.md).

@@ -51,7 +51,7 @@ fn test_replay_paged_ranges() {
     let device = Device::system_default();
     let stream = Stream::new(&device);
     for (head_dim, tokens_per_page) in [(128, 8), (128, 16), (256, 8), (256, 16), (256, 32)] {
-        for kv_tokens_per_iteration in [8, 16] {
+        for kv_tokens_per_iteration in [8, 16, 32] {
             let config = Config {
                 num_q_heads: 6,
                 num_kv_heads: 2,

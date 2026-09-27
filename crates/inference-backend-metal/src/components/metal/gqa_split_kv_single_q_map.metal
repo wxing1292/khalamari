@@ -1,7 +1,3 @@
-#include <metal_tensor>
-#include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>
-using namespace mpp::tensor_ops;
-
 // Each SIMDgroup stages one 16-token x 64-dimension K or V tile. K and V
 // reuse this storage; the final cross-SIMDgroup reduction reuses it as F32.
 inline void load_kv_tile(
@@ -54,6 +50,7 @@ kernel void gqa_split_kv_single_q_map(
     uint lane [[thread_index_in_simdgroup]])
 {
     constexpr uint num_simdgroups = REQUIRED_THREADS / 32;
+    constexpr uint num_head_fragments = (KV_HEAD_DIM + 7) / 8;
     constexpr uint num_output_tiles = (KV_HEAD_DIM + 63) / 64;
     const uint task = block.x;
     if (task >= num_active_kv_splits) return;
@@ -68,111 +65,112 @@ kernel void gqa_split_kv_single_q_map(
     const uint kv_end = sdpa_map_task_templates[task * 3 + 2];
     const uint req_slot = req_slots[q_token];
 
+    // Each SIMDgroup owns disjoint KV iterations. Reuse its KV workspace for
+    // the final cross-SIMDgroup merge. Keep E and N in REGISTER; load Q by fragment.
     threadgroup float workspace[num_simdgroups * 8 * 64];
-    threadgroup float probabilities[num_simdgroups * 8 * 16];
-    threadgroup float stats[num_simdgroups * 8 * 3];
+    threadgroup float stats[num_simdgroups * 8 * 2];
     threadgroup float global_stats[8 * 2];
     threadgroup bfloat16_t* kv = reinterpret_cast<threadgroup bfloat16_t*>(workspace + simdgroup_index * 8 * 64);
-    threadgroup float* row_sum = stats + simdgroup_index * 8 * 3;
+    threadgroup float* row_sum = stats + simdgroup_index * 16;
     threadgroup float* row_max = row_sum + 8;
-    threadgroup float* row_scale = row_max + 8;
-    if (lane < 8) { row_sum[lane] = 0.0f; row_max[lane] = -INFINITY; }
-    simdgroup_barrier(mem_flags::mem_threadgroup);
-
-    using Query = tensor<device T, extents<int, dynamic_extent, dynamic_extent>, tensor_inline>;
-    using KV = tensor<threadgroup bfloat16_t, extents<int, 64, 16>, tensor_inline>;
-    using Probability = tensor<threadgroup float, extents<int, 16, 8>, tensor_inline>;
-    constexpr auto qk_desc = matmul2d_descriptor(8, 16, 64, false, true, false, matmul2d_descriptor::mode::multiply_accumulate);
-    constexpr auto pv_desc = matmul2d_descriptor(8, 64, 16, false, false, false, matmul2d_descriptor::mode::multiply_accumulate);
-    matmul2d<qk_desc, execution_simdgroup> qk_op;
-    matmul2d<pv_desc, execution_simdgroup> pv_op;
-    KV kv_tile(kv, extents<int, 64, 16>{});
-    Probability p_tile(probabilities + simdgroup_index * 8 * 16, extents<int, 16, 8>{});
-    using Output = decltype(pv_op.get_destination_cooperative_tensor<Probability, KV, float>());
-    GQA_DECLARE_OUTPUT_TILES
-    for (uint tile = 0; tile < num_output_tiles; ++tile) {
-        for (auto it = outputs[tile]->begin(); it != outputs[tile]->end(); ++it) {
-            if (outputs[tile]->is_valid_element(it)) *it = 0.0f;
-        }
-    }
-    auto running_max = qk_op.get_row_reduction_destination_cooperative_tensor<Query, KV, float>();
-    for (uint i = 0; i < running_max.get_capacity(); ++i) {
-        if (running_max.is_valid_element(i)) running_max[i] = -INFINITY;
-    }
-    auto running_sum = running_max;
-    auto running_scale = running_max;
-    for (uint i = 0; i < running_sum.get_capacity(); ++i) {
-        if (running_sum.is_valid_element(i)) running_sum[i] = 0.0f;
-    }
+    const short2 coord = mlx::steel::BaseMMAFrag<float, 8, 8>::get_coord(ushort(lane));
+    const uint row = uint(coord.y);
+    const uint col = uint(coord.x);
+    mlx::steel::MMATile<float, 1, num_head_fragments> output;
+    float running_max = -INFINITY;
+    float running_sum = 0.0f;
     for (ulong begin = (ulong)kv_begin + simdgroup_index * 16; begin < kv_end; begin += num_simdgroups * 16) {
-        auto scores = qk_op.get_destination_cooperative_tensor<Query, KV, float>();
-        for (auto it = scores.begin(); it != scores.end(); ++it) {
-            if (scores.is_valid_element(it)) *it = 0.0f;
-        }
+        mlx::steel::MMATile<float, 1, 2> scores;
+        #pragma unroll
         for (uint tile = 0; tile < num_output_tiles; ++tile) {
-            const uint dim_begin = tile * 64;
-            load_kv_tile(kv_pages, page_ids, req_slot, gqa_layer_index, kv_head, uint(begin), kv_end, dim_begin, 0, kv, lane);
-            Query query(const_cast<device T*>(q + ((ulong)q_token * NUM_Q_HEADS + head_begin) * KV_HEAD_DIM + dim_begin),
-                        extents<int, dynamic_extent, dynamic_extent>(int(min(64u, uint(KV_HEAD_DIM) - dim_begin)), int(num_heads)),
-                        array<int, 2>{1, KV_HEAD_DIM});
-            qk_op.run(query, kv_tile, scores);
+            load_kv_tile(kv_pages, page_ids, req_slot, gqa_layer_index, kv_head, uint(begin), kv_end, tile * 64, 0, kv, lane);
+            #pragma unroll
+            for (uint d = 0; d < 8; ++d) {
+                if (tile * 8 + d < num_head_fragments) {
+                    simdgroup_matrix<T, 8, 8> q_fragment;
+                    vec<T, 2> q_values(T(0));
+                    #pragma unroll
+                    for (uint i = 0; i < 2; ++i) {
+                        const uint dim = tile * 64 + d * 8 + col + i;
+                        if (row < num_heads && dim < KV_HEAD_DIM) {
+                            q_values[i] = q[((ulong)q_token * NUM_Q_HEADS + head_begin + row) * KV_HEAD_DIM + dim];
+                        }
+                    }
+                    reinterpret_cast<thread vec<T, 2>&>(q_fragment.thread_elements()) = q_values;
+                    #pragma unroll
+                    for (uint f = 0; f < 2; ++f) {
+                        simdgroup_matrix<bfloat16_t, 8, 8> k_fragment;
+                        simdgroup_load(k_fragment, kv + f * 8 * 64 + d * 8, 64, ulong2(0), true);
+                        auto score_fragment = scores.mat_at(0, f);
+                        simdgroup_multiply_accumulate(score_fragment, q_fragment, k_fragment, score_fragment);
+                        scores.frag_at(0, f) = reinterpret_cast<thread float2&>(score_fragment.thread_elements());
+                    }
+                }
+            }
             simdgroup_barrier(mem_flags::mem_threadgroup);
         }
-        for (auto it = scores.begin(); it != scores.end(); ++it) {
-            if (!scores.is_valid_element(it)) continue;
-            const auto coord = it.get_multidimensional_index();
-            *it = uint(coord[1]) < num_heads && begin + uint(coord[0]) < kv_end
-                ? *it * ATTENTION_SCALE : -INFINITY;
-        }
-        auto iteration_max = running_max;
-        reduce_rows(scores, iteration_max, reduction_operation::max, -INFINITY);
-        for (uint i = 0; i < running_max.get_capacity(); ++i) {
-            if (!running_max.is_valid_element(i)) continue;
-            const float next = max(running_max[i], iteration_max[i]);
-            running_scale[i] = running_max[i] == -INFINITY ? 0.0f : metal::exp(running_max[i] - next);
-            running_max[i] = next;
-        }
-        for (auto it = scores.begin(); it != scores.end(); ++it) {
-            if (!scores.is_valid_element(it)) continue;
-            *it = *it == -INFINITY ? 0.0f : metal::exp(*it - *running_max.map_iterator(it));
-        }
-        auto iteration_sum = running_sum;
-        reduce_rows(scores, iteration_sum, reduction_operation::sum, 0.0f);
-        for (uint i = 0; i < running_sum.get_capacity(); ++i) {
-            if (!running_sum.is_valid_element(i)) continue;
-            running_sum[i] = running_sum[i] * running_scale[i] + iteration_sum[i];
-        }
-        // Valid score elements have row coordinates in the eight-row tile.
-        for (auto it = scores.begin(); it != scores.end(); ++it) {
-            if (!scores.is_valid_element(it)) continue;
-            const auto coord = it.get_multidimensional_index();
-            if (coord[0] == 0) {
-                row_sum[coord[1]] = *running_sum.map_iterator(it);
-                row_max[coord[1]] = *running_max.map_iterator(it);
-                row_scale[coord[1]] = *running_scale.map_iterator(it);
+        float local_max = -INFINITY;
+        #pragma unroll
+        for (uint f = 0; f < 2; ++f) {
+            #pragma unroll
+            for (uint i = 0; i < 2; ++i) {
+                float score = scores.frag_at(0, f)[i];
+                score = row < num_heads && begin + f * 8 + col + i < kv_end ? score * ATTENTION_SCALE : -INFINITY;
+                scores.frag_at(0, f)[i] = score;
+                local_max = max(local_max, score);
             }
         }
-        scores.store(p_tile);
-        simdgroup_barrier(mem_flags::mem_threadgroup);
+        local_max = max(local_max, simd_shuffle_xor(local_max, ushort(1)));
+        local_max = max(local_max, simd_shuffle_xor(local_max, ushort(8)));
+        float next_max = max(running_max, local_max);
+        const float scale = running_max == -INFINITY ? 0.0f : metal::exp(running_max - next_max);
+        if (next_max == -INFINITY) next_max = 0.0f;
+        running_max = next_max;
+        float local_sum = 0.0f;
+        #pragma unroll
+        for (uint f = 0; f < 2; ++f) {
+            #pragma unroll
+            for (uint i = 0; i < 2; ++i) {
+                float score = scores.frag_at(0, f)[i];
+                score = score == -INFINITY ? 0.0f : metal::exp(score - next_max);
+                scores.frag_at(0, f)[i] = score;
+                local_sum += score;
+            }
+        }
+        local_sum += simd_shuffle_xor(local_sum, ushort(1));
+        local_sum += simd_shuffle_xor(local_sum, ushort(8));
+        running_sum = running_sum * scale + local_sum;
+        #pragma unroll
+        for (uint f = 0; f < num_head_fragments; ++f) output.frag_at(0, f) *= scale;
+        #pragma unroll
         for (uint tile = 0; tile < num_output_tiles; ++tile) {
             load_kv_tile(kv_pages, page_ids, req_slot, gqa_layer_index, kv_head, uint(begin), kv_end, tile * 64, 1, kv, lane);
-            for (auto it = outputs[tile]->begin(); it != outputs[tile]->end(); ++it) {
-                if (!outputs[tile]->is_valid_element(it)) continue;
-                const auto coord = it.get_multidimensional_index();
-                *it *= row_scale[coord[1]];
+            #pragma unroll
+            for (uint f = 0; f < 2; ++f) {
+                auto probability_fragment = scores.mat_at(0, f);
+                #pragma unroll
+                for (uint d = 0; d < 8; ++d) {
+                    if (tile * 8 + d < num_head_fragments) {
+                        simdgroup_matrix<bfloat16_t, 8, 8> v_fragment;
+                        simdgroup_load(v_fragment, kv + f * 8 * 64 + d * 8, 64);
+                        auto output_fragment = output.mat_at(0, tile * 8 + d);
+                        simdgroup_multiply_accumulate(output_fragment, probability_fragment, v_fragment, output_fragment);
+                        output.frag_at(0, tile * 8 + d) = reinterpret_cast<thread float2&>(output_fragment.thread_elements());
+                    }
+                }
             }
-            pv_op.run(p_tile, kv_tile, *outputs[tile]);
             simdgroup_barrier(mem_flags::mem_threadgroup);
         }
     }
+    if (col == 0) { row_sum[row] = running_sum; row_max[row] = running_sum > 0.0f ? running_max : -INFINITY; }
     threadgroup_barrier(mem_flags::mem_threadgroup);
     if (simdgroup_index == 0 && lane < num_heads) {
         float maximum = -INFINITY;
-        for (uint sg = 0; sg < num_simdgroups; ++sg) maximum = max(maximum, stats[sg * 24 + 8 + lane]);
+        for (uint sg = 0; sg < num_simdgroups; ++sg) maximum = max(maximum, stats[sg * 16 + 8 + lane]);
         float sum = 0.0f;
         for (uint sg = 0; sg < num_simdgroups; ++sg) {
-            const float local_sum = stats[sg * 24 + lane];
-            if (local_sum > 0.0f) sum += local_sum * metal::exp(stats[sg * 24 + 8 + lane] - maximum);
+            const float local_sum = stats[sg * 16 + lane];
+            if (local_sum > 0.0f) sum += local_sum * metal::exp(stats[sg * 16 + 8 + lane] - maximum);
         }
         global_stats[lane] = sum;
         global_stats[8 + lane] = maximum;
@@ -182,26 +180,29 @@ kernel void gqa_split_kv_single_q_map(
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
     for (uint tile = 0; tile < num_output_tiles; ++tile) {
-        for (auto it = outputs[tile]->begin(); it != outputs[tile]->end(); ++it) {
-            if (!outputs[tile]->is_valid_element(it)) continue;
-            const auto coord = it.get_multidimensional_index();
-            workspace[simdgroup_index * 8 * 64 + uint(coord[1]) * 64 + uint(coord[0])] = *it;
+        #pragma unroll
+        for (uint d = 0; d < 8; ++d) {
+            if (tile * 8 + d < num_head_fragments) {
+                workspace[simdgroup_index * 8 * 64 + row * 64 + d * 8 + col] = output.frag_at(0, tile * 8 + d)[0];
+                workspace[simdgroup_index * 8 * 64 + row * 64 + d * 8 + col + 1] = output.frag_at(0, tile * 8 + d)[1];
+            }
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
-        if (simdgroup_index == 0) {
-            for (auto it = outputs[tile]->begin(); it != outputs[tile]->end(); ++it) {
-                if (!outputs[tile]->is_valid_element(it)) continue;
-                const auto coord = it.get_multidimensional_index();
-                const uint row = uint(coord[1]);
-                const uint col = uint(coord[0]);
-                if (row < num_heads && tile * 64 + col < KV_HEAD_DIM) {
-                    float value = 0.0f;
-                    for (uint sg = 0; sg < num_simdgroups; ++sg) {
-                        const float scale = stats[sg * 24 + row] > 0.0f ? metal::exp(stats[sg * 24 + 8 + row] - global_stats[8 + row]) : 0.0f;
-                        value += workspace[sg * 8 * 64 + row * 64 + col] * scale;
+        if (simdgroup_index == 0 && row < num_heads) {
+            #pragma unroll
+            for (uint d = 0; d < 8; ++d) {
+                #pragma unroll
+                for (uint i = 0; i < 2; ++i) {
+                    const uint dim = tile * 64 + d * 8 + col + i;
+                    if (dim < KV_HEAD_DIM) {
+                        float value = 0.0f;
+                        for (uint sg = 0; sg < num_simdgroups; ++sg) {
+                            const float scale = stats[sg * 16 + row] > 0.0f ? metal::exp(stats[sg * 16 + 8 + row] - global_stats[8 + row]) : 0.0f;
+                            value += workspace[sg * 8 * 64 + row * 64 + d * 8 + col + i] * scale;
+                        }
+                        const ulong partial = (ulong)task * NUM_Q_HEADS + head_begin + row;
+                        partial_output[partial * KV_HEAD_DIM + dim] = T(global_stats[row] > 0.0f ? value / global_stats[row] : 0.0f);
                     }
-                    const ulong partial = (ulong)task * NUM_Q_HEADS + head_begin + row;
-                    partial_output[partial * KV_HEAD_DIM + tile * 64 + col] = T(global_stats[row] > 0.0f ? value / global_stats[row] : 0.0f);
                 }
             }
         }

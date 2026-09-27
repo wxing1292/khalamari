@@ -235,7 +235,7 @@ fn test_ragged_requests_match_reference() {
 
 #[test]
 fn test_multiple_page_ids_per_block() {
-    for head_dim in [2, 128, 256] {
+    for head_dim in [2, 65, 128, 256] {
         for dtype in [Dtype::Bfloat16, Dtype::Float32] {
             let mut config = fixture_config();
             config.head_dim = head_dim;

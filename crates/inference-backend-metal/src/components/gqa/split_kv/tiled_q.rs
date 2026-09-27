@@ -14,10 +14,11 @@ use crate::metal::Device;
 use crate::metal::Dtype;
 use crate::metal::Operator;
 use crate::metal::ReplayU32;
+use crate::mlx_headers::steel_mma_source;
 
 const FP8_SOURCE: &str = include_str!("../../metal/gqa_fp8.metal");
-const SOURCE: &str = include_str!("../../metal/gqa_split_kv_tiled_q.metal");
-const TENSOR_OPS_SOURCE: &str = include_str!("../../metal/gqa_split_kv_tiled_q_tensor_ops.metal");
+const REDUCE_SOURCE: &str = include_str!("../../metal/gqa_split_kv_tiled_q_reduce.metal");
+const MAP_SOURCE: &str = include_str!("../../metal/gqa_split_kv_tiled_q_map.metal");
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct KernelConstants {
@@ -83,13 +84,31 @@ impl KernelConstants {
 
     fn map_threadblock_memory_bytes(self) -> usize {
         let padded_head_dim = self.config.head_dim as usize + 16 / self.config.dtype.item_size();
+        // K and V reuse one tile. Keep the measured reservation after moving
+        // probabilities to registers. KV32 uses the same reservation as KV16.
+        let reserved_kv_tokens = self.map.thread_block.kv_tokens_per_iteration.max(32);
         checked_product(
             "GQA SplitKV TiledQ threadgroup memory byte length",
             &[
-                2,
-                self.map.thread_block.kv_tokens_per_iteration.max(16) as usize,
+                reserved_kv_tokens as usize,
                 padded_head_dim,
                 self.config.dtype.item_size(),
+            ],
+        ) + checked_product(
+            "GQA SplitKV TiledQ probability reservation byte length",
+            &[
+                self.map.thread_block.max_q_tokens as usize,
+                self.map.thread_block.max_q_heads as usize,
+                16,
+                size_of::<f32>(),
+            ],
+        ) + checked_product(
+            "GQA SplitKV TiledQ row-statistic reservation byte length",
+            &[
+                self.map.thread_block.max_q_tokens as usize,
+                self.map.thread_block.max_q_heads as usize,
+                3,
+                size_of::<f32>(),
             ],
         )
     }
@@ -192,6 +211,7 @@ impl Config {
         KernelConstants::new(self, execution).partial_output_stats_bytes(shape)
     }
 
+    /// Total SMEM reservation, including the compiled Map kernel's static memory.
     pub fn map_threadblock_memory_bytes(self, execution: sdpa::ExecutionVariant) -> usize {
         KernelConstants::new(self, execution).map_threadblock_memory_bytes()
     }
@@ -286,6 +306,7 @@ pub struct Compute {
     constants: KernelConstants,
     shape: Shape,
     map: CompiledKernel,
+    map_dynamic_memory_bytes: usize,
     reduce: CompiledKernel,
 }
 
@@ -293,20 +314,22 @@ impl Compute {
     pub fn new(device: &Device, config: Config, execution: sdpa::ExecutionVariant, shape: Shape) -> Self {
         let constants = KernelConstants::new(config, execution);
         shape.validate(config);
-        i32::try_from(config.num_q_heads as u64 * config.head_dim as u64)
-            .expect("GQA TensorOps query stride must fit i32");
+        let map_memory_bytes = constants.map_threadblock_memory_bytes();
         assert!(
-            constants.map_threadblock_memory_bytes() <= device.max_threadblock_memory_length(),
+            map_memory_bytes <= device.max_threadblock_memory_length(),
             "GQA SplitKV TiledQ shape needs {} bytes of threadblock memory but device only supports {}",
-            constants.map_threadblock_memory_bytes(),
+            map_memory_bytes,
             device.max_threadblock_memory_length()
         );
         let source = source(constants);
-        let map = CompiledKernel::new_tensor_ops(device, &source, "gqa_split_kv_tiled_q_map");
+        let map = CompiledKernel::new(
+            device,
+            &format!("{}\n{source}\n{FP8_SOURCE}\n{MAP_SOURCE}", steel_mma_source()),
+            "gqa_split_kv_tiled_q_map",
+        );
         assert!(
-            constants.map_threadblock_memory_bytes() + map.static_threadblock_memory_length()
-                <= device.max_threadblock_memory_length(),
-            "GQA SplitKV TiledQ threadblock memory exceeds device capacity"
+            map.static_threadblock_memory_length() <= map_memory_bytes,
+            "GQA SplitKV TiledQ static memory exceeds its reservation"
         );
         assert!(
             constants.map.thread_block.required_threads as usize <= map.max_total_threads_per_threadblock(),
@@ -316,8 +339,13 @@ impl Compute {
         Self {
             constants,
             shape,
+            map_dynamic_memory_bytes: map_memory_bytes - map.static_threadblock_memory_length(),
             map,
-            reduce: CompiledKernel::new_tensor_ops(device, &source, "gqa_split_kv_tiled_q_reduce"),
+            reduce: CompiledKernel::new(
+                device,
+                &format!("{source}\n{REDUCE_SOURCE}"),
+                "gqa_split_kv_tiled_q_reduce",
+            ),
         }
     }
 
@@ -331,6 +359,7 @@ impl Compute {
     ) -> MapInvocation<'a> {
         MapInvocation {
             pipeline: self.map.as_raw_retained(),
+            dynamic_memory_bytes: self.map_dynamic_memory_bytes,
             constants: self.constants,
             shape: self.shape,
             buffers,
@@ -357,6 +386,7 @@ impl Compute {
 }
 
 pub struct MapInvocation<'a> {
+    dynamic_memory_bytes: usize,
     pipeline: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
     constants: KernelConstants,
     shape: Shape,
@@ -431,7 +461,7 @@ impl Operator for MapInvocation<'_> {
             shape.num_total_tokens,
             "GQA SplitKV TiledQ active token count",
         );
-        recorder.set_threadblock_memory_length(0, constants.map_threadblock_memory_bytes());
+        recorder.set_threadblock_memory_length(0, self.dynamic_memory_bytes);
         recorder.dispatch_threadblocks(
             (
                 constants.num_head_groups(),
@@ -510,9 +540,7 @@ fn source(constants: KernelConstants) -> String {
 #define REDUCE_REQUIRED_THREADS {reduce_required_threads}
 #include <metal_stdlib>
 using namespace metal;
-{FP8_SOURCE}
-{SOURCE}
-{TENSOR_OPS_SOURCE}
+typedef bfloat bfloat16_t;
 "#,
         num_q_heads = config.num_q_heads,
         num_kv_heads = config.num_kv_heads,

@@ -441,8 +441,7 @@ impl Fixture {
         let single_q_smem = (num_simdgroups * (8 * 64 + 8 * 16 + 8 * 3) + 8 * 2) * size_of::<f32>();
         let tiled_config = self.tiled_config();
         let tiled_execution = self.split_kv_tiled_q_metadata.variant();
-        let tiled_q_smem = tiled_config.map_threadblock_memory_bytes(tiled_execution)
-            + tiled_execution.map.thread_block.required_threads as usize / 32 * (8 * 16 + 8 * 3) * size_of::<f32>();
+        let tiled_q_smem = tiled_config.map_threadblock_memory_bytes(tiled_execution);
         let single_q_output_accumulators = 8 * 64 / 32 * self.core.head_dim.div_ceil(64);
         println!(
             "resources device={} head_dim={} q_heads={} kv_heads={} q_heads_per_kv_head={} \

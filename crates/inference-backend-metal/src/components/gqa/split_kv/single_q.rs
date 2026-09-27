@@ -14,6 +14,7 @@ use crate::metal::Device;
 use crate::metal::Dtype;
 use crate::metal::Operator;
 use crate::metal::ReplayU32;
+use crate::mlx_headers::steel_mma_source;
 
 const FP8_SOURCE: &str = include_str!("../../metal/gqa_fp8.metal");
 const MAP_SOURCE: &str = include_str!("../../metal/gqa_split_kv_single_q_map.metal");
@@ -40,7 +41,7 @@ impl KernelConstants {
 
     fn map_threadblock_memory_bytes(self) -> usize {
         let map = self.map.thread_block;
-        (map.required_threads as usize / 32 * (8 * 64 + 8 * 16 + 8 * 3) + 8 * 2) * size_of::<f32>()
+        (map.required_threads as usize / 32 * (8 * 64 + 8 * 2) + 8 * 2) * size_of::<f32>()
     }
 
     fn num_q_head_ranges_per_kv_head(self) -> u32 {
@@ -322,7 +323,7 @@ impl Compute {
             Dtype::Bfloat16 => "gqa_split_kv_single_q_reduce_bf16",
             dtype => panic!("unsupported GQA SplitKV SingleQ reduce dtype {dtype:?}"),
         };
-        let map = CompiledKernel::new_tensor_ops(
+        let map = CompiledKernel::new(
             device,
             &gqa_split_kv_single_q_map_source(constants),
             "gqa_split_kv_single_q_map",
@@ -375,23 +376,12 @@ fn gqa_split_kv_single_q_map_source(constants: KernelConstants) -> String {
     let config = constants.config;
     let map = constants.map.thread_block;
     let dtype = metal_dtype_name(config.dtype);
-    let num_output_tiles = config.head_dim.div_ceil(64);
-    let declarations = (0..num_output_tiles)
-        .map(|tile| format!("Output output_{tile};"))
-        .collect::<String>();
-    let pointers = (0..num_output_tiles)
-        .map(|tile| format!("&output_{tile}"))
-        .collect::<Vec<_>>()
-        .join(",");
-    let body = MAP_SOURCE.replace(
-        "GQA_DECLARE_OUTPUT_TILES",
-        &format!("{declarations}thread Output* outputs[] = {{{pointers}}};"),
-    );
     format!(
         r#"
 #include <metal_stdlib>
 using namespace metal;
 typedef bfloat bfloat16_t;
+{steel}
 {FP8_SOURCE}
 using T = {dtype};
 #define NUM_Q_HEADS {num_q_heads}
@@ -408,8 +398,9 @@ using T = {dtype};
 #define NUM_BLOCKS {num_blocks}
 #define NUM_PAGE_IDS_PER_BLOCK {num_page_ids_per_block}
 
-{body}
+{MAP_SOURCE}
 "#,
+        steel = steel_mma_source(),
         dtype = dtype,
         head_dim = config.head_dim,
         scale = config.scale,

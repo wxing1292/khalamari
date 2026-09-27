@@ -208,12 +208,23 @@ impl Selector {
         } else {
             full_q_heads
         };
+        // Large dense prefill amortizes a real KV32 tile. Retain the measured
+        // KV16 selection for smaller or sparse request batches.
+        let desired_kv_tokens = if config.head_dim == 256
+            && num_tokens >= 1024
+            && u64::from(num_tokens) >= 4 * u64::from(num_q_token_ranges)
+        {
+            32
+        } else {
+            16
+        };
         let tiled_q = variants
             .iter()
             .copied()
-            .find(|variant| {
+            .filter(|variant| {
                 variant.map.thread_block.max_q_tokens > 1 && variant.map.thread_block.max_q_heads == desired_q_heads
             })
+            .max_by_key(|variant| variant.map.thread_block.kv_tokens_per_iteration == desired_kv_tokens)
             .unwrap_or(first_tiled);
         let tiled_q = materialize(tiled_q);
         if (config.head_dim, config.tokens_per_page) == (256, 16) {
@@ -251,7 +262,14 @@ fn materialize_candidate(
 ) -> Selection {
     let map = variant.map.thread_block;
     let mut ranges = build_q_token_ranges(request_shapes, map.max_q_tokens, map.kv_tokens_per_iteration);
-    allocate_kv_splits(&mut ranges, limits.max_map_task_templates);
+    // KV32 needs fewer partial outputs at the measured dense-prefill sizes.
+    // The heap still assigns more splits to ranges with more visible KV work.
+    let split_budget = if map.max_q_tokens > 1 && map.kv_tokens_per_iteration == 32 {
+        (ranges.len() as u64 * 2).min(u64::from(limits.max_map_task_templates)) as u32
+    } else {
+        limits.max_map_task_templates
+    };
+    allocate_kv_splits(&mut ranges, split_budget);
 
     let mut q_token_ranges = Vec::with_capacity(ranges.len());
     let mut map_task_templates = Vec::new();
@@ -625,6 +643,54 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn test_dense_prefill_kv32_preserves_request_ranges_and_replay_capacity() {
+        let registry = backend_sdpa::Registry::new(backend_sdpa::Config {
+            io_dtype: Dtype::Bfloat16,
+            num_q_heads: 24,
+            num_kv_heads: 4,
+            head_dim: 256,
+            tokens_per_page: 16,
+        });
+        let selector = Selector::new(registry, 2048);
+        let policy = GQAReplayBucketPolicy::new(2048, &[]);
+        for (histories, cu_tokens) in [
+            (vec![0], vec![0, 1024]),
+            (vec![4096], vec![0, 1024]),
+            (vec![0, 16384], vec![0, 512, 1024]),
+        ] {
+            let requests = RequestShape::from_batch(&histories, &cu_tokens);
+            let selection = selector.select(&requests, &policy, 2048);
+            assert_eq!(selection.variant().map.thread_block.kv_tokens_per_iteration, 32);
+            assert_eq!(selection.replay_shape().num_tokens, 1024);
+            assert_eq!(selection.replay_shape().num_total_tokens, 2048);
+            assert_eq!(selection.map_task_templates().len(), 256);
+            for (index, range) in selection.q_token_ranges().iter().enumerate() {
+                let offsets = selection.cu_partial_outputs_by_q_token_range();
+                let templates = &selection.map_task_templates()[offsets[index] as usize..offsets[index + 1] as usize];
+                assert_eq!(templates.first().unwrap().request_local_kv_token_indices.start, 0);
+                assert_eq!(
+                    templates.last().unwrap().request_local_kv_token_indices.end,
+                    range.num_visible_kv_tokens
+                );
+                for pair in templates.windows(2) {
+                    assert_eq!(
+                        pair[0].request_local_kv_token_indices.end,
+                        pair[1].request_local_kv_token_indices.start
+                    );
+                }
+            }
+        }
+        let short = selector.select(&RequestShape::from_batch(&[4096], &[0, 256]), &policy, 2048);
+        assert_eq!(short.variant().map.thread_block.kv_tokens_per_iteration, 16);
+        let decode = selector.select(
+            &RequestShape::from_batch(&vec![4096; 1024], &(0..=1024).collect::<Vec<_>>()),
+            &policy,
+            2048,
+        );
+        assert_eq!(decode.variant().map.thread_block.max_q_tokens, 1);
     }
 
     #[test]

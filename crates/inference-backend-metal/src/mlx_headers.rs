@@ -57,6 +57,15 @@ pub fn read_mlx_metal_header(root: &Path, rel_path: &str, included: &mut HashSet
     output
 }
 
+/// Shared Steel fragment types for paged attention kernels.
+pub fn steel_mma_source() -> &'static str {
+    static SOURCE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    SOURCE.get_or_init(|| {
+        let root = find_mlx_metal_header_root("steel/gemm/mma.h", |_| true, "GQA Steel MMA");
+        read_mlx_metal_header(&root, "mlx/backend/metal/kernels/steel/gemm/mma.h", &mut HashSet::new())
+    })
+}
+
 fn mlx_header_candidates() -> Vec<PathBuf> {
     let mut candidates = vec![];
     if let Ok(path) = std::env::var("INFERENCE_BACKEND_METAL_MLX_SOURCE_DIR") {
