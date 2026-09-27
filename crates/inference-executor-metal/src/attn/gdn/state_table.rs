@@ -133,7 +133,7 @@ struct GDNRequestCommit {
 
 #[derive(Clone, Copy)]
 enum GDNStateCommit {
-    Chunkwise { final_state_version: u32 },
+    Recurrent { final_state_version: u32 },
     Replay { txn: GDNStateTxn, replay_token_begin: u32 },
 }
 
@@ -448,7 +448,7 @@ impl GDNRequestStateTable {
         token_indices: &[u32],
         cu_tokens: &[u32],
         num_spec_tokens: &[u32],
-        num_chunkwise_requests: usize,
+        num_recurrent_requests: usize,
         state_page_ids_by_req: &[Vec<Vec<u32>>],
     ) -> GDNPreparedRequestState {
         self.validate_batch(
@@ -457,7 +457,7 @@ impl GDNRequestStateTable {
             token_indices,
             cu_tokens,
             num_spec_tokens,
-            num_chunkwise_requests,
+            num_recurrent_requests,
             state_page_ids_by_req,
         );
         let mut request_table = self.request_table().borrow_mut();
@@ -514,7 +514,7 @@ impl GDNRequestStateTable {
                 .push(request_table.current_conv_state_slot(req_slot));
             let flat_token_begin = cu_tokens[req_index];
             let num_tokens = cu_tokens[req_index + 1] - flat_token_begin;
-            let commit = if req_index < num_chunkwise_requests {
+            let commit = if req_index < num_recurrent_requests {
                 let final_state_version = token_index + num_tokens;
                 let mut versions = request_table
                     .pending_publish_state_versions(req_slot)
@@ -530,14 +530,14 @@ impl GDNRequestStateTable {
                     prepared.flat_conv_state_write_slots[flat_index] =
                         request_table.materialized_conv_state_slot(req_slot, version);
                 }
-                GDNStateCommit::Chunkwise { final_state_version }
+                GDNStateCommit::Recurrent { final_state_version }
             } else {
                 GDNStateCommit::Replay {
                     txn: GDNStateTxn::from_state_versions(
                         token_index + num_tokens - num_spec_tokens[req_index],
                         token_index + num_tokens + 1,
                     ),
-                    replay_token_begin: flat_token_begin - cu_tokens[num_chunkwise_requests],
+                    replay_token_begin: flat_token_begin - cu_tokens[num_recurrent_requests],
                 }
             };
             pending_commits.push(GDNRequestCommit { req_slot, commit });
@@ -555,10 +555,10 @@ impl GDNRequestStateTable {
         // GPU commit jobs still read those sources after this CPU method returns.
         for (request, &dst_state_version) in pending_commits.iter().zip(dst_state_versions) {
             match request.commit {
-                GDNStateCommit::Chunkwise { final_state_version } => {
+                GDNStateCommit::Recurrent { final_state_version } => {
                     assert_eq!(
                         dst_state_version, final_state_version,
-                        "GDN chunkwise commits its complete input"
+                        "GDN recurrent commits its complete input"
                     );
                 },
                 GDNStateCommit::Replay {
@@ -682,14 +682,14 @@ impl GDNRequestStateTable {
         token_indices: &[u32],
         cu_tokens: &[u32],
         num_spec_tokens: &[u32],
-        num_chunkwise_requests: usize,
+        num_recurrent_requests: usize,
         state_page_ids_by_req: &[Vec<Vec<u32>>],
     ) {
         assert!(!req_slots.is_empty(), "GDN state batch requires requests");
         assert_eq!(block_indices.len(), req_slots.len());
         assert_eq!(token_indices.len(), req_slots.len());
         assert_eq!(num_spec_tokens.len(), req_slots.len());
-        assert!(num_chunkwise_requests <= req_slots.len());
+        assert!(num_recurrent_requests <= req_slots.len());
         assert_eq!(cu_tokens.len(), req_slots.len() + 1);
         assert!(cu_tokens[req_slots.len()] as usize <= self.layout.max_tokens);
         assert_eq!(state_page_ids_by_req.len(), req_slots.len());
@@ -710,8 +710,8 @@ impl GDNRequestStateTable {
                 .expect("GDN state batch cu_tokens must be nondecreasing");
             assert!(num_tokens > 0, "GDN state batch requires tokens for every request");
             assert!(num_spec_tokens[req_index] <= num_tokens);
-            if req_index < num_chunkwise_requests {
-                assert_eq!(num_spec_tokens[req_index], 0, "GDN chunkwise inputs must be committed");
+            if req_index < num_recurrent_requests {
+                assert_eq!(num_spec_tokens[req_index], 0, "GDN recurrent inputs must be committed");
             }
             token_indices[req_index]
                 .checked_add(num_tokens)
@@ -742,7 +742,7 @@ impl GDNRequestStateTable {
             }
         }
         // The prefix writes full states. Only suffix rows occupy the replay log.
-        let num_replay_tokens = cu_tokens[req_slots.len()] - cu_tokens[num_chunkwise_requests];
+        let num_replay_tokens = cu_tokens[req_slots.len()] - cu_tokens[num_recurrent_requests];
         assert!(
             num_replay_tokens <= self.layout.replay.max_replay_tokens,
             "GDN replay suffix exceeds log capacity"

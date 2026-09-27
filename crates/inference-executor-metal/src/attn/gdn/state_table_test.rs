@@ -677,7 +677,7 @@ fn test_commit_publish_restore_reuse_recording() {
             );
         }
         state.finish_restore();
-        // This test checks state I/O; the chunkwise forward math has separate coverage.
+        // This test checks state I/O; the recurrent forward math has separate coverage.
         state.commit(&[3]);
         state.finish_commit();
         state.assert_snapshot_ready();
@@ -888,7 +888,7 @@ fn prepare_state(
     token_indices: &[u32],
     cu_tokens: &[u32],
     num_spec_tokens: &[u32],
-    num_chunkwise_requests: usize,
+    num_recurrent_requests: usize,
     state_page_ids_by_req: &[Vec<Vec<u32>>],
 ) -> GDNReplayShape {
     let prepared = state.prepare(
@@ -897,12 +897,12 @@ fn prepare_state(
         token_indices,
         cu_tokens,
         num_spec_tokens,
-        num_chunkwise_requests,
+        num_recurrent_requests,
         state_page_ids_by_req,
     );
     metadata.update(
         cu_tokens,
-        num_chunkwise_requests as u32,
+        num_recurrent_requests as u32,
         &prepared.src_recurrent_state_slots,
         &prepared.src_conv_state_slots,
         &prepared.flat_recurrent_state_write_slots,

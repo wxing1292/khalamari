@@ -7,15 +7,15 @@ use crate::metal::Device;
 use crate::metal::Operator;
 use crate::metal::ReplayU32;
 
-mod chunkwise;
 mod recurrent;
+mod recurrent_snapshot;
 mod replay;
 
 pub use replay::ReplayBuffers;
 
 const GDN_COMPUTE_SOURCE: &str = include_str!("../metal/gdn_compute.metal");
 
-// Initial short-input policy. This limit is independent of the chunkwise tile width.
+// Initial short-input policy. This limit is independent of the recurrent tile width.
 const MAX_FIXED_REPLAY_TOKENS: usize = 8;
 
 /// Maximum replay inputs per request, including fixed and speculative tokens.
@@ -26,15 +26,13 @@ pub fn max_replay_tokens_per_request(num_spec_tokens: usize) -> usize {
         .expect("GDN replay token capacity must fit usize")
 }
 
-/// Selects chunkwise execution for a committed segment with no selectable suffix.
-pub fn uses_chunkwise(num_tokens: usize, num_spec_tokens: usize) -> bool {
+/// Selects recurrent execution for a committed segment with no selectable suffix.
+pub fn uses_recurrent(num_tokens: usize, num_spec_tokens: usize) -> bool {
     num_spec_tokens == 0 && num_tokens > MAX_FIXED_REPLAY_TOKENS
 }
 
 const SHORT_CONV_REQUIRED_THREADS: u32 = 256;
-const CHUNKWISE_TOKEN_CHUNK_SIZE: u32 = 16;
-const CHUNKWISE_NUM_V_ROWS_PER_SIMDGROUP: u32 = 8;
-const CHUNKWISE_NUM_QK_DIM_THREADS: u32 = 32;
+const RECURRENT_NUM_QK_DIM_THREADS: u32 = 32;
 const FINAL_RECURRENT_STATE_NUM_QK_DIM_THREADS: u32 = 32;
 const CANDIDATE_RECURRENT_STATE_NUM_QK_DIM_THREADS: u32 = 32;
 const CANDIDATE_RECURRENT_STATE_NUM_V_ROWS_PER_SIMDGROUP: u32 = 2;
@@ -59,26 +57,24 @@ struct FinalRecurrentStateThreadBlockConstants {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct ChunkwiseStateThreadBlockConstants {
+struct RecurrentStateThreadBlockConstants {
     num_v_rows: u32,
-    num_state_qk_columns: u32,
+    num_tokens: u32,
 }
 
-impl ChunkwiseStateThreadBlockConstants {
-    fn num_simdgroups(self) -> u32 {
-        self.num_v_rows.div_ceil(CHUNKWISE_NUM_V_ROWS_PER_SIMDGROUP)
+impl RecurrentStateThreadBlockConstants {
+    fn num_v_rows(self) -> u32 {
+        self.num_v_rows
     }
-
+    fn num_simdgroups(self) -> u32 {
+        self.num_v_rows.div_ceil(4)
+    }
+    fn num_tokens(self) -> u32 {
+        self.num_tokens
+    }
     fn threadblock_memory_bytes(self, qk_head_dim: u32) -> u64 {
-        // Match the static arrays in gdn_compute_chunkwise.metal. Four-row
-        // tiles still reserve eight V rows for their single SIMDgroup.
-        let num_tokens = CHUNKWISE_TOKEN_CHUNK_SIZE as u64;
-        let num_v_rows = self.num_simdgroups() as u64 * CHUNKWISE_NUM_V_ROWS_PER_SIMDGROUP as u64;
-        let qk_head_dim = qk_head_dim as u64;
-        let num_bf16_values =
-            2 * num_tokens * qk_head_dim + num_tokens * num_v_rows + num_v_rows * qk_head_dim + num_tokens * num_tokens;
-        let num_f32_values = 2 * num_tokens * num_tokens + 3 * num_tokens;
-        num_bf16_values * 2 + num_f32_values * 4
+        // F32 Q/K and gates, BF16 V. Rows are padded for float4 loads.
+        self.num_tokens as u64 * (2 * (qk_head_dim as u64 + 4) * 4 + (self.num_v_rows as u64 + 8) * 2 + 8)
     }
 }
 
@@ -115,7 +111,7 @@ struct KernelSetConstants {
     short_conv: KernelConstants<ThreadBlockConstants>,
     candidate_conv_state: KernelConstants<ThreadBlockConstants>,
     final_recurrent_state: KernelConstants<FinalRecurrentStateThreadBlockConstants>,
-    chunkwise_state: KernelConstants<ChunkwiseStateThreadBlockConstants>,
+    recurrent_state: KernelConstants<RecurrentStateThreadBlockConstants>,
     candidate_recurrent_state: KernelConstants<CandidateRecurrentStateThreadBlockConstants>,
     output_norm_gate: KernelConstants<ThreadBlockConstants>,
 }
@@ -125,6 +121,7 @@ struct KernelSetConstants {
 struct ComputeConstants {
     model: ModelGeometry,
     projection_layout: ProjectionLayout,
+    replay_token_tile: u32,
     kernels: KernelSetConstants,
     output_gate: OutputGate,
 }
@@ -264,28 +261,24 @@ impl ComputeConstants {
             },
             required_threads: CANDIDATE_RECURRENT_STATE_NUM_QK_DIM_THREADS * CANDIDATE_RECURRENT_STATE_NUM_SIMDGROUPS,
         };
-        // Keep each cooperative state update within 128 Q/K columns.
-        let num_state_qk_columns = [128, 96, 64, 32]
-            .into_iter()
-            .find(|num_columns| config.qk_head_dim.is_multiple_of(*num_columns))
-            .unwrap();
-        let chunkwise_state_thread_block = [64, 32, 16, 8, 4]
+        let recurrent_state_thread_block = [32, 16, 8, 4]
             .into_iter()
             .map(|num_v_rows| {
-                ChunkwiseStateThreadBlockConstants {
+                RecurrentStateThreadBlockConstants {
                     num_v_rows,
-                    num_state_qk_columns,
+                    num_tokens: if config.qk_head_dim > 128 { 8 } else { 16 },
                 }
             })
             .find(|thread_block| {
-                config.v_head_dim.is_multiple_of(thread_block.num_v_rows)
+                config.v_head_dim.is_multiple_of(thread_block.num_v_rows())
                     && thread_block.threadblock_memory_bytes(config.qk_head_dim) <= max_threadblock_memory_bytes as u64
             })
-            .expect("GDN chunkwise V-row tile must divide Dv and fit device shared memory");
+            .expect("GDN recurrent V-row tile must divide Dv and fit device shared memory");
         let constants = Self {
             model: config.model_geometry(),
             output_gate: config.output_gate,
             projection_layout: config.projection_layout,
+            replay_token_tile: replay::token_tile(config, max_threadblock_memory_bytes),
             kernels: KernelSetConstants {
                 short_conv: KernelConstants {
                     thread_block: ThreadBlockConstants {
@@ -304,8 +297,8 @@ impl ComputeConstants {
                         required_threads: FINAL_RECURRENT_STATE_NUM_QK_DIM_THREADS * final_recurrent_state_num_v_rows,
                     },
                 },
-                chunkwise_state: KernelConstants {
-                    thread_block: chunkwise_state_thread_block,
+                recurrent_state: KernelConstants {
+                    thread_block: recurrent_state_thread_block,
                 },
                 candidate_recurrent_state: KernelConstants {
                     thread_block: candidate_recurrent_state_thread_block,
@@ -350,8 +343,8 @@ impl ComputeConstants {
             final_recurrent_state.num_qk_dim_threads * final_recurrent_state.num_v_rows
         );
         assert_eq!(self.model.v_head_dim % final_recurrent_state.num_v_rows, 0);
-        let chunkwise_state = self.kernels.chunkwise_state.thread_block;
-        assert_eq!(self.model.v_head_dim % chunkwise_state.num_v_rows, 0);
+        let recurrent_state = self.kernels.recurrent_state.thread_block;
+        assert_eq!(self.model.v_head_dim % recurrent_state.num_v_rows(), 0);
         let candidate_recurrent_state = self.kernels.candidate_recurrent_state.thread_block;
         assert_eq!(
             candidate_recurrent_state.required_threads,
@@ -518,7 +511,7 @@ fn source(constants: ComputeConstants) -> String {
     );
     format!(
         "{common_source}\n{}\n{}",
-        recurrent::source(constants),
+        recurrent_snapshot::source(constants),
         replay::source(constants),
     )
 }
@@ -564,7 +557,7 @@ pub struct Compute {
     replay: CompiledKernel,
     candidate_conv_state: CompiledKernel,
     final_recurrent_state: CompiledKernel,
-    chunkwise_state: CompiledKernel,
+    recurrent_state: CompiledKernel,
     candidate_recurrent_state: CompiledKernel,
     output_norm_gate: CompiledKernel,
 }
@@ -573,16 +566,22 @@ impl Compute {
     pub fn new(device: &Device, config: Config) -> Self {
         let constants = ComputeConstants::from_config(config, device.max_threadblock_memory_length());
         let source = source(constants);
-        let chunkwise_state = CompiledKernel::new_tensor_ops(
+        let recurrent_state = CompiledKernel::new(
             device,
-            &format!("{source}\n{}", chunkwise::source(constants)),
-            "gdn_compute_chunkwise_state_bf16",
+            &format!("{source}\n{}", recurrent::source(constants)),
+            "gdn_compute_recurrent_state_bf16",
         );
-        assert!(chunkwise_state.static_threadblock_memory_length() <= device.max_threadblock_memory_length());
+        assert!(recurrent_state.static_threadblock_memory_length() <= device.max_threadblock_memory_length());
         assert!(
-            (constants.kernels.chunkwise_state.thread_block.num_simdgroups() * CHUNKWISE_NUM_QK_DIM_THREADS) as usize
-                <= chunkwise_state.max_total_threads_per_threadblock(),
-            "GDN chunkwise threadblock exceeds the pipeline thread limit"
+            (constants.kernels.recurrent_state.thread_block.num_simdgroups() * RECURRENT_NUM_QK_DIM_THREADS) as usize
+                <= recurrent_state.max_total_threads_per_threadblock(),
+            "GDN recurrent threadblock exceeds the pipeline thread limit"
+        );
+        let replay = CompiledKernel::new(device, &source, "gdn_compute_replay_bf16");
+        assert!(replay.static_threadblock_memory_length() <= device.max_threadblock_memory_length());
+        assert!(
+            replay::required_threads(constants) <= replay.max_total_threads_per_threadblock(),
+            "GDN replay threadblock exceeds the pipeline thread limit"
         );
         Self {
             constants,
@@ -590,10 +589,10 @@ impl Compute {
             norm_eps: config.norm_eps,
             short_conv: CompiledKernel::new(device, &source, "gdn_compute_short_conv_bf16"),
             short_conv_replay: CompiledKernel::new(device, &source, "gdn_compute_short_conv_replay_bf16"),
-            replay: CompiledKernel::new(device, &source, "gdn_compute_replay_bf16"),
+            replay,
             candidate_conv_state: CompiledKernel::new(device, &source, "gdn_compute_candidate_conv_state_bf16"),
             final_recurrent_state: CompiledKernel::new(device, &source, "gdn_compute_final_recurrent_state_bf16"),
-            chunkwise_state,
+            recurrent_state,
             candidate_recurrent_state: CompiledKernel::new(
                 device,
                 &source,
@@ -635,9 +634,9 @@ impl Compute {
         }
     }
 
-    /// Record a fixed mixed graph whose chunkwise and recurrent cores can overlap.
+    /// Record a fixed mixed graph whose tiled recurrence and snapshot cores can overlap.
     ///
-    /// The first `num_active_chunkwise_requests` requests use chunkwise execution. Both
+    /// The first `num_active_recurrent_requests` requests use recurrent execution. Both
     /// branches retain the full recorded request capacity. Either branch may
     /// have zero active requests. Each active request must have a token.
     /// Candidate mode writes every supplied state destination. Final-only
@@ -648,7 +647,7 @@ impl Compute {
         buffers: Buffers<'a>,
         num_active_reqs: ReplayU32,
         num_active_tokens: ReplayU32,
-        num_active_chunkwise_requests: ReplayU32,
+        num_active_recurrent_requests: ReplayU32,
         write_candidate_states: bool,
     ) -> MixedInvocation<'a> {
         MixedInvocation {
@@ -657,7 +656,7 @@ impl Compute {
             buffers,
             num_active_reqs,
             num_active_tokens,
-            num_active_chunkwise_requests,
+            num_active_recurrent_requests,
             write_candidate_states,
         }
     }
@@ -813,7 +812,7 @@ impl Operator for Invocation<'_> {
             self.num_active_tokens,
             true,
         );
-        recurrent::record_final_recurrent_state(
+        recurrent_snapshot::record_final_recurrent_state(
             compute,
             recorder,
             self.shape,
@@ -857,7 +856,7 @@ impl Operator for CandidateStateUpdateInvocation<'_> {
             self.num_active_reqs,
             self.num_active_tokens,
         );
-        recurrent::record_candidate_recurrent_state(
+        recurrent_snapshot::record_candidate_recurrent_state(
             compute,
             recorder,
             self.shape,
@@ -875,7 +874,7 @@ pub struct MixedInvocation<'a> {
     buffers: Buffers<'a>,
     num_active_reqs: ReplayU32,
     num_active_tokens: ReplayU32,
-    num_active_chunkwise_requests: ReplayU32,
+    num_active_recurrent_requests: ReplayU32,
     write_candidate_states: bool,
 }
 
@@ -884,10 +883,10 @@ impl Operator for MixedInvocation<'_> {
         let compute = self.compute;
         compute.constants.validate_shape(self.shape);
         validate_buffers(compute.constants, self.shape, &self.buffers);
-        if let (ReplayU32::Fixed(num_active_reqs), ReplayU32::Fixed(num_active_chunkwise_requests)) =
-            (self.num_active_reqs, self.num_active_chunkwise_requests)
+        if let (ReplayU32::Fixed(num_active_reqs), ReplayU32::Fixed(num_active_recurrent_requests)) =
+            (self.num_active_reqs, self.num_active_recurrent_requests)
         {
-            assert!(num_active_chunkwise_requests <= num_active_reqs);
+            assert!(num_active_recurrent_requests <= num_active_reqs);
         }
         compute.record_short_conv(
             recorder,
@@ -915,31 +914,31 @@ impl Operator for MixedInvocation<'_> {
         recorder.record_disjoint_buffers(
             &[self.buffers.recurrent_output, self.buffers.recurrent_state_arena],
             || {
-                chunkwise::record_chunkwise_state(
+                recurrent::record_recurrent_state(
                     compute,
                     recorder,
                     self.shape,
                     &self.buffers,
-                    self.num_active_chunkwise_requests,
+                    self.num_active_recurrent_requests,
                     self.write_candidate_states,
                 );
                 if self.write_candidate_states {
-                    recurrent::record_candidate_recurrent_state(
+                    recurrent_snapshot::record_candidate_recurrent_state(
                         compute,
                         recorder,
                         self.shape,
                         &self.buffers,
                         self.num_active_reqs,
-                        self.num_active_chunkwise_requests,
+                        self.num_active_recurrent_requests,
                     );
                 } else {
-                    recurrent::record_final_recurrent_state(
+                    recurrent_snapshot::record_final_recurrent_state(
                         compute,
                         recorder,
                         self.shape,
                         &self.buffers,
                         self.num_active_reqs,
-                        self.num_active_chunkwise_requests,
+                        self.num_active_recurrent_requests,
                     );
                 }
             },
@@ -948,12 +947,12 @@ impl Operator for MixedInvocation<'_> {
     }
 }
 
-fn set_chunkwise_count(recorder: &CommandRecorder<'_>, index: usize, value: ReplayU32, max_value: u32) {
+fn set_recurrent_count(recorder: &CommandRecorder<'_>, index: usize, value: ReplayU32, max_value: u32) {
     match value {
         ReplayU32::Fixed(value) => {
             assert!(
                 value <= max_value,
-                "GDN chunkwise request count exceeds recorded capacity"
+                "GDN recurrent request count exceeds recorded capacity"
             );
             recorder.set_u32(index, value);
         },

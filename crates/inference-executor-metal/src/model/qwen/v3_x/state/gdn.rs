@@ -211,7 +211,7 @@ impl Qwen3xGDNState {
         token_indices: &[u32],
         cu_tokens: &[u32],
         num_spec_tokens: &[u32],
-        num_chunkwise_requests: usize,
+        num_recurrent_requests: usize,
         state_page_ids_by_req: &[Vec<Vec<u32>>],
     ) -> GDNPreparedRequestState {
         self.request_state_table.prepare(
@@ -220,7 +220,7 @@ impl Qwen3xGDNState {
             token_indices,
             cu_tokens,
             num_spec_tokens,
-            num_chunkwise_requests,
+            num_recurrent_requests,
             state_page_ids_by_req,
         )
     }
@@ -228,14 +228,14 @@ impl Qwen3xGDNState {
     pub fn prepare_metadata(
         &self,
         cu_tokens: &[u32],
-        num_active_chunkwise_requests: u32,
+        num_active_recurrent_requests: u32,
         prepared: &GDNPreparedRequestState,
         num_total_tokens: u32,
     ) -> GDNReplayShape {
         self.backend().prepare(
             self.metadata(),
             cu_tokens,
-            num_active_chunkwise_requests,
+            num_active_recurrent_requests,
             prepared,
             &self.replay_bucket_policy,
             num_total_tokens,
@@ -253,7 +253,7 @@ impl Qwen3xGDNState {
     pub fn add_replay_arguments(&self, arguments: &mut ReplayArguments) {
         add_gdn_replay_arguments(
             self.metadata().replay_shape(),
-            self.metadata().num_active_chunkwise_requests(),
+            self.metadata().num_active_recurrent_requests(),
             arguments,
         );
     }
@@ -261,7 +261,7 @@ impl Qwen3xGDNState {
     pub fn add_private_replay_arguments(&self, arguments: &mut ReplayArguments) {
         add_gdn_private_replay_arguments(
             self.metadata().replay_shape(),
-            self.metadata().num_active_chunkwise_requests(),
+            self.metadata().num_active_recurrent_requests(),
             arguments,
         );
     }

@@ -27,7 +27,7 @@ impl Qwen35Executor {
             );
             if num_spec_tokens > 0 {
                 let num_fixed_tokens = request.decoder_query_tokens.token_consumption() - num_spec_tokens;
-                assert!(!self.main_gdn_state.backend().uses_chunkwise(num_fixed_tokens, 0),
+                assert!(!self.main_gdn_state.backend().uses_recurrent(num_fixed_tokens, 0),
                     "qwen3.5 speculative input exceeds the GDN fixed-token replay window");
             }
         }

@@ -43,7 +43,7 @@ pub struct GDNMetadataBuffers {
     flat_recurrent_state_write_slots: Buffer,
     flat_conv_state_write_slots: Buffer,
     replay_shape: Cell<Option<GDNReplayShape>>,
-    num_active_chunkwise_requests: Cell<u32>,
+    num_active_recurrent_requests: Cell<u32>,
 }
 
 impl GDNMetadataBuffers {
@@ -65,7 +65,7 @@ impl GDNMetadataBuffers {
             flat_recurrent_state_write_slots: Buffer::new_zeroed_elements(device, max_tokens, Dtype::Uint32),
             flat_conv_state_write_slots: Buffer::new_zeroed_elements(device, max_tokens, Dtype::Uint32),
             replay_shape: Cell::new(None),
-            num_active_chunkwise_requests: Cell::new(0),
+            num_active_recurrent_requests: Cell::new(0),
         }
     }
 
@@ -73,8 +73,8 @@ impl GDNMetadataBuffers {
         &self.cu_tokens
     }
 
-    pub fn num_active_chunkwise_requests(&self) -> u32 {
-        self.num_active_chunkwise_requests.get()
+    pub fn num_active_recurrent_requests(&self) -> u32 {
+        self.num_active_recurrent_requests.get()
     }
 
     pub fn max_requests(&self) -> usize {
@@ -105,7 +105,7 @@ impl GDNMetadataBuffers {
     pub fn update(
         &self,
         cu_tokens: &[u32],
-        num_active_chunkwise_requests: u32,
+        num_active_recurrent_requests: u32,
         src_recurrent_state_slots: &[u32],
         src_conv_state_slots: &[u32],
         flat_recurrent_state_write_slots: &[u32],
@@ -132,8 +132,8 @@ impl GDNMetadataBuffers {
         assert!(num_tokens_usize <= self.flat_recurrent_state_write_slots.len_bytes() / size_of::<u32>());
         let num_reqs = src_recurrent_state_slots.len() as u32;
         assert!(
-            num_active_chunkwise_requests <= num_reqs,
-            "GDN chunkwise prefix must fit the active requests"
+            num_active_recurrent_requests <= num_reqs,
+            "GDN recurrent prefix must fit the active requests"
         );
         assert!(
             num_reqs <= num_total_requests,
@@ -161,7 +161,7 @@ impl GDNMetadataBuffers {
         self.flat_conv_state_write_slots
             .write_typed(0, flat_conv_state_write_slots);
         self.replay_shape.set(Some(replay_shape));
-        self.num_active_chunkwise_requests.set(num_active_chunkwise_requests);
+        self.num_active_recurrent_requests.set(num_active_recurrent_requests);
         replay_shape
     }
 

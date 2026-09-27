@@ -28,7 +28,7 @@ kernel void gdn_compute_short_conv(
     constant uint& write_final_conv_state [[buffer(12)]],
     device bfloat16_t* replay_qkv [[buffer(13)]],
     constant ulong& replay_token_offset [[buffer(14)]],
-    constant uint& num_active_chunkwise_requests [[buffer(15)]],
+    constant uint& num_active_recurrent_requests [[buffer(15)]],
     uint global_linear_index [[thread_position_in_grid]]
 ) {
     const ulong conv_state_base = conv_state_offset_bytes / sizeof(bfloat16_t);
@@ -67,8 +67,8 @@ kernel void gdn_compute_short_conv(
             acc += x * float(conv_weight[weight_offset]);
         }
         if constexpr (SaveReplay) {
-            if (req_index >= num_active_chunkwise_requests) {
-                const uint replay_token_index = flat_token_index - cu_tokens[num_active_chunkwise_requests];
+            if (req_index >= num_active_recurrent_requests) {
+                const uint replay_token_index = flat_token_index - cu_tokens[num_active_recurrent_requests];
                 replay_qkv[(replay_token_offset + replay_token_index) * qkv_dim + channel_index] = qkv[(ulong)flat_token_index * input_qkv_stride + channel_index];
             }
         }

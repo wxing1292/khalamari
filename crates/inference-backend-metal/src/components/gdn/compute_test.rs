@@ -15,8 +15,8 @@ use super::Config;
 use super::MixedInvocation;
 use super::OutputGate;
 use super::Shape;
-use super::chunkwise;
 use super::recurrent;
+use super::recurrent_snapshot;
 use crate::metal::Buffer;
 use crate::metal::CommandRecorder;
 use crate::metal::Device;
@@ -30,13 +30,13 @@ use crate::test_support::ReplayTestCache;
 
 const NUM_ACTIVE_REQUESTS: ReplayParameterKey = ReplayParameterKey::new("test.gdn_compute.num_active_requests");
 const NUM_ACTIVE_TOKENS: ReplayParameterKey = ReplayParameterKey::new("test.gdn_compute.num_active_tokens");
-const NUM_ACTIVE_CHUNKWISE_REQUESTS: ReplayParameterKey =
-    ReplayParameterKey::new("test.gdn_compute.num_active_chunkwise_requests");
+const NUM_ACTIVE_RECURRENT_REQUESTS: ReplayParameterKey =
+    ReplayParameterKey::new("test.gdn_compute.num_active_recurrent_requests");
 
 #[test]
 fn test_execution_segments() {
-    for (num_tokens, num_spec_tokens, chunkwise) in [(1, 0, false), (8, 0, false), (9, 0, true), (9, 1, false)] {
-        assert_eq!(super::uses_chunkwise(num_tokens, num_spec_tokens), chunkwise);
+    for (num_tokens, num_spec_tokens, recurrent) in [(1, 0, false), (8, 0, false), (9, 0, true), (9, 1, false)] {
+        assert_eq!(super::uses_recurrent(num_tokens, num_spec_tokens), recurrent);
     }
 }
 
@@ -49,7 +49,7 @@ fn test_candidate_register_v_rejects_v_dim_tail() {
 }
 
 #[test]
-#[should_panic(expected = "GDN chunkwise V-row tile must divide Dv and fit device shared memory")]
+#[should_panic(expected = "GDN recurrent V-row tile must divide Dv and fit device shared memory")]
 fn test_new_insufficient_shared_memory() {
     let config = Config {
         qk_head_dim: 512,
@@ -795,7 +795,7 @@ fn test_sigmoid_gate_replay_matches_reference_across_prefill_decode_counts() {
 }
 
 #[test]
-fn test_chunkwise_replay_across_head_dimensions() {
+fn test_recurrent_replay_across_head_dimensions() {
     // Cover padded V rows and multiple V blocks, including wider Q/K heads.
     for (qk_head_dim, v_head_dim) in [(32, 4), (128, 128), (192, 32), (256, 8), (256, 128)] {
         assert_mixed_replay(
@@ -848,12 +848,12 @@ impl Operator for SerialMixedInvocation<'_> {
                 invocation.num_active_tokens,
             );
         }
-        chunkwise::record_chunkwise_state(
+        recurrent::record_recurrent_state(
             compute,
             recorder,
             invocation.shape,
             &invocation.buffers,
-            invocation.num_active_chunkwise_requests,
+            invocation.num_active_recurrent_requests,
             invocation.write_candidate_states,
         );
         recorder.record_with_barrier_before(SerialDecodeInvocation(&invocation));
@@ -872,22 +872,22 @@ impl Operator for SerialDecodeInvocation<'_> {
     fn record(self, recorder: &CommandRecorder<'_>) {
         let invocation = self.0;
         if invocation.write_candidate_states {
-            recurrent::record_candidate_recurrent_state(
+            recurrent_snapshot::record_candidate_recurrent_state(
                 invocation.compute,
                 recorder,
                 invocation.shape,
                 &invocation.buffers,
                 invocation.num_active_reqs,
-                invocation.num_active_chunkwise_requests,
+                invocation.num_active_recurrent_requests,
             );
         } else {
-            recurrent::record_final_recurrent_state(
+            recurrent_snapshot::record_final_recurrent_state(
                 invocation.compute,
                 recorder,
                 invocation.shape,
                 &invocation.buffers,
                 invocation.num_active_reqs,
-                invocation.num_active_chunkwise_requests,
+                invocation.num_active_recurrent_requests,
             );
         }
     }
@@ -975,7 +975,7 @@ fn assert_mixed_replay(config: Config, num_total_reqs: usize, num_total_tokens: 
                     buffers,
                     ReplayU32::Parameter(NUM_ACTIVE_REQUESTS),
                     ReplayU32::Parameter(NUM_ACTIVE_TOKENS),
-                    ReplayU32::Parameter(NUM_ACTIVE_CHUNKWISE_REQUESTS),
+                    ReplayU32::Parameter(NUM_ACTIVE_RECURRENT_REQUESTS),
                     write_candidate_states,
                 );
                 if serialized {
@@ -1027,7 +1027,7 @@ fn assert_mixed_replay(config: Config, num_total_reqs: usize, num_total_tokens: 
             let arguments = ReplayArguments::new()
                 .with_u32(NUM_ACTIVE_REQUESTS, request_lengths.len() as u32)
                 .with_u32(NUM_ACTIVE_TOKENS, num_tokens as u32)
-                .with_u32(NUM_ACTIVE_CHUNKWISE_REQUESTS, num_prefill);
+                .with_u32(NUM_ACTIVE_RECURRENT_REQUESTS, num_prefill);
             let (replay, hit) = cache.record(false, || unreachable!());
             assert!(hit);
             stream.submit_replay_with_arguments(replay, &arguments).wait();

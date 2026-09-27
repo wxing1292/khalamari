@@ -112,14 +112,14 @@ fn assert_replay_matches_cpu_reference(output_gate: GDNOutputGate) {
     ];
 
     for materialize_candidate_states in [false, true] {
-        for &(counts, num_active_chunkwise_requests) in cases {
+        for &(counts, num_active_recurrent_requests) in cases {
             let cu_tokens = cumulative_tokens(counts);
             let num_active_tokens = *cu_tokens.last().unwrap();
             let num_active_requests = counts.len() as u32;
             let source_slots = (0..num_active_requests).collect::<Vec<_>>();
             let mut recurrent_write_slots = vec![u32::MAX; num_active_tokens as usize];
             let mut conv_write_slots = recurrent_write_slots.clone();
-            for window in cu_tokens.windows(2).take(num_active_chunkwise_requests as usize) {
+            for window in cu_tokens.windows(2).take(num_active_recurrent_requests as usize) {
                 for token_index in window[0]..window[1] {
                     let is_final = token_index + 1 == window[1];
                     if is_final || (materialize_candidate_states && token_index % 3 != 1) {
@@ -139,7 +139,7 @@ fn assert_replay_matches_cpu_reference(output_gate: GDNOutputGate) {
             let shape = replay.component().0.prepare(
                 &metadata,
                 &cu_tokens,
-                num_active_chunkwise_requests,
+                num_active_recurrent_requests,
                 &prepared,
                 &policy,
                 num_total_tokens,
@@ -176,7 +176,7 @@ fn assert_replay_matches_cpu_reference(output_gate: GDNOutputGate) {
             let previous_recurrent = read_bf16_values(&recurrent_state_arena, initial_recurrent_arena.len());
             let previous_output = read_bf16_values(&next_hidden, hidden_values.len());
             let mut arguments = ReplayArguments::new();
-            add_gdn_replay_arguments(shape, num_active_chunkwise_requests, &mut arguments);
+            add_gdn_replay_arguments(shape, num_active_recurrent_requests, &mut arguments);
             runtime
                 .submit_replay_with_arguments(replay.replay(&key), &arguments)
                 .wait();

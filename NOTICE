@@ -22,3 +22,12 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+The blocked sequential GDN kernel adapts the eight-lane state recurrence
+from oMLX v0.6.1, omlx/custom_kernels/qwen35_prefill/gdn.py:
+https://github.com/jundot/omlx
+
+The upstream file is licensed under Apache-2.0. A copy of that license is
+included in licenses/omlx-Apache-2.0.txt. The psi implementation adds F32
+normalization and gates, model-derived geometry, ragged request metadata,
+BF16 state arenas, arbitrary state snapshots, and per-token F32 replay logs.

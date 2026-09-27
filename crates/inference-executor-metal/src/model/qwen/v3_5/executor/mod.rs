@@ -1136,7 +1136,7 @@ impl ReplayableDecoderModel for Qwen35Executor {
             match &request.decoder_query_tokens {
                 QueryTokens::Prefill { .. } => 0,
                 query => {
-                    if gdn.uses_chunkwise(query.token_consumption(), query.num_spec_tokens()) {
+                    if gdn.uses_recurrent(query.token_consumption(), query.num_spec_tokens()) {
                         1
                     } else {
                         2
@@ -1213,24 +1213,24 @@ impl ReplayableDecoderModel for Qwen35Executor {
                 "text-only Qwen3.5 does not accept resource placements"
             );
         }
-        let num_active_chunkwise_requests = (0..microbatch.num_reqs())
+        let num_active_recurrent_requests = (0..microbatch.num_reqs())
             .take_while(|&req_index| {
                 !microbatch.is_decode_req(req_index)
-                    || self.main_gdn_state.backend().uses_chunkwise(
+                    || self.main_gdn_state.backend().uses_recurrent(
                         (microbatch.cu_tokens()[req_index + 1] - microbatch.cu_tokens()[req_index]) as usize,
                         microbatch.num_spec_tokens(req_index) as usize,
                     )
             })
             .count();
         debug_assert!(
-            (num_active_chunkwise_requests..microbatch.num_reqs()).all(|req_index| {
+            (num_active_recurrent_requests..microbatch.num_reqs()).all(|req_index| {
                 microbatch.is_decode_req(req_index)
-                    && !self.main_gdn_state.backend().uses_chunkwise(
+                    && !self.main_gdn_state.backend().uses_recurrent(
                         (microbatch.cu_tokens()[req_index + 1] - microbatch.cu_tokens()[req_index]) as usize,
                         microbatch.num_spec_tokens(req_index) as usize,
                     )
             }),
-            "Qwen3.5 batch requests must have a chunkwise prefix"
+            "Qwen3.5 batch requests must have a recurrent prefix"
         );
         let gdn_states_start = Instant::now();
         let gdn_prepared = self.main_gdn_state.prepare_states(
@@ -1241,14 +1241,14 @@ impl ReplayableDecoderModel for Qwen35Executor {
             &(0..microbatch.num_reqs())
                 .map(|req_index| microbatch.num_spec_tokens(req_index))
                 .collect::<Vec<_>>(),
-            num_active_chunkwise_requests,
+            num_active_recurrent_requests,
             microbatch.gdn_state_page_ids_by_req(),
         );
         let gdn_states_elapsed = gdn_states_start.elapsed();
         let gdn_metadata_start = Instant::now();
         let gdn_shape = self.main_gdn_state.prepare_metadata(
             microbatch.cu_tokens(),
-            num_active_chunkwise_requests as u32,
+            num_active_recurrent_requests as u32,
             &gdn_prepared,
             num_main_total_tokens,
         );

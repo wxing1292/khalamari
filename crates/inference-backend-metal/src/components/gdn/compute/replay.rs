@@ -1,9 +1,10 @@
 use crate::components::gdn::compute::Buffers;
 use crate::components::gdn::compute::Compute;
 use crate::components::gdn::compute::ComputeConstants;
+use crate::components::gdn::compute::Config;
 use crate::components::gdn::compute::Shape;
-use crate::components::gdn::compute::chunkwise;
-use crate::components::gdn::compute::set_chunkwise_count;
+use crate::components::gdn::compute::recurrent;
+use crate::components::gdn::compute::set_recurrent_count;
 use crate::components::gdn::compute::set_replay_u32;
 use crate::components::gdn::compute::validate_buffers;
 use crate::metal::Buffer;
@@ -12,6 +13,37 @@ use crate::metal::Operator;
 use crate::metal::ReplayU32;
 
 const SOURCE: &str = include_str!("../../metal/gdn_compute_replay.metal");
+const REPLAY_V_ROWS: u32 = 32;
+const REPLAY_LANES_PER_ROW: u32 = 8;
+const REPLAY_TOKEN_TILE: u32 = 16;
+
+pub fn token_tile(config: Config, max_threadblock_memory_bytes: usize) -> u32 {
+    let rows = [REPLAY_V_ROWS, 16, 8, 4]
+        .into_iter()
+        .find(|&rows| config.v_head_dim.is_multiple_of(rows))
+        .unwrap();
+    let row_bytes = 2 * (config.qk_head_dim as u64 + 4) * 4 + (rows as u64 + 8) * 2 + 8;
+    let preferred = if config.qk_head_dim > 128 { 8 } else { REPLAY_TOKEN_TILE };
+    [16, 8, 4, 2, 1]
+        .into_iter()
+        .find(|&tokens| tokens <= preferred && tokens as u64 * row_bytes <= max_threadblock_memory_bytes as u64)
+        .expect("GDN replay token tile must fit device shared memory")
+}
+
+fn geometry(constants: ComputeConstants) -> (u32, u32, u32, u32) {
+    let rows = [REPLAY_V_ROWS, 16, 8, 4]
+        .into_iter()
+        .find(|&rows| constants.model.v_head_dim.is_multiple_of(rows))
+        .unwrap();
+    let lanes = REPLAY_LANES_PER_ROW.min(constants.model.qk_head_dim / 4);
+    let groups = (rows * lanes).div_ceil(32);
+    let tokens = constants.replay_token_tile;
+    (rows, groups, tokens, lanes)
+}
+
+pub fn required_threads(constants: ComputeConstants) -> usize {
+    geometry(constants).1 as usize * 32
+}
 
 /// Per-layer inputs that survive forward until the accepted state is committed.
 ///
@@ -30,18 +62,15 @@ pub struct ReplayBuffers<'a> {
 }
 
 pub fn source(constants: ComputeConstants) -> String {
-    let thread_block = constants.kernels.candidate_recurrent_state.thread_block;
+    let (rows, groups, tokens, lanes) = geometry(constants);
     format!(
-        "constant uint replay_num_qk_dim_threads = {qk_threads}u;\nconstant uint replay_num_v_rows_per_simdgroup = \
-         {v_rows}u;\nconstant uint replay_num_simdgroups = {simdgroups}u;\n{SOURCE}",
-        qk_threads = thread_block.num_qk_dim_threads,
-        v_rows = thread_block.simdgroup.num_v_rows,
-        simdgroups = thread_block.num_simdgroups,
+        "constant uint replay_lanes_per_row = {lanes}u;\nconstant uint replay_num_v_rows = {rows}u;\nconstant uint \
+         replay_num_simdgroups = {groups}u;\nconstant uint replay_token_tile = {tokens}u;\n{SOURCE}",
     )
 }
 
 impl Compute {
-    /// Chunkwise writes final/boundary states. The suffix writes a replay log.
+    /// Recurrent writes final/boundary states. The suffix writes a replay log.
     #[allow(clippy::too_many_arguments)]
     pub fn invoke_with_replay<'a>(
         &'a self,
@@ -50,7 +79,7 @@ impl Compute {
         replay: ReplayBuffers<'a>,
         num_active_reqs: ReplayU32,
         num_active_tokens: ReplayU32,
-        num_active_chunkwise_requests: ReplayU32,
+        num_active_recurrent_requests: ReplayU32,
     ) -> ReplayInvocation<'a> {
         ReplayInvocation {
             compute: self,
@@ -59,7 +88,7 @@ impl Compute {
             replay,
             num_active_reqs,
             num_active_tokens,
-            num_active_chunkwise_requests,
+            num_active_recurrent_requests,
         }
     }
 }
@@ -71,7 +100,7 @@ pub struct ReplayInvocation<'a> {
     replay: ReplayBuffers<'a>,
     num_active_reqs: ReplayU32,
     num_active_tokens: ReplayU32,
-    num_active_chunkwise_requests: ReplayU32,
+    num_active_recurrent_requests: ReplayU32,
 }
 
 impl Operator for ReplayInvocation<'_> {
@@ -100,10 +129,10 @@ impl Operator for ReplayInvocation<'_> {
                 self.replay.num_total_tokens,
             );
         }
-        if let (ReplayU32::Fixed(num_active_reqs), ReplayU32::Fixed(num_active_chunkwise_requests)) =
-            (self.num_active_reqs, self.num_active_chunkwise_requests)
+        if let (ReplayU32::Fixed(num_active_reqs), ReplayU32::Fixed(num_active_recurrent_requests)) =
+            (self.num_active_reqs, self.num_active_recurrent_requests)
         {
-            assert!(num_active_chunkwise_requests <= num_active_reqs);
+            assert!(num_active_recurrent_requests <= num_active_reqs);
         }
         recorder.set_kernel(&compute.short_conv_replay);
         compute.record_short_conv_bindings(
@@ -116,10 +145,10 @@ impl Operator for ReplayInvocation<'_> {
         );
         recorder.set_buffer_write(13, self.replay.qkv, 0);
         recorder.set_u64(14, self.replay.token_offset);
-        set_chunkwise_count(
+        set_recurrent_count(
             recorder,
             15,
-            self.num_active_chunkwise_requests,
+            self.num_active_recurrent_requests,
             self.shape.num_total_reqs,
         );
         compute.dispatch_short_conv(recorder, self.shape);
@@ -130,16 +159,16 @@ impl Operator for ReplayInvocation<'_> {
             self.num_active_reqs,
             self.num_active_tokens,
         );
-        // Chunkwise and replay requests have disjoint state slots and output rows.
+        // Recurrent and replay requests have disjoint state slots and output rows.
         recorder.record_disjoint_buffers(
             &[self.buffers.recurrent_output, self.buffers.recurrent_state_arena],
             || {
-                chunkwise::record_chunkwise_state(
+                recurrent::record_recurrent_state(
                     compute,
                     recorder,
                     self.shape,
                     &self.buffers,
-                    self.num_active_chunkwise_requests,
+                    self.num_active_recurrent_requests,
                     true,
                 );
                 self.record_replay(recorder);
@@ -185,27 +214,23 @@ impl ReplayInvocation<'_> {
             "GDN active request count",
         );
         recorder.set_u64(12, self.buffers.recurrent_state_arena_offset_bytes);
-        set_chunkwise_count(
+        set_recurrent_count(
             recorder,
             13,
-            self.num_active_chunkwise_requests,
+            self.num_active_recurrent_requests,
             self.shape.num_total_reqs,
         );
         recorder.set_buffer_write(14, self.replay.k, 0);
         recorder.set_buffer_write(15, self.replay.alpha, 0);
         recorder.set_u64(16, self.replay.token_offset);
-        let thread_block = self.compute.constants.kernels.candidate_recurrent_state.thread_block;
+        let (rows, groups, ..) = geometry(self.compute.constants);
         recorder.dispatch_threadblocks(
             (
-                (self.compute.constants.model.v_head_dim / thread_block.num_v_rows()) as usize,
+                (self.compute.constants.model.v_head_dim / rows) as usize,
                 self.shape.num_total_reqs as usize * self.compute.constants.model.num_v_heads as usize,
                 1,
             ),
-            (
-                thread_block.num_qk_dim_threads as usize,
-                thread_block.num_simdgroups as usize,
-                1,
-            ),
+            (32, groups as usize, 1),
         );
     }
 }
