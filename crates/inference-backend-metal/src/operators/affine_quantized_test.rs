@@ -41,7 +41,7 @@ fn test_adaptive_qmm_tile_crossover() {
     );
     assert_eq!(
         Selector::key(adaptive_config(151_936, 5120, Dtype::Bfloat16), 17, Epilogue::Identity),
-        KernelKind::QmmBm32Bn32
+        KernelKind::QmmBm32Bn64
     );
 }
 
@@ -79,17 +79,21 @@ fn test_adaptive_dense_projection_crossover() {
 #[test]
 fn test_adaptive_topology_boundaries_follow_selector() {
     let cases = [
-        (adaptive_config(151_936, 2048, Dtype::Bfloat16), &[5, 9, 17][..]),
-        (adaptive_config(151_936, 5120, Dtype::Bfloat16), &[6, 9, 17][..]),
-        (adaptive_config(248_320, 2048, Dtype::Bfloat16), &[5, 9, 17][..]),
-        (adaptive_config(248_320, 5120, Dtype::Bfloat16), &[6, 9, 17][..]),
-        (adaptive_config(34_816, 5120, Dtype::Bfloat16), &[6, 9, 17][..]),
-        (adaptive_config(4096, 4096, Dtype::Bfloat16), &[12, 17][..]),
-        (adaptive_config(1024, 2048, Dtype::Bfloat16), &[18][..]),
+        (adaptive_config(151_936, 2048, Dtype::Bfloat16), &[5, 9, 17][..], false),
+        (adaptive_config(151_936, 5120, Dtype::Bfloat16), &[6, 9, 17][..], true),
+        (adaptive_config(248_320, 2048, Dtype::Bfloat16), &[5, 9, 17][..], false),
+        (adaptive_config(248_320, 5120, Dtype::Bfloat16), &[6, 9, 17][..], true),
+        (adaptive_config(34_816, 5120, Dtype::Bfloat16), &[6, 9, 17][..], true),
+        (adaptive_config(4096, 4096, Dtype::Bfloat16), &[12, 17][..], true),
+        (adaptive_config(1024, 2048, Dtype::Bfloat16), &[18][..], false),
     ];
 
     for epilogue in [Epilogue::Identity, Epilogue::SwiGLU] {
-        for (config, expected) in cases {
+        for (config, expected, large_projection) in cases {
+            let mut expected = expected.to_vec();
+            if large_projection {
+                expected.push(2048);
+            }
             assert_eq!(
                 &*adaptive_topology_boundaries(config, epilogue),
                 expected,
@@ -97,8 +101,8 @@ fn test_adaptive_topology_boundaries_follow_selector() {
             );
 
             let boundaries = adaptive_topology_boundaries(config, epilogue);
-            let policy = ReplayBucketPolicy::with_topology_boundaries(64, &boundaries);
-            for num_active_rows in 1..=64 {
+            let policy = ReplayBucketPolicy::with_topology_boundaries(4096, &boundaries);
+            for num_active_rows in 1..=4096 {
                 let num_total_rows = policy.capacity(num_active_rows);
                 assert_eq!(
                     Selector::key(config, num_active_rows as i32, epilogue),
@@ -107,6 +111,63 @@ fn test_adaptive_topology_boundaries_follow_selector() {
                 );
             }
         }
+    }
+}
+
+#[test]
+fn test_large_projection_selection_preserves_other_contracts() {
+    let config = adaptive_config(16_480, 5120, Dtype::Bfloat16);
+    for rows in [128, 256, 1024, 2047] {
+        assert_eq!(Selector::key(config, rows, Epilogue::Identity), KernelKind::QmmBm32Bn64);
+    }
+    for rows in [2048, 4096, 16384] {
+        assert_eq!(Selector::key(config, rows, Epilogue::Identity), KernelKind::QmmBm64Bn64);
+        assert_eq!(Selector::key(config, rows, Epilogue::SwiGLU), KernelKind::QmmBm64Bn32);
+    }
+    for other in [
+        Config::same_dtype(16_480, 5120, 64, 4, Dtype::Float16),
+        Config { bits: 8, ..config },
+        Config {
+            group_size: 128,
+            ..config
+        },
+        Config {
+            input_dtype: Dtype::Float32,
+            ..config
+        },
+        Config {
+            output_dtype: Dtype::Float32,
+            ..config
+        },
+        Config {
+            scale_bias_dtype: Dtype::Float32,
+            ..config
+        },
+        Config { n: 48, ..config },
+        Config { k: 2048, ..config },
+    ] {
+        assert_eq!(Selector::key(other, 4096, Epilogue::Identity), KernelKind::QmmBm32Bn32);
+    }
+}
+
+#[test]
+fn test_large_qmm_replay_preserves_partial_tiles_and_inactive_rows() {
+    for n in [1, 31, 32, 33, 63, 64, 65, 96] {
+        assert_bucketed_replay_matches_reference(
+            Config::same_dtype(n, 128, 64, 4, Dtype::Bfloat16),
+            KernelKind::QmmBm64Bn32,
+            128,
+        );
+    }
+    for config in [
+        Config::same_dtype(65, 64, 32, 8, Dtype::Float32),
+        Config::same_dtype(65, 128, 128, 4, Dtype::Float16),
+        Config {
+            output_dtype: Dtype::Float32,
+            ..Config::same_dtype(65, 64, 64, 4, Dtype::Bfloat16)
+        },
+    ] {
+        assert_bucketed_replay_matches_reference(config, KernelKind::QmmBm64Bn32, 128);
     }
 }
 
@@ -165,6 +226,7 @@ fn test_bucketed_qmm_variants_match_reference_across_active_counts() {
         (same, KernelKind::QmmBm16Bn32, 32),
         (same, KernelKind::QmmBm32Bn32, 64),
         (same_q4_bf16, KernelKind::QmmBm16Bn32, 32),
+        (same_q4_bf16, KernelKind::QmmBm32Bn32, 64),
         (same_unaligned, KernelKind::QmmBm32Bn32, 64),
         (mixed_unaligned, KernelKind::QmmBm8Bn32, 16),
         (mixed_unaligned, KernelKind::QmmBm16Bn32, 32),
@@ -175,6 +237,28 @@ fn test_bucketed_qmm_variants_match_reference_across_active_counts() {
 }
 
 fn assert_bucketed_replay_matches_reference(config: Config, kind: KernelKind, num_total_rows: i32) {
+    assert_epilogue_replay_matches_reference(config, kind, num_total_rows, Epilogue::Identity);
+}
+
+#[test]
+fn test_steel_wide_tiles_preserve_replay_rows_and_projection_rounding() {
+    for dtype in [Dtype::Float32, Dtype::Float16, Dtype::Bfloat16] {
+        for mixed in [false, true] {
+            let mut config = Config::same_dtype(130, 128, 64, 4, dtype);
+            if mixed {
+                config.scale_bias_dtype = Dtype::Float32;
+            }
+            for kind in [KernelKind::QmmBm32Bn64, KernelKind::QmmBm64Bn64] {
+                assert_epilogue_replay_matches_reference(config, kind, 128, Epilogue::Identity);
+            }
+            for kind in [KernelKind::QmmBm32Bn32, KernelKind::QmmBm64Bn32] {
+                assert_epilogue_replay_matches_reference(config, kind, 128, Epilogue::SwiGLU);
+            }
+        }
+    }
+}
+
+fn assert_epilogue_replay_matches_reference(config: Config, kind: KernelKind, num_total_rows: i32, epilogue: Epilogue) {
     assert!(matches!(config.bits, 4 | 8));
     let device = Device::system_default();
     let stream = Stream::new(&device);
@@ -200,8 +284,9 @@ fn assert_bucketed_replay_matches_reference(config: Config, kind: KernelKind, nu
     };
     let scales_buffer = buffer_from_f32(&device, &scales, config.scale_bias_dtype);
     let biases_buffer = buffer_from_f32(&device, &biases, config.scale_bias_dtype);
-    let output = Buffer::new_zeroed(&device, config.output_bytes(num_total_rows));
-    let kernel = Kernel::new(&device, config, kind);
+    let output_bytes = |rows| config.output_bytes(rows) / epilogue.output_divisor() as usize;
+    let output = Buffer::new_zeroed(&device, output_bytes(num_total_rows));
+    let kernel = Kernel::new_with_epilogue(&device, config, kind, epilogue);
     let mut cache = ReplayTestCache::new();
     let (replay, cache_hit) = cache.record(num_total_rows, || {
         let mut recorder = stream.create_replay_program();
@@ -223,18 +308,34 @@ fn assert_bucketed_replay_matches_reference(config: Config, kind: KernelKind, nu
     });
     assert!(!cache_hit);
 
-    let mut active_counts = vec![1, num_total_rows, 3, num_total_rows - 1, 2, num_total_rows / 2];
+    let mut active_counts = vec![
+        1,
+        num_total_rows,
+        3,
+        num_total_rows - 1,
+        2,
+        num_total_rows / 2,
+        num_total_rows / 2 + 1,
+    ];
     active_counts.retain(|&active| active > 0 && active <= num_total_rows);
     active_counts.dedup();
     for num_active_rows in active_counts {
         let (replay, cache_hit) = cache.record(num_total_rows, || unreachable!());
         assert!(cache_hit);
+        let before = output.read_typed::<u8>(0, output_bytes(num_total_rows)).to_vec();
         stream
             .submit_replay_with_arguments(
                 replay,
                 &ReplayArguments::new().with_u32(NUM_ACTIVE_ROWS, num_active_rows as u32),
             )
             .wait();
+        let after = output.read_typed::<u8>(0, output_bytes(num_total_rows));
+        let active_bytes = output_bytes(num_active_rows);
+        assert_eq!(
+            &after[active_bytes..],
+            &before[active_bytes..],
+            "inactive output rows changed"
+        );
         let expected = round_values_to_dtype(
             &cpu_affine_reference(
                 config,
@@ -246,9 +347,19 @@ fn assert_bucketed_replay_matches_reference(config: Config, kind: KernelKind, nu
             ),
             config.output_dtype,
         );
+        let expected = if epilogue == Epilogue::SwiGLU {
+            let width = config.n as usize / 2;
+            let values: Vec<f32> = expected
+                .chunks_exact(config.n as usize)
+                .flat_map(|row| (0..width).map(move |i| (row[i] / (1.0 + (-row[i]).exp())) * row[width + i]))
+                .collect();
+            round_values_to_dtype(&values, config.output_dtype)
+        } else {
+            expected
+        };
         let actual = read_f32(
             &output,
-            num_active_rows as usize * config.n as usize,
+            num_active_rows as usize * config.n as usize / epilogue.output_divisor() as usize,
             config.output_dtype,
         );
         assert_close_case(&actual, &expected, output_tolerance(config.output_dtype), config, kind);

@@ -103,6 +103,9 @@ impl BenchKernel {
             Self::Exact(affine_quantized::KernelKind::QmmBm8Bn32) => "qmm-bm8-bn32",
             Self::Exact(affine_quantized::KernelKind::QmmBm16Bn32) => "qmm-bm16-bn32",
             Self::Exact(affine_quantized::KernelKind::QmmBm32Bn32) => "qmm-bm32-bn32",
+            Self::Exact(affine_quantized::KernelKind::QmmBm64Bn32) => "qmm-bm64-bn32",
+            Self::Exact(affine_quantized::KernelKind::QmmBm32Bn64) => "qmm-bm32-bn64",
+            Self::Exact(affine_quantized::KernelKind::QmmBm64Bn64) => "qmm-bm64-bn64",
         }
     }
 }

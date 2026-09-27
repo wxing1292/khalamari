@@ -48,7 +48,7 @@ crates/inference-backend-metal/src/components/dense_mlp.rs
 crates/inference-backend-metal/src/components/dense_mlp_test.rs
 crates/inference-backend-metal/src/operators/affine_quantized.rs
 crates/inference-backend-metal/src/operators/metal/affine_quantized_gate_up_swiglu.metal
-crates/inference-backend-metal/src/operators/metal/affine_quantized_gate_up_swiglu_tensor_ops.metal
+crates/inference-backend-metal/src/operators/metal/affine_quantized_gate_up_swiglu_steel.metal
 ```
 
 ## Shape model
@@ -244,20 +244,19 @@ choices so that a replay bucket cannot cross either topology boundary.
 It constructs the gate/up/SwiGLU operator with `new_gate_up_swiglu` and the down operator with `new`.
 Each `affine_quantized::Matmul` owns the QMV/QMM candidates and selects its kernel from the fixed epilogue and total
 row count. Selection and topology boundaries use the same selector. They do not depend on registry entry order.
-QMM uses Metal TensorOps with F32 cooperative accumulators.
-Accumulator initialization and projection stores follow the shared
-[cooperative tensor access contract](engineering_conventions.md#metal-cooperative-tensor-access).
-`operators/metal/affine_quantized_tensor_ops.metal` owns the BM8, BM16, and BM32 tile implementations.
-`affine_qmm_tile` computes one ordinary projection.
-The dense fused shader shares its input tile between separate gate and up SIMDgroups.
-The fused QMM output tile has BN=16. The ordinary down QMM tile has BN=32.
-Each thread block loads an input tile and dequantizes one weight tile into threadgroup memory.
-The SIMDgroups reuse these tiles across output rows. Same-dtype operands keep their existing storage-dtype
-rounding; mixed-dtype operands use F32. QMV remains the small-row path.
+QMM uses Steel `BlockMMA` with F32 accumulators and 8x8 SIMDgroup matrix operations.
+`operators/metal/affine_quantized_qmm_steel.metal` owns ordinary QMM.
+`operators/metal/affine_quantized_gate_up_swiglu_steel.metal` owns fused gate/up/SwiGLU.
+Both use BK32. Each block loads an input tile and dequantizes a weight tile into SMEM.
+The fused kernel reuses the input tile across gate and up. The projections reuse one weight staging region.
+Both projection accumulators remain in REGISTER until the fused activation.
+The kernel rounds each projection to its storage dtype before it computes SwiGLU in F32.
+Same-dtype operands retain storage-dtype rounding. Mixed-dtype operands use F32. QMV remains the small-row path.
+Full tiles use unchecked loaders. Partial tiles retain active-row and output-column masks.
 The model and executor provide the complete dense-MLP dimensions and active row count.
 They do not select a kernel or tile.
 
-Large dense MLPs use this policy when `hidden_dim > 4096` or `intermediate_dim > 4096`:
+Large dense MLPs use this base policy when `hidden_dim > 4096` or `intermediate_dim > 4096`:
 
 | Recorded row capacity | Gate/up/SwiGLU | Down |
 | ---: | --- | --- |
@@ -265,6 +264,18 @@ Large dense MLPs use this policy when `hidden_dim > 4096` or `intermediate_dim >
 | 6–8 | QMM BM8/BN16 | QMM BM8/BN32 |
 | 9–16 | QMM BM16/BN16 | QMM BM16/BN32 |
 | 17 or more | QMM BM32/BN16 | QMM BM32/BN32 |
+
+The following rule overrides rows above 16 for each eligible affine operator.
+Input, output, and scale/bias must all use BF16. Weights must use Q4/group64.
+The affine config must have `n >= 4096` and `k >= 4096`.
+
+| Recorded row capacity | Gate/up/SwiGLU | Ordinary projection, including down |
+| ---: | --- | --- |
+| 17–2047 | QMM BM32/BN32/BK32 | QMM BM32/BN64/BK32 |
+| 2048 or more | QMM BM64/BN32/BK32 | QMM BM64/BN64/BK32 |
+
+The selector exposes the 2048-row topology boundary to replay bucketing.
+Gate/up and down evaluate eligibility independently.
 
 Smaller dense MLPs keep QMV for a longer range.
 The first QMM row count is 18 when both dimensions are at most 2048.

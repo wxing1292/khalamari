@@ -24,6 +24,7 @@ fn test_replay_bucketing() {
                 (8, &[1_u32, 8, 7, 3][..], 0x1000_0002),
                 (12, &[9_u32, 12, 10, 11][..], 0x1000_0003),
                 (20, &[17_u32, 20, 18, 19][..], 0x1000_0004),
+                (33, &[32_u32, 33, 1, 31, 32][..], 0x1000_0005),
             ][..],
         ),
         (
@@ -38,10 +39,11 @@ fn test_replay_bucketing() {
             &[
                 (8_u32, &[1_u32, 8, 7, 3][..], 0x2000_0001_u32),
                 (20, &[1_u32, 20, 18, 3][..], 0x2000_0002),
+                (33, &[32_u32, 33, 1, 31, 32][..], 0x2000_0003),
             ][..],
         ),
     ] {
-        let fixture = DenseMLPFixture::new(20, config);
+        let fixture = DenseMLPFixture::new(33, config);
         let mut cache = ReplayTestCache::new();
         for &(num_total_tokens, active_sequence, seed) in cases {
             let key = (num_total_tokens, fixture.compute.topology(num_total_tokens));

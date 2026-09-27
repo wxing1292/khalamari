@@ -495,7 +495,7 @@ impl ExpertMajorKernels {
             "{MIXED_AFFINE_SOURCE}\n{TENSOR_OPS_SOURCE}\n{EXPERT_MAJOR_TENSOR_OPS_SOURCE}\n{template}"
         ));
         let qmm = CompiledKernel::new_tensor_ops(device, &source, &qmm_name);
-        validate_qmm_pipeline(device, 32, Dtype::Float32, KernelKind::QmmBm8Bn32, &qmm);
+        validate_qmm_pipeline(device, Dtype::Float32, KernelKind::QmmBm8Bn32, &qmm);
         let qmv_name = format!("{entry}_qmv");
         let template = template_definition(&qmv_name, &qmv_name, &args);
         let source = affine_quantized_source(&format!(
@@ -1128,6 +1128,9 @@ pub enum KernelKind {
     QmmBm8Bn32,
     QmmBm16Bn32,
     QmmBm32Bn32,
+    QmmBm64Bn32,
+    QmmBm32Bn64,
+    QmmBm64Bn64,
 }
 
 impl KernelKind {
@@ -1139,6 +1142,9 @@ impl KernelKind {
             Self::QmmBm8Bn32 => Some((8, 32)),
             Self::QmmBm16Bn32 => Some((16, 32)),
             Self::QmmBm32Bn32 => Some((32, 32)),
+            Self::QmmBm64Bn32 => Some((64, 32)),
+            Self::QmmBm32Bn64 => Some((32, 64)),
+            Self::QmmBm64Bn64 => Some((64, 64)),
             Self::QmvBn4Bk32 | Self::QmvBn8Bk32 | Self::QmvQuadBn64 => None,
         }
     }
@@ -1162,18 +1168,15 @@ impl Kernel {
             Epilogue::Identity => affine_kernel_source(config, kind),
             Epilogue::SwiGLU => gate_up_swiglu_source(config, kind),
         };
-        let kernel = if let Some((bm, _)) = kind.qmm_shape() {
-            let kernel = CompiledKernel::new_tensor_ops(device, &source, &kernel_name);
+        let kernel = CompiledKernel::new(device, &source, &kernel_name);
+        if kind.qmm_shape().is_some() {
             let operand_dtype = if config.uses_same_dtype() {
                 config.input_dtype
             } else {
                 Dtype::Float32
             };
-            validate_qmm_pipeline(device, qmm_bk(config, bm), operand_dtype, kind, &kernel);
-            kernel
-        } else {
-            CompiledKernel::new(device, &source, &kernel_name)
-        };
+            validate_qmm_pipeline(device, operand_dtype, kind, &kernel);
+        }
         Self {
             config,
             epilogue,
@@ -1318,6 +1321,15 @@ impl Registry {
             epilogue,
             entries: [qmv_key, qmm[0], qmm[1], qmm[2]]
                 .into_iter()
+                .chain(
+                    uses_large_qmm(config)
+                        .then_some(match epilogue {
+                            Epilogue::Identity => [KernelKind::QmmBm32Bn64, KernelKind::QmmBm64Bn64],
+                            Epilogue::SwiGLU => [KernelKind::QmmBm32Bn32, KernelKind::QmmBm64Bn32],
+                        })
+                        .into_iter()
+                        .flatten(),
+                )
                 .map(|kind| (kind, Kernel::new_with_epilogue(device, config, kind, epilogue)))
                 .collect(),
         }
@@ -1338,7 +1350,14 @@ impl Selector {
     }
 
     fn key(config: Config, num_rows: i32, epilogue: Epilogue) -> KernelKind {
-        if num_rows < adaptive_qmv_batch_limit(config) {
+        if uses_large_qmm(config) && num_rows > QMM_BM16_MAX_ROWS {
+            match (epilogue, num_rows >= QMM_LARGE_MIN_ROWS) {
+                (Epilogue::Identity, false) => KernelKind::QmmBm32Bn64,
+                (Epilogue::Identity, true) => KernelKind::QmmBm64Bn64,
+                (Epilogue::SwiGLU, false) => KernelKind::QmmBm32Bn32,
+                (Epilogue::SwiGLU, true) => KernelKind::QmmBm64Bn32,
+            }
+        } else if num_rows < adaptive_qmv_batch_limit(config) {
             match epilogue {
                 Epilogue::Identity => Self::qmv_key(config),
                 Epilogue::SwiGLU => KernelKind::QmvBn4Bk32,
@@ -1436,7 +1455,7 @@ impl Operator for Invocation<'_> {
                     ceil_div_i32(num_total_rows_i32, bm) as usize,
                     1,
                 ),
-                (32, 2, if bm == 32 { 2 } else { 1 }),
+                (32, 2, if bm >= 32 { 2 } else { 1 }),
             );
         } else {
             let (bn, num_simdgroups) = match kernel.kind {
@@ -1543,9 +1562,10 @@ fn gate_up_swiglu_source(config: Config, kind: KernelKind) -> (String, String) {
     let input_type = metal_type_string(config.input_dtype);
     let output_type = metal_type_string(config.output_dtype);
     let param_type = metal_type_string(config.scale_bias_dtype);
-    let bm = kind.qmm_shape().map(|(bm, _)| bm);
+    let shape = kind.qmm_shape();
+    let bm = shape.map(|(bm, _)| bm);
     let (function, source) = if bm.is_some() {
-        ("affine_qmm_gate_up_swiglu", DENSE_GATE_UP_SWIGLU_TENSOR_OPS_SOURCE)
+        ("affine_qmm_gate_up_swiglu", DENSE_GATE_UP_SWIGLU_STEEL_SOURCE)
     } else {
         ("affine_qmv_gate_up_swiglu", DENSE_GATE_UP_SWIGLU_SOURCE)
     };
@@ -1558,7 +1578,8 @@ fn gate_up_swiglu_source(config: Config, kind: KernelKind) -> (String, String) {
     ];
     if let Some(bm) = bm {
         args.push(bm.to_string());
-        args.push(qmm_bk(config, bm).to_string());
+        args.push(shape.unwrap().1.to_string());
+        args.push(QMM_BK.to_string());
     } else {
         let bn = if kind == KernelKind::QmvBn4Bk32 { 4 } else { 8 };
         args.push(bn.to_string());
@@ -1573,7 +1594,7 @@ fn gate_up_swiglu_source(config: Config, kind: KernelKind) -> (String, String) {
     let kernel_name = format!("{function}_{}", args.join("_"));
     let definition = template_definition(&kernel_name, function, &args);
     let dependencies = if bm.is_some() {
-        format!("{MIXED_AFFINE_SOURCE}\n{TENSOR_OPS_SOURCE}")
+        MIXED_AFFINE_SOURCE.to_owned()
     } else {
         String::new()
     };
@@ -1584,8 +1605,8 @@ fn gate_up_swiglu_source(config: Config, kind: KernelKind) -> (String, String) {
 }
 
 fn affine_kernel_source(config: Config, kind: KernelKind) -> (String, String) {
-    if let Some((bm, _)) = kind.qmm_shape() {
-        affine_qmm_bn32_source(config, bm)
+    if let Some((bm, bn)) = kind.qmm_shape() {
+        affine_qmm_source(config, bm, bn)
     } else {
         match kind {
             KernelKind::QmvBn8Bk32 => affine_qmv_bn8_bk32_source(config),
@@ -1595,18 +1616,18 @@ fn affine_kernel_source(config: Config, kind: KernelKind) -> (String, String) {
     }
 }
 
-fn affine_qmm_bn32_source(config: Config, bm: i32) -> (String, String) {
+fn affine_qmm_source(config: Config, bm: i32, bn: i32) -> (String, String) {
     let input_type = metal_type_string(config.input_dtype);
     let output_type = metal_type_string(config.output_dtype);
     let scale_bias_type = metal_type_string(config.scale_bias_dtype);
-    let bk = qmm_bk(config, bm);
+    let bk = QMM_BK;
     let kernel_name = format!(
-        "affine_qmm_tensor_ops_bm{bm}_bn32_bk{bk}_{input_type}_{scale_bias_type}_{output_type}_gs_{}_b_{}",
+        "affine_qmm_steel_bm{bm}_bn{bn}_bk{bk}_{input_type}_{scale_bias_type}_{output_type}_gs_{}_b_{}",
         config.group_size, config.bits
     );
     let template_definition = template_definition(
         &kernel_name,
-        "affine_qmm_tensor_ops",
+        "affine_qmm_steel",
         &[
             input_type.to_string(),
             scale_bias_type.to_string(),
@@ -1614,13 +1635,14 @@ fn affine_qmm_bn32_source(config: Config, bm: i32) -> (String, String) {
             config.group_size.to_string(),
             config.bits.to_string(),
             bm.to_string(),
+            bn.to_string(),
             bk.to_string(),
         ],
     );
     (
         kernel_name,
         affine_quantized_source(&format!(
-            "{MIXED_AFFINE_SOURCE}\n{TENSOR_OPS_SOURCE}\n{QMM_TENSOR_OPS_SOURCE}\n{template_definition}"
+            "{MIXED_AFFINE_SOURCE}\n{QMM_STEEL_SOURCE}\n{template_definition}"
         )),
     )
 }
@@ -1732,12 +1754,25 @@ const EXPERT_QMV_THREADBLOCKS: i32 = 1024;
 const EXPERT_QMM_MIN_ROWS: i32 = 4;
 const QMM_BM8_MAX_ROWS: i32 = 8;
 const QMM_BM16_MAX_ROWS: i32 = 16;
+const QMM_LARGE_MIN_ROWS: i32 = 2048;
+// Steel consumes 8x8 fragments. BK32 bounds SMEM and works for every group size.
+const QMM_BK: usize = 32;
+
+fn uses_large_qmm(config: Config) -> bool {
+    config.uses_same_dtype()
+        && config.input_dtype == Dtype::Bfloat16
+        && config.bits == 4
+        && config.group_size == 64
+        && config.n >= 4096
+        && config.k >= 4096
+}
 
 fn adaptive_topology_boundaries(config: Config, epilogue: Epilogue) -> Box<[u32]> {
     let mut candidates = [
         adaptive_qmv_batch_limit(config),
         QMM_BM8_MAX_ROWS + 1,
         QMM_BM16_MAX_ROWS + 1,
+        QMM_LARGE_MIN_ROWS,
     ];
     candidates.sort_unstable();
     let mut boundaries = Vec::with_capacity(candidates.len());
@@ -1762,6 +1797,9 @@ fn validate_kernel_kind(config: Config, kind: KernelKind, epilogue: Epilogue) {
                     | KernelKind::QmmBm8Bn32
                     | KernelKind::QmmBm16Bn32
                     | KernelKind::QmmBm32Bn32
+                    | KernelKind::QmmBm64Bn32
+                    | KernelKind::QmmBm32Bn64
+                    | KernelKind::QmmBm64Bn64
             )
         },
         Epilogue::SwiGLU => {
@@ -1772,6 +1810,8 @@ fn validate_kernel_kind(config: Config, kind: KernelKind, epilogue: Epilogue) {
                     | KernelKind::QmmBm8Bn16
                     | KernelKind::QmmBm16Bn16
                     | KernelKind::QmmBm32Bn16
+                    | KernelKind::QmmBm32Bn32
+                    | KernelKind::QmmBm64Bn32
             )
         },
     };
@@ -1784,7 +1824,10 @@ fn validate_kernel_kind(config: Config, kind: KernelKind, epilogue: Epilogue) {
         | KernelKind::QmmBm32Bn16
         | KernelKind::QmmBm8Bn32
         | KernelKind::QmmBm16Bn32
-        | KernelKind::QmmBm32Bn32 => {},
+        | KernelKind::QmmBm32Bn32
+        | KernelKind::QmmBm64Bn32
+        | KernelKind::QmmBm32Bn64
+        | KernelKind::QmmBm64Bn64 => {},
         KernelKind::QmvQuadBn64 => {
             assert!(
                 config.uses_same_dtype(),
@@ -1798,19 +1841,9 @@ fn validate_kernel_kind(config: Config, kind: KernelKind, epilogue: Epilogue) {
     }
 }
 
-// Wide projections expose enough output tiles for reduced operand staging to pay off.
-// Smaller projections retain BK64 to amortize reduction-loop loads and barriers.
-fn qmm_bk(config: Config, bm: i32) -> usize {
-    if !config.uses_same_dtype() || config.input_dtype == Dtype::Float32 || (config.n >= 65_536 && bm <= 16) {
-        32
-    } else {
-        config.group_size.min(64) as usize
-    }
-}
-
-fn validate_qmm_pipeline(device: &Device, bk: usize, operand_dtype: Dtype, kind: KernelKind, kernel: &CompiledKernel) {
+fn validate_qmm_pipeline(device: &Device, operand_dtype: Dtype, kind: KernelKind, kernel: &CompiledKernel) {
     let (bm, bn) = kind.qmm_shape().unwrap();
-    let num_simdgroups = if bm == 32 { 4 } else { 2 };
+    let num_simdgroups = if bm >= 32 { 4 } else { 2 };
     let num_threads = num_simdgroups * kernel.thread_execution_width();
     assert_eq!(
         kernel.thread_execution_width(),
@@ -1823,9 +1856,9 @@ fn validate_qmm_pipeline(device: &Device, bk: usize, operand_dtype: Dtype, kind:
         kernel.max_total_threads_per_threadblock()
     );
     let item_size = operand_dtype.item_size();
-    let bk_padded = bk + 16 / item_size;
+    let bk_padded = QMM_BK + 16 / item_size;
     // Dimensions come from the bounded tile family and validated quantization group.
-    let expected_threadblock_memory = (bm as usize + 32) * bk_padded * item_size;
+    let expected_threadblock_memory = (bm as usize + bn as usize) * bk_padded * item_size;
     assert!(
         expected_threadblock_memory <= device.max_threadblock_memory_length(),
         "QMM BM={bm} BN={bn} requires {expected_threadblock_memory} bytes of threadblock memory, device supports {}",
@@ -1884,15 +1917,14 @@ const EXPERT_MAJOR_TENSOR_OPS_SOURCE: &str = include_str!("metal/affine_quantize
 
 const TENSOR_OPS_SOURCE: &str = include_str!("metal/affine_quantized_tensor_ops.metal");
 
-const QMM_TENSOR_OPS_SOURCE: &str = include_str!("metal/affine_quantized_qmm_tensor_ops.metal");
+const QMM_STEEL_SOURCE: &str = include_str!("metal/affine_quantized_qmm_steel.metal");
 
 const MIXED_AFFINE_SOURCE: &str = include_str!("metal/affine_quantized_mixed.metal");
 
 const GUARDED_AFFINE_SOURCE: &str = include_str!("metal/affine_quantized_guarded_qmv.metal");
 
 const DENSE_GATE_UP_SWIGLU_SOURCE: &str = include_str!("metal/affine_quantized_gate_up_swiglu.metal");
-const DENSE_GATE_UP_SWIGLU_TENSOR_OPS_SOURCE: &str =
-    include_str!("metal/affine_quantized_gate_up_swiglu_tensor_ops.metal");
+const DENSE_GATE_UP_SWIGLU_STEEL_SOURCE: &str = include_str!("metal/affine_quantized_gate_up_swiglu_steel.metal");
 const GATE_UP_SWIGLU_SOURCE: &str = include_str!("metal/affine_quantized_gate_up_swiglu_qmv.metal");
 
 fn mlx_metal_header_root() -> PathBuf {
