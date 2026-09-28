@@ -325,12 +325,9 @@ pub fn encode_replay(
     program.resources.clone()
 }
 
-pub fn assert_replay_submission_queue(
-    program: &ReplayProgram,
-    queue: &ProtocolObject<dyn objc2_metal::MTL4CommandQueue>,
-) {
+pub fn assert_replay_submission_stream(program: &ReplayProgram, stream: &Stream) {
     assert!(
-        program.resources.residency.belongs_to(queue),
+        program.resources.residency.belongs_to(&stream.residency_set),
         "Metal replay program must be submitted on the stream that recorded it"
     );
 }

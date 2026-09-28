@@ -303,7 +303,10 @@ Pending page mappings stay sorted by state version. Commit drains only the accep
 for future mappings. It also consumes the batch commit records and reuses their allocation from initialization.
 
 `Qwen3xGDNState` retains the pending commit submission. `finish_commit` waits for reconstruction and publication.
-It owns the commit replay cache and a separate Metal stream.
+It owns the commit replay cache and an independent Metal stream on Main's command queue.
+The executor supplies this stream at initialization.
+The streams have separate command allocators, completion handlers, and replay residency sets.
+This arrangement retains asynchronous state work without switching Metal command queues between Main and commit.
 The cache key contains the total reconstruction-job and publication-request counts.
 Every commit refreshes job and publication metadata, including on a cache hit.
 Restore and publication validate the page-buffer capacity and prepare their metadata before cache lookup.

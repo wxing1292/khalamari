@@ -103,8 +103,8 @@ impl Drop for ResidencySet {
 }
 
 impl Residency {
-    pub fn belongs_to(&self, queue: &ProtocolObject<dyn MTL4CommandQueue>) -> bool {
-        std::ptr::eq(&*self.set.queue, queue)
+    pub fn belongs_to(&self, set: &Rc<ResidencySet>) -> bool {
+        Rc::ptr_eq(&self.set, set)
     }
 }
 

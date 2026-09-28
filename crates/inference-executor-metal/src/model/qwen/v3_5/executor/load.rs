@@ -636,6 +636,7 @@ fn init_qwen_3_5_model_inner(
     );
     let main_gdn_state = Qwen3xGDNState::new(
         &device,
+        runtime.stream().new_on_same_queue(),
         &gdn_cores,
         gdn_metal,
         config.max_requests,

@@ -115,16 +115,29 @@ impl Stream {
             .as_raw()
             .newMTL4CommandQueue()
             .expect("MTL4CommandQueue allocation failed");
+        Self::with_queue(device.as_raw_retained(), queue, timestamp_granularity)
+    }
+
+    /// Creates an independent submission owner on the same Metal command queue.
+    /// Each stream retains its own allocator, completion handler, and replay residency.
+    pub fn new_on_same_queue(&self) -> Self {
+        Self::with_queue(self.device.clone(), self.queue.clone(), None)
+    }
+
+    fn with_queue(
+        device: Retained<ProtocolObject<dyn MTLDevice>>,
+        queue: Retained<ProtocolObject<dyn MTL4CommandQueue>>,
+        timestamp_granularity: Option<GpuTimestampGranularity>,
+    ) -> Self {
         let allocator = device
-            .as_raw()
             .newCommandAllocator()
             .expect("MTL4CommandAllocator allocation failed");
         let completion = CommitCompletion::new();
-        let residency_set = ResidencySet::new(device.as_raw(), queue.clone());
+        let residency_set = ResidencySet::new(&device, queue.clone());
         let timestamp_profiler = timestamp_granularity
-            .and_then(|granularity| timestamp::TimestampProfiler::new(device.as_raw_retained(), granularity));
+            .and_then(|granularity| timestamp::TimestampProfiler::new(device.clone(), granularity));
         Self {
-            device: device.as_raw_retained(),
+            device,
             queue,
             allocator,
             allocator_in_flight: Rc::new(Cell::new(false)),
@@ -758,6 +771,47 @@ mod tests {
         assert_eq!(output_i32.read_typed::<i32>(0, 1), vec![-7]);
         assert_eq!(output_i64.read_typed::<i64>(0, 1), vec![-9_000_000_000]);
         assert_eq!(output_f32.read_typed::<f32>(0, 1), vec![1.25]);
+    }
+
+    #[test]
+    fn test_shared_queue_streams_keep_independent_submissions() {
+        let device = Device::system_default();
+        let main = Stream::new(&device);
+        let commit = main.new_on_same_queue();
+        let kernel = CompiledKernel::new(&device, ADD_ONE_SOURCE, "add_one");
+        let main_values = Buffer::from_slice(&device, &[10.0_f32]);
+        let commit_values = Buffer::from_slice(&device, &[20.0_f32]);
+        let record = |stream: &Stream, values: &Buffer| {
+            let mut builder = stream.create_replay_program();
+            builder.record(AddOneInvocation {
+                kernel: &kernel,
+                values,
+                len: 1,
+            });
+            builder.build()
+        };
+        let main_program = record(&main, &main_values);
+        let commit_program = record(&commit, &commit_values);
+
+        let main_submission = main.submit_replay(&main_program);
+        let commit_submission = commit.submit_replay(&commit_program);
+        commit_submission.wait();
+        main_submission.wait();
+        assert_eq!(main_values.read_typed::<f32>(0, 1), vec![11.0]);
+        assert_eq!(commit_values.read_typed::<f32>(0, 1), vec![21.0]);
+
+        // Sharing a queue must not permit another stream to overwrite live replay parameters.
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                super::replay::assert_replay_submission_stream(&main_program, &commit);
+            }))
+            .is_err()
+        );
+        drop(main_submission);
+        drop(main_program);
+        drop(main);
+        commit.submit_replay(&commit_program).wait();
+        assert_eq!(commit_values.read_typed::<f32>(0, 1), vec![22.0]);
     }
 
     #[test]

@@ -278,6 +278,7 @@ impl FullMainFixture {
             .1;
         let gdn_state = Qwen3xGDNState::new(
             device,
+            Stream::new(device),
             &gdn_cores,
             gdn_metal,
             1,
@@ -448,6 +449,7 @@ impl LayerRangeFixture {
             .1;
         let gdn_state = Qwen3xGDNState::new(
             device,
+            Stream::new(device),
             &gdn_cores,
             gdn_metal,
             1,

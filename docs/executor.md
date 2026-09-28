@@ -126,6 +126,11 @@ entity when its contract does not need it.
 | Metal runtime | `ReplayProgramBuilder`, `ReplayProgram` | Recorded command construction and stable resource retention |
 | Metal runtime | `ReplayArguments`, `ReplaySubmission` | Submission-time values and in-flight completion ownership |
 
+`Stream::new_on_same_queue` creates an independent submission owner on an existing Metal command queue.
+Each stream owns its allocator, completion handler, and replay residency set.
+A replay must return to the stream that recorded it, even when another stream shares that queue.
+Sharing a queue does not establish resource dependencies. Owners must retain their synchronization boundaries.
+
 `*Buffers`, `*Weights`, and `*Scratch` group borrowed resources. Their names do not imply allocation ownership.
 The containing model or component owns each persistent resource.
 

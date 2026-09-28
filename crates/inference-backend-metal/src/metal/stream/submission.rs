@@ -21,7 +21,7 @@ use crate::metal::stream::ReplayArguments;
 use crate::metal::stream::ReplayProgram;
 use crate::metal::stream::Stream;
 use crate::metal::stream::replay::ReplayResources;
-use crate::metal::stream::replay::assert_replay_submission_queue;
+use crate::metal::stream::replay::assert_replay_submission_stream;
 use crate::metal::stream::replay::encode_replay;
 use crate::metal::stream::replay::validate_replay_arguments;
 use crate::metal::stream::timestamp::SubmissionTimestamps;
@@ -121,7 +121,7 @@ pub fn submit_replay_sequence(
         "Metal replay sequence requires at least one execution"
     );
     for (index, execution) in executions.iter().enumerate() {
-        assert_replay_submission_queue(execution.program, &stream.queue);
+        assert_replay_submission_stream(execution.program, stream);
         validate_replay_arguments(execution.program, execution.arguments);
         for previous in &executions[..index] {
             if std::ptr::eq(previous.program, execution.program) {

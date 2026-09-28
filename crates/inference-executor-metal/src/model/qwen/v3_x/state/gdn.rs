@@ -131,6 +131,7 @@ impl Qwen3xGDNState {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         device: &Device,
+        commit_stream: Stream,
         cores: &[GDNCore],
         metal: GDNMetalConfig,
         num_req_slots: usize,
@@ -180,7 +181,7 @@ impl Qwen3xGDNState {
             request_state_table,
             state_restore: Replay::new("qwen3.x GDN state restore", GDNStateRestore),
             state_commit: Replay::new("qwen3.x GDN state commit", GDNStateCommit),
-            commit_stream: Stream::new(device),
+            commit_stream,
             pending_commit: None,
         }
     }
