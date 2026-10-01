@@ -12,3 +12,5 @@ pub use gqa::GQACore;
 pub use gqa::GQAPageTableLayout;
 pub use gqa::GQAReplayShape;
 pub use gqa::UngatedGQACore;
+
+pub mod qsa_indexer;

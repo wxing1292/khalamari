@@ -30,6 +30,7 @@ pub mod resource_embed;
 pub mod gdn;
 pub mod gqa;
 pub mod moe;
+pub mod qsa_indexer;
 
 pub mod residual_add;
 pub mod residual_add_rms_norm;
