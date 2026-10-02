@@ -31,6 +31,8 @@ pub mod gdn;
 pub mod gqa;
 pub mod moe;
 pub mod qsa_indexer;
+pub mod qsa_sdpa;
+pub mod qsa_sparse_gqa;
 
 pub mod residual_add;
 pub mod residual_add_rms_norm;

@@ -253,6 +253,17 @@ pub struct ReduceBuffers<'a> {
     pub output: &'a Buffer,
 }
 
+#[derive(Clone, Copy)]
+pub struct MappedReduceBuffers<'a> {
+    pub partial_exp_sums: &'a Buffer,
+    pub partial_max_logits: &'a Buffer,
+    pub partial_output: &'a Buffer,
+    pub cu_sdpa_partial_outputs: &'a Buffer,
+    /// Compact query row to original output query row.
+    pub output_query_rows: &'a Buffer,
+    pub output: &'a Buffer,
+}
+
 pub struct Scratch {
     pub partial_exp_sums: Buffer,
     pub partial_max_logits: Buffer,
@@ -372,6 +383,115 @@ impl Compute {
     }
 }
 
+/// SplitKV reducer that maps compact query rows back to their original output
+/// rows. It supports the two QSA storage pairs: BF16 partials to BF16 output
+/// for dense GQA, and F32 partials to BF16 output for sparse GQA.
+pub struct MappedReduce {
+    config: Config,
+    shape: Shape,
+    partial_dtype: Dtype,
+    required_threads: u32,
+    reduce: CompiledKernel,
+}
+
+impl MappedReduce {
+    pub fn new(
+        device: &Device,
+        config: Config,
+        execution: sdpa::ExecutionVariant,
+        shape: Shape,
+        partial_dtype: Dtype,
+    ) -> Self {
+        assert_eq!(config.dtype, Dtype::Bfloat16, "QSA mapped output must be BF16");
+        let constants = KernelConstants::new(config, execution);
+        shape.validate(config);
+        let function_name = match partial_dtype {
+            Dtype::Bfloat16 => "gqa_split_kv_single_q_reduce_mapped_bf16_bf16",
+            Dtype::Float32 => "gqa_split_kv_single_q_reduce_mapped_f32_bf16",
+            dtype => panic!("unsupported mapped GQA partial dtype {dtype:?}"),
+        };
+        Self {
+            config,
+            shape,
+            partial_dtype,
+            required_threads: execution.reduce.thread_block.required_threads,
+            reduce: CompiledKernel::new(device, &gqa_split_kv_single_q_reduce_source(constants), function_name),
+        }
+    }
+
+    pub fn invoke<'a>(
+        &self,
+        buffers: MappedReduceBuffers<'a>,
+        num_active_queries: ReplayU32,
+    ) -> MappedReduceInvocation<'a> {
+        MappedReduceInvocation {
+            pipeline: self.reduce.as_raw_retained(),
+            config: self.config,
+            shape: self.shape,
+            partial_dtype: self.partial_dtype,
+            required_threads: self.required_threads,
+            buffers,
+            num_active_queries,
+        }
+    }
+}
+
+pub struct MappedReduceInvocation<'a> {
+    pipeline: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
+    config: Config,
+    shape: Shape,
+    partial_dtype: Dtype,
+    required_threads: u32,
+    buffers: MappedReduceBuffers<'a>,
+    num_active_queries: ReplayU32,
+}
+
+impl Operator for MappedReduceInvocation<'_> {
+    fn record(self, recorder: &CommandRecorder<'_>) {
+        let config = self.config;
+        let shape = self.shape;
+        self.validate();
+        recorder.set_retained_pipeline_state(&self.pipeline);
+        recorder.set_buffer_read(0, self.buffers.partial_exp_sums, 0);
+        recorder.set_buffer_read(1, self.buffers.partial_max_logits, 0);
+        recorder.set_buffer_read(2, self.buffers.partial_output, 0);
+        recorder.set_buffer_read(3, self.buffers.cu_sdpa_partial_outputs, 0);
+        recorder.set_buffer_read(4, self.buffers.output_query_rows, 0);
+        recorder.set_buffer_write(5, self.buffers.output, 0);
+        set_replay_u32_min(
+            recorder,
+            6,
+            self.num_active_queries,
+            0,
+            shape.num_total_tokens,
+            "QSA mapped reducer active query count",
+        );
+        recorder.dispatch_1d(config.num_output_values(shape), self.required_threads as usize);
+    }
+}
+
+impl MappedReduceInvocation<'_> {
+    fn validate(&self) {
+        let stats_bytes = self.config.partial_output_stats_bytes(self.shape);
+        assert!(self.buffers.partial_exp_sums.len_bytes_u64() >= stats_bytes);
+        assert!(self.buffers.partial_max_logits.len_bytes_u64() >= stats_bytes);
+        let partial_values = self.config.num_partial_output_values(self.shape);
+        let partial_bytes = partial_values
+            .checked_mul(self.partial_dtype.item_size())
+            .expect("QSA mapped reducer partial-output byte count must fit usize");
+        assert!(self.buffers.partial_output.len_bytes() >= partial_bytes);
+        assert!(
+            self.buffers.cu_sdpa_partial_outputs.len_bytes_u64()
+                >= self.config.cu_sdpa_partial_outputs_bytes(self.shape)
+        );
+        assert!(
+            self.buffers.output_query_rows.len_bytes_u64()
+                >= (self.shape.num_total_tokens as u64) * size_of::<u32>() as u64
+        );
+        assert!(self.buffers.output.len_bytes_u64() >= self.config.q_bytes(self.shape));
+    }
+}
+
 fn gqa_split_kv_single_q_map_source(constants: KernelConstants) -> String {
     let config = constants.config;
     let map = constants.map.thread_block;
@@ -467,10 +587,11 @@ impl Operator for MapInvocation<'_> {
             shape.num_total_tokens,
             "GQA SplitKV SingleQ active token count",
         );
-        set_replay_u32(
+        set_replay_u32_min(
             recorder,
             10,
             self.num_active_kv_splits,
+            0,
             shape.num_total_sdpa_map_task_templates,
             "GQA SplitKV SingleQ active KV split count",
         );
@@ -534,13 +655,24 @@ impl Operator for ReduceInvocation<'_> {
 }
 
 fn set_replay_u32(recorder: &CommandRecorder<'_>, index: usize, value: ReplayU32, max_value: u32, name: &str) {
+    set_replay_u32_min(recorder, index, value, 1, max_value, name);
+}
+
+fn set_replay_u32_min(
+    recorder: &CommandRecorder<'_>,
+    index: usize,
+    value: ReplayU32,
+    min_value: u32,
+    max_value: u32,
+    name: &str,
+) {
     match value {
         ReplayU32::Fixed(value) => {
-            assert!(value > 0, "{name} must be positive");
+            assert!(value >= min_value, "{name} is below its minimum");
             assert!(value <= max_value, "{name} exceeds recorded capacity");
             recorder.set_u32(index, value);
         },
-        ReplayU32::Parameter(key) => recorder.bind_u32(index, key, 1, max_value),
+        ReplayU32::Parameter(key) => recorder.bind_u32(index, key, min_value, max_value),
     }
 }
 

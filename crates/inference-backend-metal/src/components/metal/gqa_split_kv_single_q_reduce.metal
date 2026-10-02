@@ -6,13 +6,14 @@ typedef bfloat bfloat16_t;
 // cu_sdpa_partial_outputs values select the leading partial-output dimension to
 // merge. The cumulative values do not count scalar tensor elements.
 
-template <typename T>
+template <bool Mapped, typename PartialT, typename OutputT>
 void gqa_split_kv_single_q_reduce_impl(
     device const float* partial_exp_sums,
     device const float* partial_max_logits,
-    device const T* partial_output,
+    device const PartialT* partial_output,
     device const uint* cu_sdpa_partial_outputs,
-    device T* output,
+    device const uint* output_query_rows,
+    device OutputT* output,
     constant uint& num_active_tokens,
     uint gid
 ) {
@@ -21,6 +22,8 @@ void gqa_split_kv_single_q_reduce_impl(
     const uint dim_index = gid % head_dim;
     const uint q_head_index = (gid / head_dim) % num_q_heads;
     const uint flat_token_index = gid / (head_dim * num_q_heads);
+    uint output_query_index = flat_token_index;
+    if constexpr (Mapped) output_query_index = output_query_rows[flat_token_index];
     const uint partial_output_begin = cu_sdpa_partial_outputs[flat_token_index];
     const uint partial_output_end = cu_sdpa_partial_outputs[flat_token_index + 1];
 
@@ -45,7 +48,11 @@ void gqa_split_kv_single_q_reduce_impl(
         global_exp_sum += weight;
         output_accumulator += weight * float(partial_output[partial_output_stats_index * head_dim + dim_index]);
     }
-    output[gid] = T(global_exp_sum > 0.0f ? output_accumulator / global_exp_sum : 0.0f);
+    ulong output_index = gid;
+    if constexpr (Mapped) {
+        output_index = (ulong(output_query_index) * num_q_heads + q_head_index) * head_dim + dim_index;
+    }
+    output[output_index] = OutputT(global_exp_sum > 0.0f ? output_accumulator / global_exp_sum : 0.0f);
 }
 
 kernel void gqa_split_kv_single_q_reduce_f32(
@@ -57,8 +64,9 @@ kernel void gqa_split_kv_single_q_reduce_f32(
     constant uint& num_active_tokens [[buffer(5)]],
     uint gid [[thread_position_in_grid]]
 ) {
-    gqa_split_kv_single_q_reduce_impl<float>(
-        partial_exp_sums, partial_max_logits, partial_output, cu_sdpa_partial_outputs, output,
+    gqa_split_kv_single_q_reduce_impl<false, float, float>(
+        partial_exp_sums, partial_max_logits, partial_output, cu_sdpa_partial_outputs,
+        cu_sdpa_partial_outputs, output,
         num_active_tokens, gid);
 }
 
@@ -71,7 +79,38 @@ kernel void gqa_split_kv_single_q_reduce_bf16(
     constant uint& num_active_tokens [[buffer(5)]],
     uint gid [[thread_position_in_grid]]
 ) {
-    gqa_split_kv_single_q_reduce_impl<bfloat16_t>(
-        partial_exp_sums, partial_max_logits, partial_output, cu_sdpa_partial_outputs, output,
+    gqa_split_kv_single_q_reduce_impl<false, bfloat16_t, bfloat16_t>(
+        partial_exp_sums, partial_max_logits, partial_output, cu_sdpa_partial_outputs,
+        cu_sdpa_partial_outputs, output,
         num_active_tokens, gid);
+}
+
+kernel void gqa_split_kv_single_q_reduce_mapped_bf16_bf16(
+    device const float* partial_exp_sums [[buffer(0)]],
+    device const float* partial_max_logits [[buffer(1)]],
+    device const bfloat16_t* partial_output [[buffer(2)]],
+    device const uint* cu_sdpa_partial_outputs [[buffer(3)]],
+    device const uint* output_query_rows [[buffer(4)]],
+    device bfloat16_t* output [[buffer(5)]],
+    constant uint& num_active_queries [[buffer(6)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    gqa_split_kv_single_q_reduce_impl<true, bfloat16_t, bfloat16_t>(
+        partial_exp_sums, partial_max_logits, partial_output, cu_sdpa_partial_outputs,
+        output_query_rows, output, num_active_queries, gid);
+}
+
+kernel void gqa_split_kv_single_q_reduce_mapped_f32_bf16(
+    device const float* partial_exp_sums [[buffer(0)]],
+    device const float* partial_max_logits [[buffer(1)]],
+    device const float* partial_output [[buffer(2)]],
+    device const uint* cu_sdpa_partial_outputs [[buffer(3)]],
+    device const uint* output_query_rows [[buffer(4)]],
+    device bfloat16_t* output [[buffer(5)]],
+    constant uint& num_active_queries [[buffer(6)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    gqa_split_kv_single_q_reduce_impl<true, float, bfloat16_t>(
+        partial_exp_sums, partial_max_logits, partial_output, cu_sdpa_partial_outputs,
+        output_query_rows, output, num_active_queries, gid);
 }
