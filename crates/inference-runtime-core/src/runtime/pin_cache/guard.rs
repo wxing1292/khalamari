@@ -77,10 +77,10 @@ where
 {
     #[inline]
     fn drop(&mut self) {
+        let mut guard = self.shard.lock().unwrap();
         let node_ref = unsafe { self.node_nn.as_ref() };
         let pin_count = node_ref.unpin();
         if pin_count == 0 {
-            let mut guard = self.shard.lock().unwrap();
             guard.detach_unpin(self.node_nn);
         }
     }
