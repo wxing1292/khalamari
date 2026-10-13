@@ -185,9 +185,9 @@ impl Qwen3ModelLayout {
         }
     }
 
-    fn unembed_config(self) -> UnembedConfig {
+    fn unembed_config(self, max_sampling_inputs: u32) -> UnembedConfig {
         UnembedConfig {
-            max_tokens: self.max_tokens,
+            max_tokens: max_sampling_inputs,
             vocab_size: self.vocab_size,
             hidden_dim: self.hidden_dim,
             group_size: self.group_size,
@@ -422,7 +422,22 @@ fn init_qwen_3_model_inner(
     let embed = Rc::new(embed);
     let token_hidden_input = Rc::new(Buffer::new_zeroed(&device, layout.hidden_bytes()));
     let hidden_output = Rc::new(Buffer::new_zeroed(&device, layout.hidden_bytes()));
-    let unembed_config = layout.unembed_config();
+    let max_spec_tokens = match &init_mode {
+        Qwen3InitMode::Vanilla | Qwen3InitMode::Asr { .. } => 0,
+        Qwen3InitMode::DSpark { num_spec_tokens, .. } => num_spec_tokens.get(),
+    };
+    // Output rows contain one target per draft and one final target per request.
+    // Prefill workspace rows do not require vocabulary projection or sampling.
+    let max_sampling_inputs = config
+        .max_requests
+        .checked_mul(
+            max_spec_tokens
+                .checked_add(1)
+                .expect("qwen3 target rows per request must fit usize"),
+        )
+        .expect("qwen3 sampling row capacity must fit usize")
+        .min(config.max_tokens) as u32;
+    let unembed_config = layout.unembed_config(max_sampling_inputs);
     let mut unembed = Unembed::new(&device, unembed_config);
     match unembed_bindings {
         Some(unembed_bindings) => unembed.load_weights(&device, &mut store, unembed_bindings)?,
@@ -430,7 +445,7 @@ fn init_qwen_3_model_inner(
     }
     let gather_unembed = Qwen3GatherUnembed::new(&device, unembed_config.hidden_dim, Rc::new(unembed));
     let sampler_bounds = TopKSamplingBounds {
-        max_sampling_inputs: layout.max_tokens,
+        max_sampling_inputs,
         vocab_size: layout.vocab_size,
         top_k: MAX_TOP_K as u32,
     };
@@ -495,7 +510,7 @@ fn init_qwen_3_model_inner(
                 &device,
                 num_spec_tokens,
                 config.max_requests,
-                config.max_tokens,
+                max_sampling_inputs as usize,
                 sampler_bounds.top_k,
             ));
             (
@@ -509,12 +524,12 @@ fn init_qwen_3_model_inner(
                         &device,
                         num_spec_tokens,
                         config.max_requests,
-                        config.max_tokens,
+                        max_sampling_inputs as usize,
                         MAX_TOP_K,
                     ),
                     target_distribution_indices: Buffer::from_slice(
                         &device,
-                        &compact_target_distribution_indices(config.max_tokens),
+                        &compact_target_distribution_indices(max_sampling_inputs as usize),
                     ),
                 })),
                 num_gqa_page_ids_per_block,
@@ -567,8 +582,8 @@ fn init_qwen_3_model_inner(
         token_ids: Buffer::new_zeroed(&device, layout.token_id_bytes()),
         token_hidden_input,
         hidden_output,
-        gather_flat_indices: Buffer::new_zeroed_elements(&device, config.max_tokens, Dtype::Uint32),
-        unembed_hidden: Buffer::new_zeroed(&device, layout.hidden_bytes()),
+        gather_flat_indices: Buffer::new_zeroed_elements(&device, max_sampling_inputs, Dtype::Uint32),
+        unembed_hidden: Buffer::new_zeroed_elements(&device, max_sampling_inputs * layout.hidden_dim, Dtype::Bfloat16),
         unembed_logits: Buffer::new_zeroed(&device, unembed_config.logits_bytes()),
         main_text_embed: Replay::new("qwen3 MainTextEmbed", Qwen3MainTextEmbed::new(embed)),
         main_resource_embed,

@@ -744,7 +744,10 @@ MTPEmbed, MTP body, and GatherUnembed retain separate replay parameter domains.
 Qwen3.5 GatherUnembed owns one output-row-capacity replay domain.
 Its replay policy combines the shared base bucket ladder with every unembed affine topology boundary.
 `UnembedConfig::max_tokens` caps this policy.
-The loader requires this cap to equal the executor `max_tokens` workspace capacity.
+The loader sets this cap to `min(max_tokens, max_requests * (num_spec_tokens + 1))`.
+Vanilla uses `num_spec_tokens = 0`.
+Main and MTP output rows, sampling scratch, and sparse target distributions use the same capacity.
+The full Prefill token capacity still applies to model body workspaces.
 This cap counts output rows, not requests.
 One speculative request can produce more than one output row.
 `Qwen35GatherUnembed::prepare_replay(...)` maps each nonzero active row count to one recorded capacity.

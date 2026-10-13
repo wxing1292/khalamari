@@ -65,9 +65,9 @@ sampling_params[req_slot] = {temperature, top_p, seed, top_k}
 
 `SamplingParamsStore` owns this buffer. One `Rc<SamplingParamsStore>` is shared by Vanilla, MTP, DSpark, and DFlash2
 inside one executor. The executor updates active request-slot rows when it prepares a batch.
-The request-slot buffer capacity and each invocation's sampling-row capacity are independent. Main can use the
-executor token-row capacity. DSpark uses the request-row capacity. Each consumer validates its static capacity when it
-is initialized.
+The request-slot buffer capacity and each invocation's sampling-row capacity are independent. Qwen Main uses the
+compact output-row capacity defined in [`executor_qwen.md`](executor_qwen.md#replay-ownership).
+DSpark uses the request-row capacity. Each consumer validates its static capacity when it is initialized.
 
 Each sampling invocation separately provides the compact sampling-row to `req_slot` mapping, the logical output-token
 position for each row, and one `SamplingDomain`. Main can contain multiple sampling rows for one request. Those rows
@@ -211,7 +211,8 @@ the path walk. No separate sampling-position update command is necessary.
 `SpecProbsStore` owns `draft_token_ids`, `draft_probs`, `target_token_ids`, and `target_probs`.
 `max_k` is the maximum sparse Top-K row width, not the vocabulary size.
 Its draft capacity is `max_requests * max_spec_tokens`.
-Its target capacity is the executor `max_tokens` value.
+Its target capacity is the compact Main sampling capacity defined in
+[`executor_qwen.md`](executor_qwen.md#replay-ownership). The executor `max_tokens` value remains its upper limit.
 Debug builds also retain `expected_draft_token_ids` for lifecycle validation.
 Release builds do not allocate, reset, or compare this CPU-only metadata.
 

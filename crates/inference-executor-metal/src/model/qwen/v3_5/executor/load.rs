@@ -210,9 +210,9 @@ impl Qwen35ModelLayout {
         }
     }
 
-    fn unembed_config(self) -> UnembedConfig {
+    fn unembed_config(self, max_sampling_inputs: u32) -> UnembedConfig {
         UnembedConfig {
-            max_tokens: self.max_tokens,
+            max_tokens: max_sampling_inputs,
             vocab_size: self.vocab_size,
             hidden_dim: self.hidden_dim,
             group_size: self.group_size,
@@ -483,8 +483,25 @@ fn init_qwen_3_5_model_inner(
     let metal_defaults = Qwen35MetalDefaults::from_quantization(model_config.quantization.as_ref())?;
     let layout = Qwen35ModelLayout::from_model_config(&model_config, config.max_tokens)?;
     layout.validate();
+    let max_spec_tokens = match &init_mode {
+        Qwen35InitMode::Vanilla => 0,
+        Qwen35InitMode::MTP { num_spec_tokens, .. }
+        | Qwen35InitMode::DSpark { num_spec_tokens, .. }
+        | Qwen35InitMode::DFlash2 { num_spec_tokens, .. } => num_spec_tokens.get(),
+    };
+    // Output rows contain one target per draft and one final target per request.
+    // Prefill workspace rows do not require vocabulary projection or sampling.
+    let max_sampling_inputs = config
+        .max_requests
+        .checked_mul(
+            max_spec_tokens
+                .checked_add(1)
+                .expect("qwen3.5 target rows per request must fit usize"),
+        )
+        .expect("qwen3.5 sampling row capacity must fit usize")
+        .min(config.max_tokens) as u32;
     let sampler_bounds = TopKSamplingBounds {
-        max_sampling_inputs: layout.max_tokens,
+        max_sampling_inputs,
         vocab_size: layout.vocab_size,
         top_k: MAX_TOP_K as u32,
     };
@@ -506,7 +523,7 @@ fn init_qwen_3_5_model_inner(
             sampler_bounds.vocab_size
         )
     });
-    let unembed_config = layout.unembed_config();
+    let unembed_config = layout.unembed_config(max_sampling_inputs);
     let first_gqa_layer = (0..model_config.text_config.num_hidden_layers)
         .find(|&index| {
             model_config
@@ -623,12 +640,6 @@ fn init_qwen_3_5_model_inner(
         .map(|&index| derive_qwen35_gdn_configs(index, &model_config.text_config, metal_defaults).map(|pair| pair.0))
         .collect::<Result<Vec<_>, _>>()?;
     let (_, gdn_metal) = derive_qwen35_gdn_configs(gdn_layers[0], &model_config.text_config, metal_defaults)?;
-    let max_spec_tokens = match &spec_source {
-        Qwen35SpecSource::Vanilla => 0,
-        Qwen35SpecSource::MTP(mtp) => mtp.num_spec_tokens.get(),
-        Qwen35SpecSource::DSpark { num_spec_tokens, .. } => num_spec_tokens.get(),
-        Qwen35SpecSource::DFlash2 { num_spec_tokens, .. } => num_spec_tokens.get(),
-    };
     let gdn_state_capacity = qwen35_gdn_state_capacity(
         config.max_tokens_per_request,
         config.num_tokens_per_block,
@@ -709,16 +720,12 @@ fn init_qwen_3_5_model_inner(
     let embed = std::rc::Rc::new(embed);
     let token_hidden_input = Rc::new(Buffer::new_zeroed(&device, layout.hidden_bytes()));
     let hidden_output = Rc::new(Buffer::new_zeroed(&device, layout.hidden_bytes()));
-    assert_eq!(
-        unembed_config.max_tokens as usize, config.max_tokens,
-        "qwen3.5 GatherUnembed output-row capacity must match executor max_tokens"
-    );
     let mut unembed = Unembed::new(&device, unembed_config);
     unembed.load_weights(&device, &mut store, unembed_bindings)?;
     let gather_unembed = Qwen35GatherUnembed::new(&device, unembed_config.hidden_dim, Rc::new(unembed));
     assert_eq!(
         gather_unembed.max_rows() as usize,
-        config.max_tokens,
+        max_sampling_inputs as usize,
         "qwen3.5 GatherUnembed policy and executor output-row capacities must match"
     );
     let spec_load = match spec_source {
@@ -802,7 +809,7 @@ fn init_qwen_3_5_model_inner(
             &device,
             max_spec_tokens,
             config.max_requests,
-            config.max_tokens,
+            max_sampling_inputs as usize,
             sampler_bounds.top_k,
         ));
         Qwen35SpeculativeResources {
@@ -814,10 +821,10 @@ fn init_qwen_3_5_model_inner(
                 &device,
                 max_spec_tokens,
                 config.max_requests,
-                config.max_tokens,
+                max_sampling_inputs as usize,
                 sampler_bounds.top_k as usize,
             ),
-            target_distribution_indices: Buffer::from_slice(&device, &(0..layout.max_tokens).collect::<Vec<_>>()),
+            target_distribution_indices: Buffer::from_slice(&device, &(0..max_sampling_inputs).collect::<Vec<_>>()),
         }
     };
     let speculator = match spec_load {
@@ -929,8 +936,8 @@ fn init_qwen_3_5_model_inner(
         token_ids: Buffer::new_zeroed(&device, layout.token_id_bytes()),
         token_hidden_input,
         hidden_output,
-        gather_flat_indices: Buffer::new_zeroed_elements(&device, config.max_tokens, Dtype::Uint32),
-        unembed_hidden: Buffer::new_zeroed(&device, layout.hidden_bytes()),
+        gather_flat_indices: Buffer::new_zeroed_elements(&device, max_sampling_inputs, Dtype::Uint32),
+        unembed_hidden: Buffer::new_zeroed_elements(&device, max_sampling_inputs * layout.hidden_dim, Dtype::Bfloat16),
         unembed_logits: Buffer::new_zeroed(&device, unembed_config.logits_bytes()),
         main_text_embed: Replay::new("qwen3.5 MainTextEmbed", Qwen35MainTextEmbed::new(Rc::clone(&embed))),
         main_resource_embed: None,

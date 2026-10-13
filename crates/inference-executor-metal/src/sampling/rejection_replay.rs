@@ -325,6 +325,81 @@ impl RejectionSampler {
     }
 }
 
+pub struct RejectionSampling {
+    sampler: Rc<TopKSampling>,
+    rejector: Rc<RejectionSampler>,
+}
+
+impl RejectionSampling {
+    pub fn new(sampler: Rc<TopKSampling>, rejector: Rc<RejectionSampler>) -> Self {
+        Self { sampler, rejector }
+    }
+
+    pub fn rejector(&self) -> &Rc<RejectionSampler> {
+        &self.rejector
+    }
+
+    fn validate_replay_input(input: &RejectionSamplingInput<'_>) {
+        assert_eq!(
+            input.target_shape.num_active_sampling_inputs, input.rejection.shape.num_active_target_distributions,
+            "rejection target sampling rows must match active target distributions"
+        );
+        assert_eq!(
+            input.target_shape.num_total_sampling_inputs, input.rejection.shape.num_total_target_distributions,
+            "rejection target sampling capacity must match target-distribution capacity"
+        );
+        assert_eq!(
+            input.target_shape.top_k, input.rejection.shape.top_k,
+            "rejection target sampling top_k must match rejection top_k"
+        );
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct RejectionSamplingInput<'a> {
+    pub target_shape: TopKSamplingShape,
+    pub logits: &'a Buffer,
+    pub target_sparse: TopKSamplingWriteDistributionOutput<'a>,
+    pub rejection: RejectionSamplerInput<'a>,
+}
+
+impl ReplayComponent for RejectionSampling {
+    type Key = RejectionReplayKey;
+    type Input<'a> = RejectionSamplingInput<'a>;
+
+    fn replay_key(&self, input: &Self::Input<'_>) -> Self::Key {
+        Self::validate_replay_input(input);
+        RejectionReplayKey {
+            num_total_reqs: input.rejection.shape.num_total_reqs,
+            num_total_target_distributions: input.rejection.shape.num_total_target_distributions,
+            num_total_draft_distributions: input.rejection.shape.num_total_draft_distributions,
+            top_k: input.rejection.shape.top_k,
+        }
+    }
+
+    fn record<'a>(&'a self, recorder: &mut ReplayRecorder, input: &Self::Input<'a>) {
+        self.sampler.record_write_distribution(
+            recorder,
+            input.target_shape,
+            TopKSamplingLogitsDtype::Bfloat16,
+            TopKSamplingInputs {
+                logits: input.logits,
+                logits_offset_bytes: 0,
+            },
+            input.target_sparse,
+        );
+        self.rejector.record(recorder, input.rejection);
+    }
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct RejectionReplayKey {
+    num_total_reqs: u32,
+    num_total_target_distributions: u32,
+    num_total_draft_distributions: u32,
+    top_k: u32,
+}
+
 #[cfg(test)]
 mod tests {
     use std::rc::Rc;
@@ -496,79 +571,4 @@ mod tests {
 
         let _ = replay.record(&runtime, &mismatched_input);
     }
-}
-
-pub struct RejectionSampling {
-    sampler: Rc<TopKSampling>,
-    rejector: Rc<RejectionSampler>,
-}
-
-impl RejectionSampling {
-    pub fn new(sampler: Rc<TopKSampling>, rejector: Rc<RejectionSampler>) -> Self {
-        Self { sampler, rejector }
-    }
-
-    pub fn rejector(&self) -> &Rc<RejectionSampler> {
-        &self.rejector
-    }
-
-    fn validate_replay_input(input: &RejectionSamplingInput<'_>) {
-        assert_eq!(
-            input.target_shape.num_active_sampling_inputs, input.rejection.shape.num_active_target_distributions,
-            "rejection target sampling rows must match active target distributions"
-        );
-        assert_eq!(
-            input.target_shape.num_total_sampling_inputs, input.rejection.shape.num_total_target_distributions,
-            "rejection target sampling capacity must match target-distribution capacity"
-        );
-        assert_eq!(
-            input.target_shape.top_k, input.rejection.shape.top_k,
-            "rejection target sampling top_k must match rejection top_k"
-        );
-    }
-}
-
-#[derive(Clone, Copy)]
-pub struct RejectionSamplingInput<'a> {
-    pub target_shape: TopKSamplingShape,
-    pub logits: &'a Buffer,
-    pub target_sparse: TopKSamplingWriteDistributionOutput<'a>,
-    pub rejection: RejectionSamplerInput<'a>,
-}
-
-impl ReplayComponent for RejectionSampling {
-    type Key = RejectionReplayKey;
-    type Input<'a> = RejectionSamplingInput<'a>;
-
-    fn replay_key(&self, input: &Self::Input<'_>) -> Self::Key {
-        Self::validate_replay_input(input);
-        RejectionReplayKey {
-            num_total_reqs: input.rejection.shape.num_total_reqs,
-            num_total_target_distributions: input.rejection.shape.num_total_target_distributions,
-            num_total_draft_distributions: input.rejection.shape.num_total_draft_distributions,
-            top_k: input.rejection.shape.top_k,
-        }
-    }
-
-    fn record<'a>(&'a self, recorder: &mut ReplayRecorder, input: &Self::Input<'a>) {
-        self.sampler.record_write_distribution(
-            recorder,
-            input.target_shape,
-            TopKSamplingLogitsDtype::Bfloat16,
-            TopKSamplingInputs {
-                logits: input.logits,
-                logits_offset_bytes: 0,
-            },
-            input.target_sparse,
-        );
-        self.rejector.record(recorder, input.rejection);
-    }
-}
-
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub struct RejectionReplayKey {
-    num_total_reqs: u32,
-    num_total_target_distributions: u32,
-    num_total_draft_distributions: u32,
-    top_k: u32,
 }
