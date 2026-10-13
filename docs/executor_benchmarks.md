@@ -133,20 +133,20 @@ Treat a concurrent compute dispatch and a multi-queue overlap as separate measur
   The timed buffer-to-file case overwrites the same range with `F_NOCACHE` enabled and calls `sync_all` during each
   iteration.
   File creation, file opening, pattern generation, correctness validation, and cleanup remain outside all timed cases.
-- `qwen35_gqa` selects `--gqa-model 27b|35b` and accepts the SplitKV `single_q` or `tiled_q` variant. It derives FP8
+- `qwen35_gqa` selects `--gqa-model 27b|35b` and accepts the SplitKV `sliced_kv` or `sliced_q` variant. It derives FP8
   E4M3FN KV tokens per page from the production 32 KiB page size and the selected model profile. It can run an explicit
-  untimed `--validate-split-kv-tiled-q` comparison. `--max-tokens` fixes the token and Map task-template capacities.
+  untimed `--validate-sdpa-sliced-q` comparison. `--max-tokens` fixes the token and Map task-template capacities.
   Each candidate derives its partial-state capacity from its registered Q-range width.
   The default is the server default of 128. Each case reports the active KV splits, fixed-TQ reserved partial slots,
   active partial states, and segment distribution.
 - `qwen3_gqa` loads real Qwen3 ungated-GQA weights. It measures full replay, SplitKV-only variants, and exact QKV/output
   projection kernels.
-- `qwen3_gqa` exposes static SplitKV tile geometry as CLI arguments. It can validate SingleQ output against TiledQ
+- `qwen3_gqa` exposes static SplitKV tile geometry as CLI arguments. It can validate SlicedKv output against SlicedQ
   output.
   Its projection probes compare QMV, QMM BM8/BN32, and QMM BM16/BN32. These forced paths are benchmark-only.
 - `gqa_bidi_block_sdpa` measures the model-independent bidirectional local-block SDPA map component.
   It accepts block size, request count, head geometry, partial-state Q width, and dtype as CLI arguments.
-  The default `max_q_tokens = 8` matches the current production TiledQ partial-state layout.
+  The default `max_q_tokens = 8` matches the current production SlicedQ partial-state layout.
   The backend owns its 32-thread threadgroup geometry.
 - `qwen3_dspark` loads real Main and DSpark checkpoints.
   It runs the public executor lifecycle for `main` or `dspark`.
@@ -324,14 +324,14 @@ cargo bench --bench qwen3_dspark_sampling -- \
 
 cargo bench --bench qwen35_gqa -- \
   --model-dir <27b-model-dir> --gqa-model 27b --tokens 1 \
-  --contexts 0 --num-reqs 1 --gqa-split-kv-variants single_q \
+  --contexts 0 --num-reqs 1 --gqa-split-kv-variants sliced_kv \
   --iters 1 --warmup-iters 0 --runs 1
 
 cargo bench --bench qwen35_gqa -- \
   --model-dir <27b-model-dir> --gqa-model 27b \
   --gqa-tokens-per-req 64,1 --gqa-contexts-per-req 1024,65536 \
   --max-tokens 128 \
-  --gqa-split-kv-variants single_q,tiled_q \
+  --gqa-split-kv-variants sliced_kv,sliced_q \
   --iters 1 --warmup-iters 0 --runs 1
 
 cargo bench --bench qwen35_main_layers -- \

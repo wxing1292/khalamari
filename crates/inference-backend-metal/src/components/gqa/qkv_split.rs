@@ -310,10 +310,10 @@ mod tests {
             let mut expected_k = Vec::with_capacity(active_tokens * kv_width);
             let mut expected_v = Vec::with_capacity(active_tokens * kv_width);
             for token_index in 0..active_tokens {
-                let row = &qkv_values[token_index * qkv_width..(token_index + 1) * qkv_width];
-                expected_q.extend_from_slice(&row[..q_width]);
-                expected_k.extend_from_slice(&row[q_width..q_width + kv_width]);
-                expected_v.extend_from_slice(&row[q_width + kv_width..]);
+                let qkv_token = &qkv_values[token_index * qkv_width..(token_index + 1) * qkv_width];
+                expected_q.extend_from_slice(&qkv_token[..q_width]);
+                expected_k.extend_from_slice(&qkv_token[q_width..q_width + kv_width]);
+                expected_v.extend_from_slice(&qkv_token[q_width + kv_width..]);
             }
             assert_eq!(q.read_typed::<f32>(0, expected_q.len()), expected_q);
             assert_eq!(k.read_typed::<f32>(0, expected_k.len()), expected_k);

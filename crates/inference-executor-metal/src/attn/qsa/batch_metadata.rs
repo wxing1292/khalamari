@@ -52,12 +52,12 @@ impl QSASDPAMetadataBuffers {
             .variants()
             .iter()
             .copied()
-            .find(|variant| variant.map.thread_block.max_q_tokens == 1)
-            .expect("QSA SDPA requires the supported SingleQ dense variant");
+            .find(|variant| variant.map.kind == backend_sdpa::MapKernelKind::SlicedKv)
+            .expect("QSA SDPA requires the supported SlicedKv dense variant");
         assert_eq!(
             registry.variants().len(),
             1,
-            "QSA SDPA's supported geometry must select only SingleQ"
+            "QSA SDPA's supported geometry must select only SlicedKv"
         );
         shape
             .num_total_sparse_queries
@@ -96,8 +96,13 @@ impl QSASDPAMetadataBuffers {
             ),
             active: Cell::new(None),
             dense_variant,
-            dense_selector: Selector::new(registry, shape.num_total_tokens as usize),
-            dense_policy: GQAReplayBucketPolicy::new(shape.num_total_tokens, &[]),
+            dense_selector: Selector::new(
+                registry,
+                shape.num_total_tokens as usize,
+                dense_map_tasks,
+                dense_map_tasks,
+            ),
+            dense_policy: GQAReplayBucketPolicy::new(shape.num_total_tokens, shape.num_total_tokens, &[]),
             sparse_split_count,
         };
         buffers.sparse_cu_partial_outputs.write_typed(0, &sparse_offsets);

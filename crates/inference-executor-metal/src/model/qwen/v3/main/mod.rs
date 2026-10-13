@@ -326,7 +326,8 @@ mod tests {
             tokens_per_page: 8,
         };
         let topology = UngatedGQAReplayTopology {
-            sdpa_execution: sdpa::ExecutionVariant::tiled_q(sdpa_config, 8, 16, 8),
+            sdpa_execution: sdpa::ExecutionVariant::sliced_q_per_head(sdpa_config, 8, 16, 8),
+            sdpa_direct_output: false,
             qkv_affine: affine_quantized::KernelKind::QmvBn8Bk32,
             output_affine: affine_quantized::KernelKind::QmvBn8Bk32,
         };

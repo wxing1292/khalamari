@@ -189,11 +189,11 @@ component path as the design.
 ## Performance Investigations
 
 - Compare a complete base-2 GQA softmax family with the current natural-log family.
-  The experiment must migrate SplitKV SingleQ, SplitKV TiledQ, bidirectional block SDPA, and their reducers as one compatible
+  The experiment must migrate SplitKV SlicedKv, SplitKV SlicedQ, bidirectional block SDPA, and their reducers as one compatible
   partial-state ABI. It must not mix base-2 and natural-log partial statistics or add a per-partial log-base flag.
   Compare focused Metal component performance and representative one-layer production GQA performance.
   Change the default only if the complete base-2 family preserves parity and gives a measured gain.
-- Evaluate software-pipelined K and V loads for GQA `TiledQTokens` as a bounded experiment.
+- Evaluate software-pipelined K and V loads for GQA `SlicedQTokens` as a bounded experiment.
   The current `Tkv=16`, `D=256` K and V threadgroup tiles use 16.5 KiB.
   Duplicating them with the existing eight-value row padding requires 33 KiB.
   This requirement exceeds the 32 KiB threadgroup-memory limit.
@@ -225,11 +225,11 @@ component path as the design.
 
 ## Model and Backend Investigations
 
-- Validate GQA SingleQ and TiledQ, GDN chunkwise, affine QMM, and grouped expert TensorOps on M5 hardware before making acceleration claims.
+- Validate GQA SlicedKv and SlicedQ, GDN chunkwise, affine QMM, and grouped expert TensorOps on M5 hardware before making acceleration claims.
   Local forced-kernel correctness checks run on M3 Max and do not establish M5 throughput or energy efficiency.
   Compare F32 and BF16 matrix operands, tile sizes, prefill selection thresholds, and full-model prefill/decode.
   Keep cached-prefix, per-row visibility, snapshot, and commit parity as gates.
-  The current GQA TiledQ PV width is 128; a direct 256-column mixed F32/BF16 PV operation produced zero upper columns
+  The current GQA SlicedQ PV width is 128; a direct 256-column mixed F32/BF16 PV operation produced zero upper columns
   with the local M3 runtime compiler. Re-test wider tiles on the target hardware before changing this width.
 
 - Revisit TensorOps GDN commit only after it preserves the short-prefix performance of vectorized recurrence.

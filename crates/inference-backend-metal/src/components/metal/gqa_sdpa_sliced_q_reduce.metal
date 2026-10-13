@@ -1,7 +1,7 @@
 // For one Q-token-range/Q-head output coordinate, adjacent
 // cu_sdpa_partial_outputs values select the leading partial-output dimension to
 // merge. The cumulative values do not count scalar tensor elements.
-kernel void gqa_split_kv_tiled_q_reduce(
+kernel void gqa_sdpa_sliced_q_reduce(
     device const bfloat16_t* partial_output [[buffer(0)]],
     device const float* partial_exp_sums [[buffer(1)]],
     device const float* partial_max_logits [[buffer(2)]],

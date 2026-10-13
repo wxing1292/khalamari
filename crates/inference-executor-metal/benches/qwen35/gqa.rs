@@ -15,8 +15,8 @@ use inference_backend_metal::components::gqa::fp8::bf16_to_f32;
 use inference_backend_metal::components::gqa::fp8::fp8_e4m3_to_bf16;
 use inference_backend_metal::components::gqa::kv_page_write as backend_kv_page_write;
 use inference_backend_metal::components::gqa::qgkv_split as backend_qgkv_split;
-use inference_backend_metal::components::gqa::split_kv::single_q as backend_single_q;
-use inference_backend_metal::components::gqa::split_kv::tiled_q as backend_tiled_q;
+use inference_backend_metal::components::gqa::sdpa::sliced_kv as backend_sliced_kv;
+use inference_backend_metal::components::gqa::sdpa::sliced_q as backend_sliced_q;
 use inference_backend_metal::components::rms_norm_rope;
 use inference_backend_metal::metal::Buffer;
 use inference_backend_metal::metal::Device;
@@ -42,20 +42,20 @@ const GQA_ROPE_DIM: u32 = 64;
 const GQA_ROPE_THETA: f32 = 10_000_000.0;
 const GQA_NORM_EPS: f32 = 1.0e-6;
 const DEFAULT_MAX_TOKENS: usize = 128;
-const SPLIT_KV_SINGLE_Q_KV_TOKENS_PER_ITERATION: u32 = 256;
-const SPLIT_KV_SINGLE_Q_REQUIRED_THREADS: u32 = 128;
-const SPLIT_KV_SINGLE_Q_MAX_Q_HEADS: u32 = 8;
-const SPLIT_KV_TILED_Q_MAX_Q_TOKENS: u32 = 8;
-const SPLIT_KV_TILED_Q_KV_TOKENS_PER_ITERATION: u32 = 16;
+const SDPA_SLICED_KV_KV_TOKENS_PER_ITERATION: u32 = 256;
+const SDPA_SLICED_KV_REQUIRED_THREADS: u32 = 128;
+const SDPA_SLICED_KV_MAX_Q_HEADS: u32 = 8;
+const SDPA_SLICED_Q_MAX_Q_TOKENS: u32 = 8;
+const SDPA_SLICED_Q_KV_TOKENS_PER_ITERATION: u32 = 16;
 
 #[derive(Clone, Copy)]
 struct GQABenchParams {
-    split_kv_single_q_kv_tokens_per_iteration: u32,
-    split_kv_single_q_required_threads: u32,
-    split_kv_single_q_max_q_heads: u32,
-    split_kv_tiled_q_max_q_tokens: u32,
-    split_kv_tiled_q_kv_tokens_per_iteration: u32,
-    split_kv_tiled_q_max_q_heads: u32,
+    sdpa_sliced_kv_kv_tokens_per_iteration: u32,
+    sdpa_sliced_kv_required_threads: u32,
+    sdpa_sliced_kv_max_q_heads: u32,
+    sdpa_sliced_q_max_q_tokens: u32,
+    sdpa_sliced_q_kv_tokens_per_iteration: u32,
+    sdpa_sliced_q_max_q_heads: u32,
 }
 
 #[derive(Clone, Copy)]
@@ -139,7 +139,7 @@ struct Args {
     warmup_iters: usize,
     runs: usize,
     subcomponents: bool,
-    validate_split_kv_tiled_q: bool,
+    validate_sdpa_sliced_q: bool,
     print_limits: bool,
 }
 
@@ -154,21 +154,21 @@ impl Args {
             tokens_per_req: None,
             contexts_per_req: None,
             max_tokens: DEFAULT_MAX_TOKENS,
-            split_kv_variants: vec![GQASplitKVBenchVariant::SingleQ, GQASplitKVBenchVariant::TiledQ],
+            split_kv_variants: vec![GQASplitKVBenchVariant::SlicedKv, GQASplitKVBenchVariant::SlicedQ],
             selected_subcomponents: default_gqa_subcomponents(),
             params: GQABenchParams {
-                split_kv_single_q_kv_tokens_per_iteration: SPLIT_KV_SINGLE_Q_KV_TOKENS_PER_ITERATION,
-                split_kv_single_q_required_threads: SPLIT_KV_SINGLE_Q_REQUIRED_THREADS,
-                split_kv_single_q_max_q_heads: SPLIT_KV_SINGLE_Q_MAX_Q_HEADS,
-                split_kv_tiled_q_max_q_tokens: SPLIT_KV_TILED_Q_MAX_Q_TOKENS,
-                split_kv_tiled_q_kv_tokens_per_iteration: SPLIT_KV_TILED_Q_KV_TOKENS_PER_ITERATION,
-                split_kv_tiled_q_max_q_heads: 0,
+                sdpa_sliced_kv_kv_tokens_per_iteration: SDPA_SLICED_KV_KV_TOKENS_PER_ITERATION,
+                sdpa_sliced_kv_required_threads: SDPA_SLICED_KV_REQUIRED_THREADS,
+                sdpa_sliced_kv_max_q_heads: SDPA_SLICED_KV_MAX_Q_HEADS,
+                sdpa_sliced_q_max_q_tokens: SDPA_SLICED_Q_MAX_Q_TOKENS,
+                sdpa_sliced_q_kv_tokens_per_iteration: SDPA_SLICED_Q_KV_TOKENS_PER_ITERATION,
+                sdpa_sliced_q_max_q_heads: 0,
             },
             iters: 50,
             warmup_iters: 20,
             runs: 1,
             subcomponents: false,
-            validate_split_kv_tiled_q: false,
+            validate_sdpa_sliced_q: false,
             print_limits: false,
         };
         let mut values = std::env::args().skip(1);
@@ -193,30 +193,29 @@ impl Args {
                 "--gqa-subcomponents" => {
                     args.selected_subcomponents = parse_string_list(&next_arg(&mut values, &arg), &arg)
                 },
-                "--gqa-split-kv-single-q-kv-tokens-per-iteration" => {
-                    args.params.split_kv_single_q_kv_tokens_per_iteration =
-                        parse_u32(&next_arg(&mut values, &arg), &arg)
+                "--gqa-sdpa-sliced-kv-kv-tokens-per-iteration" => {
+                    args.params.sdpa_sliced_kv_kv_tokens_per_iteration = parse_u32(&next_arg(&mut values, &arg), &arg)
                 },
-                "--gqa-split-kv-single-q-required-threads" => {
-                    args.params.split_kv_single_q_required_threads = parse_u32(&next_arg(&mut values, &arg), &arg)
+                "--gqa-sdpa-sliced-kv-required-threads" => {
+                    args.params.sdpa_sliced_kv_required_threads = parse_u32(&next_arg(&mut values, &arg), &arg)
                 },
-                "--gqa-split-kv-single-q-max-q-heads" => {
-                    args.params.split_kv_single_q_max_q_heads = parse_u32(&next_arg(&mut values, &arg), &arg)
+                "--gqa-sdpa-sliced-kv-max-q-heads" => {
+                    args.params.sdpa_sliced_kv_max_q_heads = parse_u32(&next_arg(&mut values, &arg), &arg)
                 },
-                "--gqa-split-kv-tiled-q-max-q-tokens" => {
-                    args.params.split_kv_tiled_q_max_q_tokens = parse_u32(&next_arg(&mut values, &arg), &arg)
+                "--gqa-sdpa-sliced-q-max-q-tokens" => {
+                    args.params.sdpa_sliced_q_max_q_tokens = parse_u32(&next_arg(&mut values, &arg), &arg)
                 },
-                "--gqa-split-kv-tiled-q-kv-tokens-per-iteration" => {
-                    args.params.split_kv_tiled_q_kv_tokens_per_iteration = parse_u32(&next_arg(&mut values, &arg), &arg)
+                "--gqa-sdpa-sliced-q-kv-tokens-per-iteration" => {
+                    args.params.sdpa_sliced_q_kv_tokens_per_iteration = parse_u32(&next_arg(&mut values, &arg), &arg)
                 },
-                "--gqa-split-kv-tiled-q-max-q-heads" => {
-                    args.params.split_kv_tiled_q_max_q_heads = parse_u32(&next_arg(&mut values, &arg), &arg)
+                "--gqa-sdpa-sliced-q-max-q-heads" => {
+                    args.params.sdpa_sliced_q_max_q_heads = parse_u32(&next_arg(&mut values, &arg), &arg)
                 },
                 "--iters" => args.iters = parse_usize(&next_arg(&mut values, &arg), &arg),
                 "--warmup-iters" => args.warmup_iters = parse_usize(&next_arg(&mut values, &arg), &arg),
                 "--runs" => args.runs = parse_usize(&next_arg(&mut values, &arg), &arg),
                 "--subcomponents" => args.subcomponents = true,
-                "--validate-split-kv-tiled-q" => args.validate_split_kv_tiled_q = true,
+                "--validate-sdpa-sliced-q" => args.validate_sdpa_sliced_q = true,
                 "--print-limits" => args.print_limits = true,
                 "--bench" => {},
                 other => panic!("unknown argument {other:?}; pass --help for usage"),
@@ -286,8 +285,8 @@ impl Args {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum GQASplitKVBenchVariant {
-    SingleQ,
-    TiledQ,
+    SlicedKv,
+    SlicedQ,
 }
 
 fn next_arg(iter: &mut impl Iterator<Item = String>, name: &str) -> String {
@@ -300,10 +299,10 @@ fn parse_split_kv_variants(value: &str) -> Vec<GQASplitKVBenchVariant> {
         .into_iter()
         .map(|part| {
             match part.as_str() {
-                "single_q" => GQASplitKVBenchVariant::SingleQ,
-                "tiled_q" => GQASplitKVBenchVariant::TiledQ,
+                "sliced_kv" => GQASplitKVBenchVariant::SlicedKv,
+                "sliced_q" => GQASplitKVBenchVariant::SlicedQ,
                 _ => {
-                    panic!("invalid --gqa-split-kv-variants entry {part:?}; expected single_q or tiled_q")
+                    panic!("invalid --gqa-split-kv-variants entry {part:?}; expected sliced_kv or sliced_q")
                 },
             }
         })
@@ -355,8 +354,8 @@ fn default_gqa_subcomponents() -> Vec<String> {
         "q-norm-rope".to_string(),
         "k-norm-rope".to_string(),
         "kv-page-write".to_string(),
-        "split-kv-single-q".to_string(),
-        "split-kv-tiled-q".to_string(),
+        "sdpa-sliced-kv".to_string(),
+        "sdpa-sliced-q".to_string(),
         "gate".to_string(),
         "output".to_string(),
     ]
@@ -373,16 +372,16 @@ fn print_help_and_exit() -> ! {
 --gqa-tokens-per-req 1,2,4,8
 --gqa-contexts-per-req 0,128,1024,65536
 --max-tokens 128
---gqa-split-kv-variants single_q,tiled_q
+--gqa-split-kv-variants sliced_kv,sliced_q
 --subcomponents
---gqa-subcomponents qgkv,qgkv-to-q-g-k-v,q-norm-rope,k-norm-rope,kv-page-write,split-kv-single-q,split-kv-tiled-q,gate,output
---validate-split-kv-tiled-q
---gqa-split-kv-single-q-kv-tokens-per-iteration N
---gqa-split-kv-single-q-required-threads N
---gqa-split-kv-single-q-max-q-heads N
---gqa-split-kv-tiled-q-max-q-tokens 8|16
---gqa-split-kv-tiled-q-kv-tokens-per-iteration 8|16
---gqa-split-kv-tiled-q-max-q-heads N
+--gqa-subcomponents qgkv,qgkv-to-q-g-k-v,q-norm-rope,k-norm-rope,kv-page-write,sdpa-sliced-kv,sdpa-sliced-q,gate,output
+--validate-sdpa-sliced-q
+--gqa-sdpa-sliced-kv-kv-tokens-per-iteration N
+--gqa-sdpa-sliced-kv-required-threads N
+--gqa-sdpa-sliced-kv-max-q-heads N
+--gqa-sdpa-sliced-q-max-q-tokens 8|16
+--gqa-sdpa-sliced-q-kv-tokens-per-iteration 8|16
+--gqa-sdpa-sliced-q-max-q-heads N
 --print-limits
 --iters N
 --warmup-iters N
@@ -391,23 +390,23 @@ fn print_help_and_exit() -> ! {
     std::process::exit(0);
 }
 
-fn split_kv_single_q_threadblock_memory_bytes(params: GQABenchParams) -> usize {
-    let num_simdgroups = params.split_kv_single_q_required_threads as usize / 32;
+fn sdpa_sliced_kv_threadblock_memory_bytes(params: GQABenchParams) -> usize {
+    let num_simdgroups = params.sdpa_sliced_kv_required_threads as usize / 32;
     (num_simdgroups * (8 * 64 + 8 * 16 + 8 * 3) + 8 * 2) * size_of::<f32>()
 }
 
 fn print_gqa_kernel_limits(device: &Device, params: GQABenchParams) {
     let device_max = device.max_threadblock_memory_length();
-    let threadblock_memory = split_kv_single_q_threadblock_memory_bytes(params);
+    let threadblock_memory = sdpa_sliced_kv_threadblock_memory_bytes(params);
     println!(
-        "metal-limits device={} max_threadblock_memory_bytes={} gqa_split_kv_variant=single_q \
-         gqa_split_kv_single_q_kv_tokens_per_iteration={} gqa_split_kv_single_q_required_threads={} \
-         gqa_split_kv_single_q_max_q_heads={} gqa_threadblock_memory_bytes={} gqa_valid={}",
+        "metal-limits device={} max_threadblock_memory_bytes={} gqa_split_kv_variant=sliced_kv \
+         gqa_sdpa_sliced_kv_kv_tokens_per_iteration={} gqa_sdpa_sliced_kv_required_threads={} \
+         gqa_sdpa_sliced_kv_max_q_heads={} gqa_threadblock_memory_bytes={} gqa_valid={}",
         device.name(),
         device_max,
-        params.split_kv_single_q_kv_tokens_per_iteration,
-        params.split_kv_single_q_required_threads,
-        params.split_kv_single_q_max_q_heads,
+        params.sdpa_sliced_kv_kv_tokens_per_iteration,
+        params.sdpa_sliced_kv_required_threads,
+        params.sdpa_sliced_kv_max_q_heads,
         threadblock_memory,
         threadblock_memory <= device_max
     );
@@ -453,7 +452,7 @@ fn assert_bf16_close(expected: &Buffer, actual: &Buffer, num_values: usize, tole
     let (max_abs_index, expected_value, actual_value, max_abs_diff) = max_bf16_diff(expected, actual, num_values);
     assert!(
         max_abs_diff <= tolerance,
-        "GQA token-tiled mismatch at {max_abs_index}: expected={expected_value} actual={actual_value} \
+        "GQA token-sliced_q mismatch at {max_abs_index}: expected={expected_value} actual={actual_value} \
          max_abs_diff={max_abs_diff} tolerance={tolerance}"
     );
 }
@@ -774,8 +773,8 @@ fn gqa_gate_config(model: GQAModelProfile) -> backend_activation_gate::Config {
     )
 }
 
-fn gqa_sdpa_config(num_reqs: u32, end_context_len: u32, model: GQAModelProfile) -> backend_single_q::Config {
-    backend_single_q::Config {
+fn gqa_sdpa_config(num_reqs: u32, end_context_len: u32, model: GQAModelProfile) -> backend_sliced_kv::Config {
+    backend_sliced_kv::Config {
         num_q_heads: model.num_q_heads.try_into().expect("GQA q heads must fit u32"),
         num_kv_heads: model.num_kv_heads.try_into().expect("GQA KV heads must fit u32"),
         head_dim: model.head_dim.try_into().expect("GQA head_dim must fit u32"),
@@ -786,18 +785,18 @@ fn gqa_sdpa_config(num_reqs: u32, end_context_len: u32, model: GQAModelProfile) 
     }
 }
 
-fn gqa_sdpa_shape(replay_shape: GQAReplayShape) -> backend_single_q::Shape {
-    backend_single_q::Shape {
+fn gqa_sdpa_shape(replay_shape: GQAReplayShape) -> backend_sliced_kv::Shape {
+    backend_sliced_kv::Shape {
         num_total_tokens: replay_shape.num_tokens,
         num_total_sdpa_map_task_templates: replay_shape.num_total_sdpa_map_task_templates,
     }
 }
 
-fn gqa_split_kv_tiled_q_config(
+fn gqa_sdpa_sliced_q_config(
     page_table_layout: backend_kv_page_write::PageTableLayout,
     model: GQAModelProfile,
-) -> backend_tiled_q::Config {
-    backend_tiled_q::Config {
+) -> backend_sliced_q::Config {
+    backend_sliced_q::Config {
         num_q_heads: model.num_q_heads.try_into().expect("GQA q heads must fit u32"),
         num_kv_heads: model.num_kv_heads.try_into().expect("GQA KV heads must fit u32"),
         head_dim: model.head_dim.try_into().expect("GQA head_dim must fit u32"),

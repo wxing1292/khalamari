@@ -21,16 +21,20 @@ pub struct GQAReplayBucketPolicy {
 }
 
 impl GQAReplayBucketPolicy {
-    pub fn new(max_tokens: u32, token_topology_boundaries: &[u32]) -> Self {
+    pub fn new(max_tokens: u32, max_map_task_templates: u32, token_topology_boundaries: &[u32]) -> Self {
         Self {
             tokens: ReplayBucketPolicy::with_topology_boundaries(max_tokens, token_topology_boundaries),
             q_token_tiles: ReplayBucketPolicy::new(max_tokens),
-            kv_splits: ReplayBucketPolicy::new(max_tokens),
+            kv_splits: ReplayBucketPolicy::new(max_map_task_templates),
         }
     }
 
     pub fn max_tokens(&self) -> u32 {
         self.tokens.max_capacity()
+    }
+
+    pub fn max_map_task_templates(&self) -> u32 {
+        self.kv_splits.max_capacity()
     }
 
     pub fn kv_split_capacity(&self, num_kv_splits: u32) -> u32 {
@@ -64,9 +68,17 @@ pub struct GQAMetadataBuffers {
 }
 
 impl GQAMetadataBuffers {
-    pub fn new(device: &Device, max_tokens: usize) -> Self {
+    pub fn new(device: &Device, max_tokens: usize, max_map_task_templates: usize) -> Self {
         assert!(max_tokens > 0, "GQA batch metadata requires tokens");
         assert!(u32::try_from(max_tokens).is_ok(), "GQA token capacity must fit u32");
+        assert!(
+            max_map_task_templates > 0,
+            "GQA batch metadata requires Map task templates"
+        );
+        assert!(
+            u32::try_from(max_map_task_templates).is_ok(),
+            "GQA Map task-template capacity must fit u32"
+        );
         Self {
             req_slots: Buffer::new_zeroed_elements(device, max_tokens, Dtype::Uint32),
             flat_token_indices: Buffer::new_zeroed_elements(device, max_tokens, Dtype::Uint32),
@@ -86,7 +98,7 @@ impl GQAMetadataBuffers {
             ),
             sdpa_map_task_templates: Buffer::new_zeroed_elements(
                 device,
-                max_tokens
+                max_map_task_templates
                     .checked_mul(NUM_SDPA_MAP_TASK_TEMPLATE_FIELDS)
                     .expect("GQA SDPA Map task-template metadata capacity must fit usize"),
                 Dtype::Uint32,
@@ -107,6 +119,10 @@ impl GQAMetadataBuffers {
         self.req_slots.len_bytes() / size_of::<u32>()
     }
 
+    pub fn max_map_task_templates(&self) -> usize {
+        self.sdpa_map_task_templates.len_bytes() / (NUM_SDPA_MAP_TASK_TEMPLATE_FIELDS * size_of::<u32>())
+    }
+
     pub fn update(
         &self,
         req_slots: &[u32],
@@ -121,7 +137,7 @@ impl GQAMetadataBuffers {
         assert_eq!(cu_tokens.last().copied(), Some(replay_shape.num_tokens));
         assert!(replay_shape.num_total_tokens as usize <= self.max_tokens());
         assert!(replay_shape.num_total_q_token_tiles as usize <= self.max_tokens());
-        assert!(replay_shape.num_total_sdpa_map_task_templates as usize <= self.max_tokens());
+        assert!(replay_shape.num_total_sdpa_map_task_templates as usize <= self.max_map_task_templates());
 
         let mut req_slots_by_token = Vec::with_capacity(replay_shape.num_tokens as usize);
         let mut flat_token_indices = Vec::with_capacity(replay_shape.num_tokens as usize);
@@ -185,7 +201,7 @@ impl GQAMetadataBuffers {
         self.req_slots.write_typed(0, &req_slots_by_token);
         self.flat_token_indices.write_typed(0, &flat_token_indices);
         self.visible_kv_token_ranges.write_typed(0, &visible_kv_token_ranges);
-        if selection.variant().map.thread_block.max_q_tokens > 1 {
+        if selection.variant().map.kind != backend_sdpa::MapKernelKind::SlicedKv {
             self.q_token_ranges.write_typed(0, &q_token_ranges);
         }
         self.sdpa_map_task_templates.write_typed(0, &sdpa_map_task_templates);
@@ -226,6 +242,11 @@ impl GQAMetadataBuffers {
             .expect("GQA batch metadata must be updated before recording")
     }
 
+    pub fn direct_output(&self) -> bool {
+        self.variant().map.kind != backend_sdpa::MapKernelKind::SlicedKv
+            && !self.replay_shape().reduce_sdpa_partial_outputs
+    }
+
     pub fn variant(&self) -> backend_sdpa::ExecutionVariant {
         self.variant
             .get()
@@ -259,16 +280,55 @@ mod tests {
         Selector::new(
             backend_sdpa::Registry::from_variants(config(), vec![variant]),
             max_tokens,
+            max_tokens,
+            max_tokens * variant.map.thread_block.max_q_tokens as usize,
         )
+    }
+
+    #[test]
+    fn test_map_metadata_capacity_is_independent_of_token_capacity() {
+        let device = Device::system_default();
+        let metadata = GQAMetadataBuffers::new(&device, 4, 32);
+        let variant = backend_sdpa::ExecutionVariant::sliced_kv(config(), 64, 128, 1);
+        let selector = Selector::new(
+            backend_sdpa::Registry::from_variants(config(), vec![variant]),
+            4,
+            32,
+            32,
+        );
+        let policy = GQAReplayBucketPolicy::new(4, 32, &[]);
+        let selection = selector.select(&RequestShape::from_batch(&[1088], &[0, 1]), &policy, 2);
+        let shape = metadata.update(&[1], &[1088], &[0, 1], &selection);
+        assert_eq!(metadata.max_tokens(), 4);
+        assert_eq!(metadata.max_map_task_templates(), 32);
+        assert_eq!(shape.num_tokens, 1);
+        assert_eq!(shape.num_total_tokens, 2);
+        assert_eq!(shape.num_sdpa_map_task_templates, 18);
+        assert_eq!(shape.num_total_sdpa_map_task_templates, 20);
+        assert_eq!(metadata.req_slots().len_bytes(), 4 * size_of::<u32>());
+        assert_eq!(
+            metadata.sdpa_map_task_templates().len_bytes(),
+            32 * 3 * size_of::<u32>()
+        );
+        assert_eq!(metadata.flat_token_indices().read_typed::<u32>(0, 1), vec![1088]);
+        assert_eq!(
+            metadata.visible_kv_token_ranges().read_typed::<u32>(0, 2),
+            vec![0, 1089]
+        );
+        assert_eq!(
+            metadata.sdpa_map_task_templates().read_typed::<u32>(18 * 3, 6),
+            vec![u32::MAX; 6]
+        );
+        assert_eq!(metadata.cu_sdpa_partial_outputs().read_typed::<u32>(0, 2), vec![0, 18]);
     }
 
     #[test]
     fn test_metadata_upload_preserves_current_abi_for_complete_selections() {
         let device = Device::system_default();
-        let metadata = GQAMetadataBuffers::new(&device, 8);
+        let metadata = GQAMetadataBuffers::new(&device, 8, 8);
         let shapes = RequestShape::from_batch(&[7, 20], &[0, 2, 5]);
-        let policy = GQAReplayBucketPolicy::new(8, &[]);
-        let single = backend_sdpa::ExecutionVariant::single_q(config(), 8, 32, 1);
+        let policy = GQAReplayBucketPolicy::new(8, 8, &[]);
+        let single = backend_sdpa::ExecutionVariant::sliced_kv(config(), 8, 32, 1);
         let single_selection = selector(8, single).select(&shapes, &policy, 5);
 
         let single_shape = metadata.update(&[2, 5], &[7, 20], &[0, 2, 5], &single_selection);
@@ -293,9 +353,9 @@ mod tests {
         );
         assert_eq!(single_shape, GQAReplayShape::new(5, 5, 5, 6, 8, 8, true));
 
-        let tiled = backend_sdpa::ExecutionVariant::tiled_q(config(), 8, 8, 1);
-        let tiled_selection = selector(8, tiled).select(&shapes, &policy, 5);
-        let tiled_shape = metadata.update(&[2, 5], &[7, 20], &[0, 2, 5], &tiled_selection);
+        let sliced_q = backend_sdpa::ExecutionVariant::sliced_q_per_head(config(), 8, 8, 1);
+        let sliced_q_selection = selector(8, sliced_q).select(&shapes, &policy, 5);
+        let sliced_q_shape = metadata.update(&[2, 5], &[7, 20], &[0, 2, 5], &sliced_q_selection);
         assert_eq!(metadata.q_token_ranges().read_typed::<u32>(0, 4), vec![0, 2, 2, 5]);
         assert_eq!(
             metadata.sdpa_map_task_templates().read_typed::<u32>(0, 18),
@@ -324,14 +384,14 @@ mod tests {
             metadata.cu_sdpa_partial_outputs().read_typed::<u32>(0, 3),
             vec![0, 2, 5]
         );
-        assert_eq!(tiled_shape, GQAReplayShape::new(5, 5, 2, 2, 5, 6, true));
-        assert_eq!(metadata.variant(), tiled);
+        assert_eq!(sliced_q_shape, GQAReplayShape::new(5, 5, 2, 2, 5, 6, true));
+        assert_eq!(metadata.variant(), sliced_q);
     }
 
     #[test]
     fn test_selection_preserves_non_kv_metadata_tail() {
         let device = Device::system_default();
-        let metadata = GQAMetadataBuffers::new(&device, 12);
+        let metadata = GQAMetadataBuffers::new(&device, 12, 12);
         metadata
             .visible_kv_token_ranges()
             .write_typed(0, &[0x9494_9494_u32; 24]);
@@ -342,9 +402,9 @@ mod tests {
         metadata
             .cu_sdpa_partial_outputs()
             .write_typed(0, &[0xC7C7_C7C7_u32; 13]);
-        let variant = backend_sdpa::ExecutionVariant::tiled_q(config(), 8, 8, 1);
+        let variant = backend_sdpa::ExecutionVariant::sliced_q_per_head(config(), 8, 8, 1);
         let selector = selector(12, variant);
-        let policy = GQAReplayBucketPolicy::new(12, &[]);
+        let policy = GQAReplayBucketPolicy::new(12, 12, &[]);
         let selection = selector.select(&RequestShape::from_batch(&[0, 0, 0], &[0, 4, 8, 9]), &policy, 12);
 
         let shape = metadata.update(&[2, 5, 7], &[0, 0, 0], &[0, 4, 8, 9], &selection);

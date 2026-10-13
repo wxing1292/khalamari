@@ -108,16 +108,16 @@ mod tests {
 
     #[test]
     fn test_selector_uses_q_tile_only_when_it_reuses_history() {
-        let single_q = selector(config(128, 16), 1).select();
-        let tiled_q = selector(config(128, 16), 7).select();
+        let sliced_kv = selector(config(128, 16), 1).select();
+        let sliced_q = selector(config(128, 16), 7).select();
 
-        assert_eq!(single_q.execution().map.thread_block.max_q_tokens, 1);
-        assert_eq!(tiled_q.execution().map.thread_block.max_q_tokens, 8);
-        assert_eq!(tiled_q.capacity().max_q_tokens, 8);
+        assert_eq!(sliced_kv.execution().map.thread_block.max_q_tokens, 1);
+        assert_eq!(sliced_q.execution().map.thread_block.max_q_tokens, 8);
+        assert_eq!(sliced_q.capacity().max_q_tokens, 8);
     }
 
     #[test]
-    fn test_selector_keeps_single_q_for_unsupported_tiled_profile() {
+    fn test_selector_keeps_sliced_kv_for_unsupported_tiled_profile() {
         let selection = selector(config(128, 4), 7).select();
 
         assert_eq!(selection.execution().map.thread_block.max_q_tokens, 1);

@@ -378,7 +378,7 @@ mod tests {
     fn test_metadata_materializes_tiled_history_and_block_partials() {
         let device = Device::system_default();
         let capacity = BiDiBlockGQACapacity::new(BiDiBlockCapacity::new(2, 3), 8);
-        let variant = backend_sdpa::ExecutionVariant::tiled_q(config(), 8, 16, 2);
+        let variant = backend_sdpa::ExecutionVariant::sliced_q_per_head(config(), 8, 16, 2);
         let buffers = BiDiBlockGQAMetadataBuffers::new(&device, capacity, variant);
         let block = BiDiBlockGQAMetadata::new(
             &[3, 7],
@@ -405,7 +405,11 @@ mod tests {
     fn test_long_history_is_partitioned_without_growing_static_scratch() {
         let anchor = 262_144;
         let block = BiDiBlockGQAMetadata::new(&[1], &(anchor..anchor + 6).collect::<Vec<_>>(), &vec![0..anchor; 6], 6);
-        let metadata = build_metal_metadata(&block, backend_sdpa::ExecutionVariant::tiled_q(config(), 8, 16, 2), 16);
+        let metadata = build_metal_metadata(
+            &block,
+            backend_sdpa::ExecutionVariant::sliced_q_per_head(config(), 8, 16, 2),
+            16,
+        );
 
         let block_task = metadata.cu_sdpa_partial_outputs[1] as usize - 1;
         let history = metadata.sdpa_map_task_templates[..block_task * 3].as_chunks::<3>().0;
@@ -420,7 +424,7 @@ mod tests {
     fn test_q_tile_uses_history_union_and_preserves_per_query_masks() {
         let device = Device::system_default();
         let capacity = BiDiBlockGQACapacity::new(BiDiBlockCapacity::new(1, 3), 8);
-        let variant = backend_sdpa::ExecutionVariant::tiled_q(config(), 8, 16, 2);
+        let variant = backend_sdpa::ExecutionVariant::sliced_q_per_head(config(), 8, 16, 2);
         let buffers = BiDiBlockGQAMetadataBuffers::new(&device, capacity, variant);
         let block = BiDiBlockGQAMetadata::new(&[3], &[20, 21, 22], &[0..20, 1..20, 2..20], 3);
 

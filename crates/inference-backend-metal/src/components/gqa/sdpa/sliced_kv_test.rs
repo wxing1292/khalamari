@@ -14,7 +14,7 @@ use crate::metal::ReplayParameterKey;
 use crate::metal::Stream;
 use crate::test_support::ReplayTestCache;
 
-const NUM_ACTIVE_TOKENS: ReplayParameterKey = ReplayParameterKey::new("test.gqa.split_kv_single_q.active_tokens");
+const NUM_ACTIVE_TOKENS: ReplayParameterKey = ReplayParameterKey::new("test.gqa.sdpa_sliced_kv.active_tokens");
 const NUM_ACTIVE_KV_SPLITS: ReplayParameterKey = ReplayParameterKey::new("test.gqa.paged.active_kv_splits");
 
 #[test]
@@ -205,7 +205,7 @@ fn test_ragged_requests_match_reference() {
     let req1_k = generated_values(2 * kv_stride, random_seed.wrapping_add(3));
     let req1_v = generated_values(2 * kv_stride, random_seed.wrapping_add(4));
     let kv_pages = kv_page_values(config, &[(&req0_k, &req0_v), (&req1_k, &req1_v)]);
-    let actual = run_gqa_split_kv_single_q(
+    let actual = run_gqa_sdpa_sliced_kv(
         config,
         shape,
         TestInput {
@@ -258,7 +258,7 @@ fn test_multiple_page_ids_per_block() {
                     (&k[tokens / 2 * kv_stride..], &v[tokens / 2 * kv_stride..]),
                 ],
             );
-            let actual = run_gqa_split_kv_single_q(
+            let actual = run_gqa_sdpa_sliced_kv(
                 config,
                 shape,
                 TestInput {
@@ -307,7 +307,7 @@ fn fixture_config() -> Config {
 }
 
 fn fixture_execution(config: Config) -> sdpa::ExecutionVariant {
-    sdpa::ExecutionVariant::single_q(
+    sdpa::ExecutionVariant::sliced_kv(
         config.sdpa_config(),
         4,
         config.head_dim.clamp(32, 128).next_power_of_two(),
@@ -342,7 +342,7 @@ struct TestInput<'a> {
     flat_token_indices: &'a [u32],
 }
 
-fn run_gqa_split_kv_single_q(config: Config, shape: Shape, input: TestInput<'_>) -> Vec<f32> {
+fn run_gqa_sdpa_sliced_kv(config: Config, shape: Shape, input: TestInput<'_>) -> Vec<f32> {
     let device = Device::system_default();
     let stream = Stream::new(&device);
     let execution = fixture_execution(config);
@@ -525,7 +525,7 @@ fn assert_close(actual: &[f32], expected: &[f32], tolerance: f32) {
     let mean_abs_tolerance = tolerance * 0.25;
     assert!(
         mean_abs_error <= mean_abs_tolerance,
-        "GQA SingleQ mean mismatch: mean_abs_error={mean_abs_error} mean_abs_tolerance={mean_abs_tolerance}"
+        "GQA SlicedKv mean mismatch: mean_abs_error={mean_abs_error} mean_abs_tolerance={mean_abs_tolerance}"
     );
     for (index, (actual_value, expected_value)) in actual.iter().zip(expected).enumerate() {
         let diff = (actual_value - expected_value).abs();

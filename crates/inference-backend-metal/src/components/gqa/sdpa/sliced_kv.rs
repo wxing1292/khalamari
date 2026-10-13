@@ -17,8 +17,8 @@ use crate::metal::ReplayU32;
 use crate::mlx_headers::steel_mma_source;
 
 const FP8_SOURCE: &str = include_str!("../../metal/gqa_fp8.metal");
-const MAP_SOURCE: &str = include_str!("../../metal/gqa_split_kv_single_q_map.metal");
-const REDUCE_SOURCE: &str = include_str!("../../metal/gqa_split_kv_single_q_reduce.metal");
+const MAP_SOURCE: &str = include_str!("../../metal/gqa_sdpa_sliced_kv_map.metal");
+const REDUCE_SOURCE: &str = include_str!("../../metal/gqa_sdpa_sliced_kv_reduce.metal");
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct KernelConstants {
@@ -31,7 +31,7 @@ impl KernelConstants {
     fn new(config: Config, execution: sdpa::ExecutionVariant) -> Self {
         config.validate();
         assert!(execution.supports(config.sdpa_config()));
-        assert_eq!(execution.map.thread_block.max_q_tokens, 1);
+        assert_eq!(execution.map.kind, sdpa::MapKernelKind::SlicedKv);
         Self {
             config,
             map: execution.map,
@@ -63,7 +63,7 @@ impl KernelConstants {
     }
 }
 
-/// SplitKV SingleQ SDPA (`T` = tokens, `H` = heads, `D` = head width):
+/// SplitKV SlicedKv SDPA (`T` = tokens, `H` = heads, `D` = head width):
 ///
 /// ```text
 /// Q: [Tq, Hq, D]       Q tile: [Tq_tile, Hq_tile, D]
@@ -259,8 +259,8 @@ pub struct MappedReduceBuffers<'a> {
     pub partial_max_logits: &'a Buffer,
     pub partial_output: &'a Buffer,
     pub cu_sdpa_partial_outputs: &'a Buffer,
-    /// Compact query row to original output query row.
-    pub output_query_rows: &'a Buffer,
+    /// Compact query index to original output query index.
+    pub output_query_indices: &'a Buffer,
     pub output: &'a Buffer,
 }
 
@@ -325,19 +325,19 @@ impl Compute {
         assert_u32_count_domain(constants.map_threads(shape), "GQA SDPA map threads");
         assert!(
             constants.map_threadblock_memory_bytes() <= device.max_threadblock_memory_length(),
-            "GQA SplitKV SingleQ shape needs {} bytes of threadblock memory but device only supports {}",
+            "GQA SplitKV SlicedKv shape needs {} bytes of threadblock memory but device only supports {}",
             constants.map_threadblock_memory_bytes(),
             device.max_threadblock_memory_length()
         );
         let reduce_function_name = match config.dtype {
-            Dtype::Float32 => "gqa_split_kv_single_q_reduce_f32",
-            Dtype::Bfloat16 => "gqa_split_kv_single_q_reduce_bf16",
-            dtype => panic!("unsupported GQA SplitKV SingleQ reduce dtype {dtype:?}"),
+            Dtype::Float32 => "gqa_sdpa_sliced_kv_reduce_f32",
+            Dtype::Bfloat16 => "gqa_sdpa_sliced_kv_reduce_bf16",
+            dtype => panic!("unsupported GQA SplitKV SlicedKv reduce dtype {dtype:?}"),
         };
         let map = CompiledKernel::new(
             device,
-            &gqa_split_kv_single_q_map_source(constants),
-            "gqa_split_kv_single_q_map",
+            &gqa_sdpa_sliced_kv_map_source(constants),
+            "gqa_sdpa_sliced_kv_map",
         );
         assert!(map.static_threadblock_memory_length() <= device.max_threadblock_memory_length());
         assert!(constants.map.thread_block.required_threads as usize <= map.max_total_threads_per_threadblock());
@@ -348,7 +348,7 @@ impl Compute {
             map,
             reduce: CompiledKernel::new(
                 device,
-                &gqa_split_kv_single_q_reduce_source(constants),
+                &gqa_sdpa_sliced_kv_reduce_source(constants),
                 reduce_function_name,
             ),
         }
@@ -383,8 +383,8 @@ impl Compute {
     }
 }
 
-/// SplitKV reducer that maps compact query rows back to their original output
-/// rows. It supports the two QSA storage pairs: BF16 partials to BF16 output
+/// SplitKV reducer that maps compact query indices back to their original output
+/// indices. It supports the two QSA storage pairs: BF16 partials to BF16 output
 /// for dense GQA, and F32 partials to BF16 output for sparse GQA.
 pub struct MappedReduce {
     config: Config,
@@ -406,8 +406,8 @@ impl MappedReduce {
         let constants = KernelConstants::new(config, execution);
         shape.validate(config);
         let function_name = match partial_dtype {
-            Dtype::Bfloat16 => "gqa_split_kv_single_q_reduce_mapped_bf16_bf16",
-            Dtype::Float32 => "gqa_split_kv_single_q_reduce_mapped_f32_bf16",
+            Dtype::Bfloat16 => "gqa_sdpa_sliced_kv_reduce_mapped_bf16_bf16",
+            Dtype::Float32 => "gqa_sdpa_sliced_kv_reduce_mapped_f32_bf16",
             dtype => panic!("unsupported mapped GQA partial dtype {dtype:?}"),
         };
         Self {
@@ -415,7 +415,7 @@ impl MappedReduce {
             shape,
             partial_dtype,
             required_threads: execution.reduce.thread_block.required_threads,
-            reduce: CompiledKernel::new(device, &gqa_split_kv_single_q_reduce_source(constants), function_name),
+            reduce: CompiledKernel::new(device, &gqa_sdpa_sliced_kv_reduce_source(constants), function_name),
         }
     }
 
@@ -456,7 +456,7 @@ impl Operator for MappedReduceInvocation<'_> {
         recorder.set_buffer_read(1, self.buffers.partial_max_logits, 0);
         recorder.set_buffer_read(2, self.buffers.partial_output, 0);
         recorder.set_buffer_read(3, self.buffers.cu_sdpa_partial_outputs, 0);
-        recorder.set_buffer_read(4, self.buffers.output_query_rows, 0);
+        recorder.set_buffer_read(4, self.buffers.output_query_indices, 0);
         recorder.set_buffer_write(5, self.buffers.output, 0);
         set_replay_u32_min(
             recorder,
@@ -485,14 +485,14 @@ impl MappedReduceInvocation<'_> {
                 >= self.config.cu_sdpa_partial_outputs_bytes(self.shape)
         );
         assert!(
-            self.buffers.output_query_rows.len_bytes_u64()
+            self.buffers.output_query_indices.len_bytes_u64()
                 >= (self.shape.num_total_tokens as u64) * size_of::<u32>() as u64
         );
         assert!(self.buffers.output.len_bytes_u64() >= self.config.q_bytes(self.shape));
     }
 }
 
-fn gqa_split_kv_single_q_map_source(constants: KernelConstants) -> String {
+fn gqa_sdpa_sliced_kv_map_source(constants: KernelConstants) -> String {
     let config = constants.config;
     let map = constants.map.thread_block;
     let dtype = metal_dtype_name(config.dtype);
@@ -542,7 +542,7 @@ fn metal_dtype_name(dtype: Dtype) -> &'static str {
     match dtype {
         Dtype::Float32 => "float",
         Dtype::Bfloat16 => "bfloat16_t",
-        unsupported_dtype => panic!("unsupported GQA SplitKV SingleQ map dtype {unsupported_dtype:?}"),
+        unsupported_dtype => panic!("unsupported GQA SplitKV SlicedKv map dtype {unsupported_dtype:?}"),
     }
 }
 
@@ -585,7 +585,7 @@ impl Operator for MapInvocation<'_> {
             9,
             self.num_active_tokens,
             shape.num_total_tokens,
-            "GQA SplitKV SingleQ active token count",
+            "GQA SplitKV SlicedKv active token count",
         );
         set_replay_u32_min(
             recorder,
@@ -593,7 +593,7 @@ impl Operator for MapInvocation<'_> {
             self.num_active_kv_splits,
             0,
             shape.num_total_sdpa_map_task_templates,
-            "GQA SplitKV SingleQ active KV split count",
+            "GQA SplitKV SlicedKv active KV split count",
         );
         recorder.dispatch_threadblocks(
             (
@@ -645,7 +645,7 @@ impl Operator for ReduceInvocation<'_> {
             5,
             self.num_active_tokens,
             shape.num_total_tokens,
-            "GQA SplitKV SingleQ active token count",
+            "GQA SplitKV SlicedKv active token count",
         );
         recorder.dispatch_1d(
             self.constants.config.num_output_values(shape),
@@ -689,7 +689,7 @@ impl ReduceInvocation<'_> {
     }
 }
 
-fn gqa_split_kv_single_q_reduce_source(constants: KernelConstants) -> String {
+fn gqa_sdpa_sliced_kv_reduce_source(constants: KernelConstants) -> String {
     let config = constants.config;
     let constants = format!(
         "using namespace metal;\n\nconstant uint num_q_heads = {}u;\nconstant uint head_dim = {}u;",
@@ -699,5 +699,5 @@ fn gqa_split_kv_single_q_reduce_source(constants: KernelConstants) -> String {
 }
 
 #[cfg(test)]
-#[path = "single_q_test.rs"]
+#[path = "sliced_kv_test.rs"]
 mod tests;

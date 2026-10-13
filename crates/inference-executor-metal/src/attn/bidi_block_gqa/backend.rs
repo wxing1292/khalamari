@@ -6,8 +6,8 @@ use inference_backend_metal::components::gqa::bidi_block_sdpa as backend_bidi_bl
 use inference_backend_metal::components::gqa::kv_page_write as backend_kv_page_write;
 use inference_backend_metal::components::gqa::sdpa as backend_sdpa;
 use inference_backend_metal::components::gqa::sdpa::ExecutionVariant;
-use inference_backend_metal::components::gqa::split_kv::single_q as backend_single_q;
-use inference_backend_metal::components::gqa::split_kv::tiled_q as backend_tiled_q;
+use inference_backend_metal::components::gqa::sdpa::sliced_kv as backend_sliced_kv;
+use inference_backend_metal::components::gqa::sdpa::sliced_q as backend_sliced_q;
 use inference_backend_metal::components::rms_norm_rope;
 use inference_backend_metal::metal::Buffer;
 use inference_backend_metal::metal::Device;
@@ -225,14 +225,10 @@ impl BiDiBlockGQA {
         let shape = input.metadata.replay_shape();
         let sdpa_execution = input.metadata.sdpa_execution();
         shape.validate();
-        assert_eq!(
-            shape.num_tokens, shape.num_total_tokens,
-            "BiDiBlockGQA dense block attention requires an identity token capacity"
-        );
         assert!(shape.reduce_sdpa_partial_outputs);
         assert!(
-            shape.num_tokens as usize <= input.scratch.capacity.block.max_tokens,
-            "BiDiBlockGQA replay token count exceeds scratch"
+            shape.num_total_tokens as usize <= input.scratch.capacity.block.max_tokens,
+            "BiDiBlockGQA replay token capacity exceeds scratch"
         );
         assert!(
             shape.num_total_sdpa_map_task_templates as usize <= input.scratch.capacity.max_sdpa_map_task_templates,
@@ -253,9 +249,9 @@ impl BiDiBlockGQA {
         shape
     }
 
-    fn split_kv_single_q_config(&self, page_table_layout: GQAPageTableLayout) -> backend_single_q::Config {
+    fn sdpa_sliced_kv_config(&self, page_table_layout: GQAPageTableLayout) -> backend_sliced_kv::Config {
         let attention = &self.core.attention;
-        backend_single_q::Config {
+        backend_sliced_kv::Config {
             num_q_heads: attention
                 .num_q_heads
                 .try_into()
@@ -275,9 +271,9 @@ impl BiDiBlockGQA {
         }
     }
 
-    fn split_kv_tiled_q_config(&self, page_table_layout: GQAPageTableLayout) -> backend_tiled_q::Config {
+    fn sdpa_sliced_q_config(&self, page_table_layout: GQAPageTableLayout) -> backend_sliced_q::Config {
         let attention = &self.core.attention;
-        backend_tiled_q::Config {
+        backend_sliced_q::Config {
             num_q_heads: attention
                 .num_q_heads
                 .try_into()
@@ -407,15 +403,15 @@ impl ReplayLayer for BiDiBlockGQA {
             active_tokens,
         )));
 
-        if sdpa_execution.map.thread_block.max_q_tokens == 1 {
-            let sdpa_config = self.split_kv_single_q_config(input.page_table_layout);
-            let sdpa_shape = backend_single_q::Shape {
+        if sdpa_execution.map.kind == backend_sdpa::MapKernelKind::SlicedKv {
+            let sdpa_config = self.sdpa_sliced_kv_config(input.page_table_layout);
+            let sdpa_shape = backend_sliced_kv::Shape {
                 num_total_tokens: shape.num_total_tokens,
                 num_total_sdpa_map_task_templates: shape.num_total_sdpa_map_task_templates,
             };
-            let sdpa = backend_single_q::Compute::new(&self.device, sdpa_config, sdpa_execution, sdpa_shape);
+            let sdpa = backend_sliced_kv::Compute::new(&self.device, sdpa_config, sdpa_execution, sdpa_shape);
             recorder.record_with_barrier_before(ReplayOp::opaque(sdpa.invoke_map(
-                backend_single_q::MapBuffers {
+                backend_sliced_kv::MapBuffers {
                     q: scratch.q_norm_rope,
                     kv_pages: input.kv_cache.kv_pages,
                     req_slots: input.metadata.req_slots(),
@@ -431,7 +427,7 @@ impl ReplayLayer for BiDiBlockGQA {
             )));
             self.record_bidi_block_sdpa(recorder, shape, input.metadata, scratch);
             recorder.record_with_barrier_before(ReplayOp::opaque(sdpa.invoke_reduce(
-                backend_single_q::ReduceBuffers {
+                backend_sliced_kv::ReduceBuffers {
                     partial_exp_sums: scratch.partial_exp_sums,
                     partial_max_logits: scratch.partial_max_logits,
                     partial_output: scratch.partial_output,
@@ -441,15 +437,15 @@ impl ReplayLayer for BiDiBlockGQA {
                 active_tokens,
             )));
         } else {
-            let sdpa_config = self.split_kv_tiled_q_config(input.page_table_layout);
-            let sdpa_shape = backend_tiled_q::Shape {
+            let sdpa_config = self.sdpa_sliced_q_config(input.page_table_layout);
+            let sdpa_shape = backend_sliced_q::Shape {
                 num_total_tokens: shape.num_total_tokens,
                 num_total_q_token_tiles: shape.num_total_q_token_tiles,
                 num_total_sdpa_map_task_templates: shape.num_total_sdpa_map_task_templates,
             };
-            let sdpa = backend_tiled_q::Compute::new(&self.device, sdpa_config, sdpa_execution, sdpa_shape);
+            let sdpa = backend_sliced_q::Compute::new(&self.device, sdpa_config, sdpa_execution, sdpa_shape);
             recorder.record_with_barrier_before(ReplayOp::opaque(sdpa.invoke_map(
-                backend_tiled_q::MapBuffers {
+                backend_sliced_q::MapBuffers {
                     q: scratch.q_norm_rope,
                     kv_pages: input.kv_cache.kv_pages,
                     req_slots: input.metadata.req_slots(),
@@ -468,7 +464,7 @@ impl ReplayLayer for BiDiBlockGQA {
             )));
             self.record_bidi_block_sdpa(recorder, shape, input.metadata, scratch);
             recorder.record_with_barrier_before(ReplayOp::opaque(sdpa.invoke_reduce(
-                backend_tiled_q::ReduceBuffers {
+                backend_sliced_q::ReduceBuffers {
                     partial_output: scratch.partial_output,
                     partial_exp_sums: scratch.partial_exp_sums,
                     partial_max_logits: scratch.partial_max_logits,

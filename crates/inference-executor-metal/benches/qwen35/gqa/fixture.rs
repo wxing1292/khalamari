@@ -5,8 +5,8 @@ use inference_backend_metal::components::gqa::activation_gate as backend_activat
 use inference_backend_metal::components::gqa::kv_page_write as backend_kv_page_write;
 use inference_backend_metal::components::gqa::qgkv_split as backend_qgkv_split;
 use inference_backend_metal::components::gqa::sdpa as backend_sdpa;
-use inference_backend_metal::components::gqa::split_kv::single_q as backend_single_q;
-use inference_backend_metal::components::gqa::split_kv::tiled_q as backend_tiled_q;
+use inference_backend_metal::components::gqa::sdpa::sliced_kv as backend_sliced_kv;
+use inference_backend_metal::components::gqa::sdpa::sliced_q as backend_sliced_q;
 use inference_backend_metal::components::rms_norm_rope;
 use inference_backend_metal::components::rms_norm_rope::RopeScaling;
 use inference_backend_metal::metal::Buffer;
@@ -55,7 +55,7 @@ use crate::gqa_qgkv_affine_config;
 use crate::gqa_qgkv_to_q_g_k_v_config;
 use crate::gqa_sdpa_config;
 use crate::gqa_sdpa_shape;
-use crate::gqa_split_kv_tiled_q_config;
+use crate::gqa_sdpa_sliced_q_config;
 use crate::hidden_fixture;
 use crate::max_bf16_diff;
 use crate::measure_runs;
@@ -109,8 +109,8 @@ pub fn run(args: Args) {
                     args.params,
                     args.model,
                 );
-                if args.validate_split_kv_tiled_q {
-                    fixture.validate_split_kv_tiled_q_attention();
+                if args.validate_sdpa_sliced_q {
+                    fixture.validate_sdpa_sliced_q_attention();
                 }
                 fixture.measure(&args.split_kv_variants, args.warmup_iters, args.iters, args.runs);
                 if args.subcomponents {
@@ -133,8 +133,8 @@ pub fn run(args: Args) {
                     args.params,
                     args.model,
                 );
-                if args.validate_split_kv_tiled_q {
-                    fixture.validate_split_kv_tiled_q_attention();
+                if args.validate_sdpa_sliced_q {
+                    fixture.validate_sdpa_sliced_q_attention();
                 }
                 fixture.measure(&args.split_kv_variants, args.warmup_iters, args.iters, args.runs);
                 if args.subcomponents {
@@ -164,8 +164,8 @@ pub fn run(args: Args) {
                     args.params,
                     args.model,
                 );
-                if args.validate_split_kv_tiled_q {
-                    fixture.validate_split_kv_tiled_q_attention();
+                if args.validate_sdpa_sliced_q {
+                    fixture.validate_sdpa_sliced_q_attention();
                 }
                 fixture.measure(&args.split_kv_variants, args.warmup_iters, args.iters, args.runs);
                 if args.subcomponents {
@@ -195,12 +195,12 @@ struct RealGQAFixture<'a> {
     end_context_len: u32,
     next_hidden_state: Buffer,
     replay: ReplayProgram,
-    tiled_next_hidden_state: Buffer,
-    tiled_replay: ReplayProgram,
+    sliced_q_next_hidden_state: Buffer,
+    sliced_q_replay: ReplayProgram,
     _hidden_state: Buffer,
     _kv_pages: Buffer,
     batch_metadata: GQAMetadataBuffers,
-    tiled_batch_metadata: GQAMetadataBuffers,
+    sliced_q_batch_metadata: GQAMetadataBuffers,
     _page_ids: Buffer,
     _tiled_partial_output: Buffer,
     _tiled_partial_exp_sums: Buffer,
@@ -269,7 +269,6 @@ impl<'a> RealGQAFixture<'a> {
             rope_scaling: RopeScaling::Default,
             io_dtype: Dtype::Bfloat16,
         };
-        let backend = GQA::new(device, core, config, max_tokens);
         let end_context_len = existing_context_lens
             .iter()
             .zip(&num_tokens_per_req)
@@ -291,6 +290,7 @@ impl<'a> RealGQAFixture<'a> {
             num_gqa_layers: 1,
             num_page_ids_per_block: 1,
         };
+        let backend = GQA::new(device, core, config, max_tokens, page_table_layout);
         let hidden_state = Buffer::from_slice(device, &hidden_fixture(num_tokens as usize, model.hidden_dim));
         let kv_pages = Buffer::new_zeroed(
             device,
@@ -298,22 +298,22 @@ impl<'a> RealGQAFixture<'a> {
         );
         assert!(num_tokens as usize <= max_tokens);
         let q_heads_per_kv_head = model.num_q_heads / model.num_kv_heads;
-        let single_q_max_q_heads = q_heads_per_kv_head
-            .min(params.split_kv_single_q_max_q_heads as usize)
+        let sliced_kv_max_q_heads = q_heads_per_kv_head
+            .min(params.sdpa_sliced_kv_max_q_heads as usize)
             .try_into()
             .expect("GQA max Q-head count must fit u32");
         let num_q_token_ranges = num_tokens_per_req
             .iter()
-            .map(|&count| count.div_ceil(params.split_kv_tiled_q_max_q_tokens))
+            .map(|&count| count.div_ceil(params.sdpa_sliced_q_max_q_tokens))
             .sum::<u32>();
-        if params.split_kv_tiled_q_max_q_heads == 0 {
+        if params.sdpa_sliced_q_max_q_heads == 0 {
             let desired_max_q_heads = if (num_tokens as u64) < 4 * num_q_token_ranges as u64 {
                 q_heads_per_kv_head.div_ceil(2)
             } else {
                 q_heads_per_kv_head
             };
-            let max_supported_q_heads = 256 / (params.split_kv_tiled_q_max_q_tokens / 8 * 32);
-            params.split_kv_tiled_q_max_q_heads = desired_max_q_heads
+            let max_supported_q_heads = 256 / (params.sdpa_sliced_q_max_q_tokens / 8 * 32);
+            params.sdpa_sliced_q_max_q_heads = desired_max_q_heads
                 .min(max_supported_q_heads as usize)
                 .try_into()
                 .expect("GQA max Q-head count must fit u32");
@@ -324,8 +324,11 @@ impl<'a> RealGQAFixture<'a> {
             .map(|value| value as u32)
             .collect::<Vec<_>>();
         let request_shapes = RequestShape::from_batch(&existing_context_lens, &materialized_cu_tokens);
-        let replay_bucket_policy =
-            GQAReplayBucketPolicy::new(max_tokens.try_into().expect("GQA max token count must fit u32"), &[]);
+        let replay_bucket_policy = GQAReplayBucketPolicy::new(
+            max_tokens.try_into().expect("GQA max token count must fit u32"),
+            max_tokens.try_into().expect("GQA max token count must fit u32"),
+            &[],
+        );
         let sdpa_config = backend_sdpa::Config {
             io_dtype: config.io_dtype,
             num_q_heads: model.num_q_heads.try_into().expect("GQA Q-head count must fit u32"),
@@ -333,42 +336,50 @@ impl<'a> RealGQAFixture<'a> {
             head_dim: model.head_dim.try_into().expect("GQA head_dim must fit u32"),
             tokens_per_page: model.num_tokens_per_page(),
         };
-        let single_q_variant = backend_sdpa::ExecutionVariant::single_q(
+        let sliced_kv_variant = backend_sdpa::ExecutionVariant::sliced_kv(
             sdpa_config,
-            params.split_kv_single_q_kv_tokens_per_iteration,
-            params.split_kv_single_q_required_threads,
-            single_q_max_q_heads,
+            params.sdpa_sliced_kv_kv_tokens_per_iteration,
+            params.sdpa_sliced_kv_required_threads,
+            sliced_kv_max_q_heads,
         );
-        let single_q_selection = Selector::new(
-            backend_sdpa::Registry::from_variants(sdpa_config, vec![single_q_variant]),
+        let sliced_kv_selection = Selector::new(
+            backend_sdpa::Registry::from_variants(sdpa_config, vec![sliced_kv_variant]),
             max_tokens,
+            max_tokens,
+            max_tokens
+                .checked_mul(sliced_kv_variant.map.thread_block.max_q_tokens as usize)
+                .expect("GQA SDPA partial-state-group capacity must fit usize"),
         )
         .select(&request_shapes, &replay_bucket_policy, num_tokens);
-        let batch_metadata = GQAMetadataBuffers::new(device, max_tokens);
+        let batch_metadata = GQAMetadataBuffers::new(device, max_tokens, max_tokens);
         let shape = batch_metadata.update(
             &req_slots,
             &existing_context_lens,
             &materialized_cu_tokens,
-            &single_q_selection,
+            &sliced_kv_selection,
         );
         let page_ids = Buffer::from_slice(device, &page_table(num_reqs, num_blocks));
-        let tiled_q_variant = backend_sdpa::ExecutionVariant::tiled_q(
+        let sliced_q_variant = backend_sdpa::ExecutionVariant::sliced_q_per_head(
             sdpa_config,
-            params.split_kv_tiled_q_max_q_tokens,
-            params.split_kv_tiled_q_kv_tokens_per_iteration,
-            params.split_kv_tiled_q_max_q_heads,
+            params.sdpa_sliced_q_max_q_tokens,
+            params.sdpa_sliced_q_kv_tokens_per_iteration,
+            params.sdpa_sliced_q_max_q_heads,
         );
-        let tiled_q_selection = Selector::new(
-            backend_sdpa::Registry::from_variants(sdpa_config, vec![tiled_q_variant]),
+        let sliced_q_selection = Selector::new(
+            backend_sdpa::Registry::from_variants(sdpa_config, vec![sliced_q_variant]),
             max_tokens,
+            max_tokens,
+            max_tokens
+                .checked_mul(sliced_q_variant.map.thread_block.max_q_tokens as usize)
+                .expect("GQA SDPA partial-state-group capacity must fit usize"),
         )
         .select(&request_shapes, &replay_bucket_policy, num_tokens);
-        let tiled_batch_metadata = GQAMetadataBuffers::new(device, max_tokens);
-        let tiled_replay_shape = tiled_batch_metadata.update(
+        let sliced_q_batch_metadata = GQAMetadataBuffers::new(device, max_tokens, max_tokens);
+        let sliced_q_replay_shape = sliced_q_batch_metadata.update(
             &req_slots,
             &existing_context_lens,
             &materialized_cu_tokens,
-            &tiled_q_selection,
+            &sliced_q_selection,
         );
         let qgkv = Buffer::new_zeroed(
             device,
@@ -409,21 +420,21 @@ impl<'a> RealGQAFixture<'a> {
             device,
             num_tokens as usize * model.q_dim() * Dtype::Bfloat16.item_size(),
         );
-        let tiled_attention_output = Buffer::new_zeroed(
+        let sliced_q_attention_output = Buffer::new_zeroed(
             device,
             num_tokens as usize * model.q_dim() * Dtype::Bfloat16.item_size(),
         );
-        let num_reserved_sdpa_partial_output_tokens = tiled_replay_shape.num_total_sdpa_map_task_templates as usize
-            * params.split_kv_tiled_q_max_q_tokens as usize;
-        let tiled_partial_output = Buffer::new_zeroed(
+        let num_reserved_sdpa_partial_output_tokens = sliced_q_replay_shape.num_total_sdpa_map_task_templates as usize
+            * params.sdpa_sliced_q_max_q_tokens as usize;
+        let sliced_q_partial_output = Buffer::new_zeroed(
             device,
             num_reserved_sdpa_partial_output_tokens * model.q_dim() * Dtype::Bfloat16.item_size(),
         );
-        let tiled_partial_exp_sums = Buffer::new_zeroed(
+        let sliced_q_partial_exp_sums = Buffer::new_zeroed(
             device,
             num_reserved_sdpa_partial_output_tokens * model.num_q_heads * size_of::<f32>(),
         );
-        let tiled_partial_max_logits = Buffer::new_zeroed(
+        let sliced_q_partial_max_logits = Buffer::new_zeroed(
             device,
             num_reserved_sdpa_partial_output_tokens * model.num_q_heads * size_of::<f32>(),
         );
@@ -435,7 +446,7 @@ impl<'a> RealGQAFixture<'a> {
             device,
             num_tokens as usize * model.hidden_dim * Dtype::Bfloat16.item_size(),
         );
-        let tiled_next_hidden_state = Buffer::new_zeroed(
+        let sliced_q_next_hidden_state = Buffer::new_zeroed(
             device,
             num_tokens as usize * model.hidden_dim * Dtype::Bfloat16.item_size(),
         );
@@ -490,16 +501,20 @@ impl<'a> RealGQAFixture<'a> {
         let gate = backend_activation_gate::Compute::new(device, gqa_gate_config(model));
         let output = affine_quantized::Matmul::new(device, gqa_output_affine_config(model));
         let metal_page_table_layout = gqa_page_table_layout(num_reqs, end_context_len, model);
-        let tiled_config = gqa_split_kv_tiled_q_config(metal_page_table_layout, model);
-        let tiled_shape = backend_tiled_q::Shape {
+        let sliced_q_config = gqa_sdpa_sliced_q_config(metal_page_table_layout, model);
+        let sliced_q_shape = backend_sliced_q::Shape {
             num_total_tokens: num_tokens,
-            num_total_q_token_tiles: tiled_replay_shape.num_q_token_tiles,
-            num_total_sdpa_map_task_templates: tiled_replay_shape.num_total_sdpa_map_task_templates,
+            num_total_q_token_tiles: sliced_q_replay_shape.num_q_token_tiles,
+            num_total_sdpa_map_task_templates: sliced_q_replay_shape.num_total_sdpa_map_task_templates,
         };
-        let tiled_kernel =
-            backend_tiled_q::Compute::new(device, tiled_config, tiled_batch_metadata.variant(), tiled_shape);
-        let mut tiled_builder = MetalReplayRuntime::new(&stream).create_recorder();
-        tiled_builder.record_with_barrier_before(ReplayOp::opaque(qgkv_matmul.invoke(
+        let sliced_q_kernel = backend_sliced_q::Compute::new(
+            device,
+            sliced_q_config,
+            sliced_q_batch_metadata.variant(),
+            sliced_q_shape,
+        );
+        let mut sliced_q_builder = MetalReplayRuntime::new(&stream).create_recorder();
+        sliced_q_builder.record_with_barrier_before(ReplayOp::opaque(qgkv_matmul.invoke(
             num_tokens,
             ReplayU32::Fixed(num_tokens),
             &qgkv,
@@ -513,7 +528,7 @@ impl<'a> RealGQAFixture<'a> {
             &weights.qgkv_biases,
             0,
         )));
-        tiled_builder.record_with_barrier_before(ReplayOp::opaque(qgkv_to_q_g_k_v.invoke(
+        sliced_q_builder.record_with_barrier_before(ReplayOp::opaque(qgkv_to_q_g_k_v.invoke(
             backend_qgkv_split::Shape {
                 num_total_tokens: num_tokens,
             },
@@ -526,7 +541,7 @@ impl<'a> RealGQAFixture<'a> {
             },
             ReplayU32::Fixed(num_tokens),
         )));
-        tiled_builder.record_with_barrier_before(ReplayOp::opaque(q_norm_rope_kernel.invoke(
+        sliced_q_builder.record_with_barrier_before(ReplayOp::opaque(q_norm_rope_kernel.invoke(
             norm_rope_shape(num_tokens, model.num_q_heads, model),
             rms_norm_rope::Buffers {
                 input: &q,
@@ -536,7 +551,7 @@ impl<'a> RealGQAFixture<'a> {
             },
             ReplayU32::Fixed(num_tokens),
         )));
-        tiled_builder.record(ReplayOp::opaque(k_norm_rope_kernel.invoke(
+        sliced_q_builder.record(ReplayOp::opaque(k_norm_rope_kernel.invoke(
             norm_rope_shape(num_tokens, model.num_kv_heads, model),
             rms_norm_rope::Buffers {
                 input: &k,
@@ -546,7 +561,7 @@ impl<'a> RealGQAFixture<'a> {
             },
             ReplayU32::Fixed(num_tokens),
         )));
-        tiled_builder.record_with_barrier_before(ReplayOp::opaque(kv_page_write.invoke(
+        sliced_q_builder.record_with_barrier_before(ReplayOp::opaque(kv_page_write.invoke(
             backend_kv_page_write::Shape {
                 num_total_token_writes: num_tokens,
                 page_table_layout: metal_page_table_layout,
@@ -555,57 +570,57 @@ impl<'a> RealGQAFixture<'a> {
                 pages: &kv_pages,
                 flat_k: &k_norm_rope,
                 flat_v: &v,
-                req_slots: tiled_batch_metadata.req_slots(),
+                req_slots: sliced_q_batch_metadata.req_slots(),
                 flat_token_indices: batch_metadata.flat_token_indices(),
                 page_ids: &page_ids,
             },
             ReplayU32::Fixed(num_tokens),
             ReplayU32::Fixed(0),
         )));
-        tiled_builder.record_with_barrier_before(ReplayOp::opaque(tiled_kernel.invoke_map(
-            backend_tiled_q::MapBuffers {
+        sliced_q_builder.record_with_barrier_before(ReplayOp::opaque(sliced_q_kernel.invoke_map(
+            backend_sliced_q::MapBuffers {
                 q: &q_norm_rope,
                 kv_pages: &kv_pages,
                 req_slots: batch_metadata.req_slots(),
                 page_ids: &page_ids,
-                visible_kv_token_ranges: tiled_batch_metadata.visible_kv_token_ranges(),
-                q_token_ranges: tiled_batch_metadata.q_token_ranges(),
-                sdpa_map_task_templates: tiled_batch_metadata.sdpa_map_task_templates(),
-                partial_output: &tiled_partial_output,
-                partial_exp_sums: &tiled_partial_exp_sums,
-                partial_max_logits: &tiled_partial_max_logits,
+                visible_kv_token_ranges: sliced_q_batch_metadata.visible_kv_token_ranges(),
+                q_token_ranges: sliced_q_batch_metadata.q_token_ranges(),
+                sdpa_map_task_templates: sliced_q_batch_metadata.sdpa_map_task_templates(),
+                partial_output: &sliced_q_partial_output,
+                partial_exp_sums: &sliced_q_partial_exp_sums,
+                partial_max_logits: &sliced_q_partial_max_logits,
             },
             ReplayU32::Fixed(0),
             ReplayU32::Fixed(num_tokens),
-            ReplayU32::Fixed(tiled_shape.num_total_q_token_tiles),
-            ReplayU32::Fixed(tiled_shape.num_total_sdpa_map_task_templates),
+            ReplayU32::Fixed(sliced_q_shape.num_total_q_token_tiles),
+            ReplayU32::Fixed(sliced_q_shape.num_total_sdpa_map_task_templates),
         )));
-        tiled_builder.record_with_barrier_before(ReplayOp::opaque(tiled_kernel.invoke_reduce(
-            backend_tiled_q::ReduceBuffers {
-                partial_output: &tiled_partial_output,
-                partial_exp_sums: &tiled_partial_exp_sums,
-                partial_max_logits: &tiled_partial_max_logits,
-                q_token_ranges: tiled_batch_metadata.q_token_ranges(),
-                cu_sdpa_partial_outputs: tiled_batch_metadata.cu_sdpa_partial_outputs(),
-                output: &tiled_attention_output,
+        sliced_q_builder.record_with_barrier_before(ReplayOp::opaque(sliced_q_kernel.invoke_reduce(
+            backend_sliced_q::ReduceBuffers {
+                partial_output: &sliced_q_partial_output,
+                partial_exp_sums: &sliced_q_partial_exp_sums,
+                partial_max_logits: &sliced_q_partial_max_logits,
+                q_token_ranges: sliced_q_batch_metadata.q_token_ranges(),
+                cu_sdpa_partial_outputs: sliced_q_batch_metadata.cu_sdpa_partial_outputs(),
+                output: &sliced_q_attention_output,
             },
-            ReplayU32::Fixed(tiled_shape.num_total_q_token_tiles),
+            ReplayU32::Fixed(sliced_q_shape.num_total_q_token_tiles),
         )));
-        tiled_builder.record_with_barrier_before(ReplayOp::opaque(gate.invoke(
+        sliced_q_builder.record_with_barrier_before(ReplayOp::opaque(gate.invoke(
             backend_activation_gate::Shape {
                 num_total_tokens: num_tokens,
             },
             backend_activation_gate::Buffers {
-                attention_output: &tiled_attention_output,
+                attention_output: &sliced_q_attention_output,
                 g: &g,
                 output: &gated_attention_output,
             },
             ReplayU32::Fixed(num_tokens),
         )));
-        tiled_builder.record_with_barrier_before(ReplayOp::opaque(output.invoke(
+        sliced_q_builder.record_with_barrier_before(ReplayOp::opaque(output.invoke(
             num_tokens,
             ReplayU32::Fixed(num_tokens),
-            &tiled_next_hidden_state,
+            &sliced_q_next_hidden_state,
             0,
             &gated_attention_output,
             0,
@@ -616,7 +631,7 @@ impl<'a> RealGQAFixture<'a> {
             &weights.output_biases,
             0,
         )));
-        let tiled_replay = tiled_builder.build();
+        let sliced_q_replay = sliced_q_builder.build();
         Self {
             device: device.clone(),
             stream,
@@ -631,16 +646,16 @@ impl<'a> RealGQAFixture<'a> {
             end_context_len,
             next_hidden_state,
             replay,
-            tiled_next_hidden_state,
-            tiled_replay,
+            sliced_q_next_hidden_state,
+            sliced_q_replay,
             _hidden_state: hidden_state,
             _kv_pages: kv_pages,
             batch_metadata,
-            tiled_batch_metadata,
+            sliced_q_batch_metadata,
             _page_ids: page_ids,
-            _tiled_partial_output: tiled_partial_output,
-            _tiled_partial_exp_sums: tiled_partial_exp_sums,
-            _tiled_partial_max_logits: tiled_partial_max_logits,
+            _tiled_partial_output: sliced_q_partial_output,
+            _tiled_partial_exp_sums: sliced_q_partial_exp_sums,
+            _tiled_partial_max_logits: sliced_q_partial_max_logits,
             _qgkv: qgkv,
             _q: q,
             _g: g,
@@ -652,30 +667,31 @@ impl<'a> RealGQAFixture<'a> {
             _sdpa_partial_max_logits: sdpa_partial_max_logits,
             _sdpa_partial_output: sdpa_partial_output,
             _attention_output: attention_output,
-            _tiled_attention_output: tiled_attention_output,
+            _tiled_attention_output: sliced_q_attention_output,
             _gated_attention_output: gated_attention_output,
             _weights: weights,
         }
     }
 
-    fn run_split_kv_single_q(&self) {
+    fn run_sdpa_sliced_kv(&self) {
         MetalReplayRuntime::new(&self.stream).submit_replay(&self.replay).wait();
     }
 
-    fn run_split_kv_tiled_q(&self) {
+    fn run_sdpa_sliced_q(&self) {
         MetalReplayRuntime::new(&self.stream)
-            .submit_replay(&self.tiled_replay)
+            .submit_replay(&self.sliced_q_replay)
             .wait();
     }
 
-    fn validate_split_kv_tiled_q_attention(&self) {
+    fn validate_sdpa_sliced_q_attention(&self) {
         let sdpa_config = gqa_sdpa_config(self.num_reqs, self.end_context_len, self.model);
         let sdpa_shape = gqa_sdpa_shape(self.batch_metadata.replay_shape());
-        let sdpa = backend_single_q::Compute::new(&self.device, sdpa_config, self.batch_metadata.variant(), sdpa_shape);
-        let split_kv_single_q_replay = {
+        let sdpa =
+            backend_sliced_kv::Compute::new(&self.device, sdpa_config, self.batch_metadata.variant(), sdpa_shape);
+        let sdpa_sliced_kv_replay = {
             let mut recorder = MetalReplayRuntime::new(&self.stream).create_recorder();
             recorder.record(ReplayOp::opaque(sdpa.invoke_map(
-                backend_single_q::MapBuffers {
+                backend_sliced_kv::MapBuffers {
                     q: &self._q_norm_rope,
                     kv_pages: &self._kv_pages,
                     req_slots: self.batch_metadata.req_slots(),
@@ -690,7 +706,7 @@ impl<'a> RealGQAFixture<'a> {
                 ReplayU32::Fixed(sdpa_shape.num_total_sdpa_map_task_templates),
             )));
             recorder.record_with_barrier_before(ReplayOp::opaque(sdpa.invoke_reduce(
-                backend_single_q::ReduceBuffers {
+                backend_sliced_kv::ReduceBuffers {
                     partial_exp_sums: &self._sdpa_partial_exp_sums,
                     partial_max_logits: &self._sdpa_partial_max_logits,
                     partial_output: &self._sdpa_partial_output,
@@ -701,65 +717,65 @@ impl<'a> RealGQAFixture<'a> {
             )));
             recorder.build()
         };
-        let tiled_config = gqa_split_kv_tiled_q_config(
+        let sliced_q_config = gqa_sdpa_sliced_q_config(
             gqa_page_table_layout(self.num_reqs, self.end_context_len, self.model),
             self.model,
         );
-        let tiled_shape = backend_tiled_q::Shape {
+        let sliced_q_shape = backend_sliced_q::Shape {
             num_total_tokens: self.num_tokens,
-            num_total_q_token_tiles: self.tiled_batch_metadata.replay_shape().num_q_token_tiles,
+            num_total_q_token_tiles: self.sliced_q_batch_metadata.replay_shape().num_q_token_tiles,
             num_total_sdpa_map_task_templates: self
-                .tiled_batch_metadata
+                .sliced_q_batch_metadata
                 .replay_shape()
                 .num_total_sdpa_map_task_templates,
         };
-        let tiled = backend_tiled_q::Compute::new(
+        let sliced_q = backend_sliced_q::Compute::new(
             &self.device,
-            tiled_config,
-            self.tiled_batch_metadata.variant(),
-            tiled_shape,
+            sliced_q_config,
+            self.sliced_q_batch_metadata.variant(),
+            sliced_q_shape,
         );
-        let tiled_replay = {
+        let sliced_q_replay = {
             let mut recorder = MetalReplayRuntime::new(&self.stream).create_recorder();
-            recorder.record(ReplayOp::opaque(tiled.invoke_map(
-                backend_tiled_q::MapBuffers {
+            recorder.record(ReplayOp::opaque(sliced_q.invoke_map(
+                backend_sliced_q::MapBuffers {
                     q: &self._q_norm_rope,
                     kv_pages: &self._kv_pages,
-                    req_slots: self.tiled_batch_metadata.req_slots(),
+                    req_slots: self.sliced_q_batch_metadata.req_slots(),
                     page_ids: &self._page_ids,
-                    visible_kv_token_ranges: self.tiled_batch_metadata.visible_kv_token_ranges(),
-                    q_token_ranges: self.tiled_batch_metadata.q_token_ranges(),
-                    sdpa_map_task_templates: self.tiled_batch_metadata.sdpa_map_task_templates(),
+                    visible_kv_token_ranges: self.sliced_q_batch_metadata.visible_kv_token_ranges(),
+                    q_token_ranges: self.sliced_q_batch_metadata.q_token_ranges(),
+                    sdpa_map_task_templates: self.sliced_q_batch_metadata.sdpa_map_task_templates(),
                     partial_output: &self._tiled_partial_output,
                     partial_exp_sums: &self._tiled_partial_exp_sums,
                     partial_max_logits: &self._tiled_partial_max_logits,
                 },
                 ReplayU32::Fixed(0),
-                ReplayU32::Fixed(tiled_shape.num_total_tokens),
-                ReplayU32::Fixed(tiled_shape.num_total_q_token_tiles),
-                ReplayU32::Fixed(tiled_shape.num_total_sdpa_map_task_templates),
+                ReplayU32::Fixed(sliced_q_shape.num_total_tokens),
+                ReplayU32::Fixed(sliced_q_shape.num_total_q_token_tiles),
+                ReplayU32::Fixed(sliced_q_shape.num_total_sdpa_map_task_templates),
             )));
-            recorder.record_with_barrier_before(ReplayOp::opaque(tiled.invoke_reduce(
-                backend_tiled_q::ReduceBuffers {
+            recorder.record_with_barrier_before(ReplayOp::opaque(sliced_q.invoke_reduce(
+                backend_sliced_q::ReduceBuffers {
                     partial_output: &self._tiled_partial_output,
                     partial_exp_sums: &self._tiled_partial_exp_sums,
                     partial_max_logits: &self._tiled_partial_max_logits,
-                    q_token_ranges: self.tiled_batch_metadata.q_token_ranges(),
-                    cu_sdpa_partial_outputs: self.tiled_batch_metadata.cu_sdpa_partial_outputs(),
+                    q_token_ranges: self.sliced_q_batch_metadata.q_token_ranges(),
+                    cu_sdpa_partial_outputs: self.sliced_q_batch_metadata.cu_sdpa_partial_outputs(),
                     output: &self._tiled_attention_output,
                 },
-                ReplayU32::Fixed(tiled_shape.num_total_q_token_tiles),
+                ReplayU32::Fixed(sliced_q_shape.num_total_q_token_tiles),
             )));
             recorder.build()
         };
         let runtime = MetalReplayRuntime::new(&self.stream);
-        runtime.submit_replay(&split_kv_single_q_replay).wait();
-        runtime.submit_replay(&tiled_replay).wait();
+        runtime.submit_replay(&sdpa_sliced_kv_replay).wait();
+        runtime.submit_replay(&sliced_q_replay).wait();
 
-        let split_kv_single_q_output = &self._attention_output;
+        let sdpa_sliced_kv_output = &self._attention_output;
         let num_q_slots = self.num_tokens as usize * self.model.q_dim();
         let (max_diff_index, expected, actual, max_abs_diff) =
-            max_bf16_diff(split_kv_single_q_output, &self._tiled_attention_output, num_q_slots);
+            max_bf16_diff(sdpa_sliced_kv_output, &self._tiled_attention_output, num_q_slots);
         if max_abs_diff > 0.0625 {
             let reference = gqa_attention_reference_at(
                 &self._q_norm_rope,
@@ -771,7 +787,7 @@ impl<'a> RealGQAFixture<'a> {
                 self.model,
             );
             panic!(
-                "GQA SplitKV TiledQ mismatch at {max_diff_index}: single_q={expected} tiled_q={actual} \
+                "GQA SplitKV SlicedQ mismatch at {max_diff_index}: sliced_kv={expected} sliced_q={actual} \
                  cpu_reference={reference} max_abs_diff={max_abs_diff} tolerance=0.0625"
             );
         }
@@ -792,50 +808,50 @@ impl<'a> RealGQAFixture<'a> {
             .join(",");
         println!(
             "case component=gqa model={} num_tokens_per_req=[{num_tokens_per_req}] \
-             existing_context_lens=[{existing_context_lens}] max_tokens={} split_kv_tiled_q_max_q_tokens={} \
-             split_kv_tiled_q_kv_tokens_per_iteration={} split_kv_tiled_q_max_q_heads={}",
+             existing_context_lens=[{existing_context_lens}] max_tokens={} sdpa_sliced_q_max_q_tokens={} \
+             sdpa_sliced_q_kv_tokens_per_iteration={} sdpa_sliced_q_max_q_heads={}",
             self.model.k,
             self.max_tokens,
-            self.params.split_kv_tiled_q_max_q_tokens,
-            self.params.split_kv_tiled_q_kv_tokens_per_iteration,
-            self.params.split_kv_tiled_q_max_q_heads,
+            self.params.sdpa_sliced_q_max_q_tokens,
+            self.params.sdpa_sliced_q_kv_tokens_per_iteration,
+            self.params.sdpa_sliced_q_max_q_heads,
         );
         print_split_selection(
-            "single_q",
+            "sliced_kv",
             &self.batch_metadata,
             1,
-            self.params.split_kv_single_q_kv_tokens_per_iteration,
+            self.params.sdpa_sliced_kv_kv_tokens_per_iteration,
             self.max_tokens,
         );
         print_split_selection(
-            "tiled_q",
-            &self.tiled_batch_metadata,
-            self.params.split_kv_tiled_q_max_q_tokens,
-            self.params.split_kv_tiled_q_kv_tokens_per_iteration,
+            "sliced_q",
+            &self.sliced_q_batch_metadata,
+            self.params.sdpa_sliced_q_max_q_tokens,
+            self.params.sdpa_sliced_q_kv_tokens_per_iteration,
             self.max_tokens,
         );
-        if variants.contains(&GQASplitKVBenchVariant::SingleQ) {
-            let samples = measure_runs(runs, warmup_iters, iters, || self.run_split_kv_single_q());
+        if variants.contains(&GQASplitKVBenchVariant::SlicedKv) {
+            let samples = measure_runs(runs, warmup_iters, iters, || self.run_sdpa_sliced_kv());
             let _ = self.next_hidden_state.len_bytes();
             print_perf(
                 self.num_tokens,
                 self.num_reqs,
                 self.uniform_context_len,
-                Some("single_q"),
+                Some("sliced_kv"),
                 iters,
                 &samples,
             );
         }
-        if variants.contains(&GQASplitKVBenchVariant::TiledQ) {
-            let tiled_samples = measure_runs(runs, warmup_iters, iters, || self.run_split_kv_tiled_q());
-            let _ = self.tiled_next_hidden_state.len_bytes();
+        if variants.contains(&GQASplitKVBenchVariant::SlicedQ) {
+            let sliced_q_samples = measure_runs(runs, warmup_iters, iters, || self.run_sdpa_sliced_q());
+            let _ = self.sliced_q_next_hidden_state.len_bytes();
             print_perf(
                 self.num_tokens,
                 self.num_reqs,
                 self.uniform_context_len,
-                Some("tiled_q"),
+                Some("sliced_q"),
                 iters,
-                &tiled_samples,
+                &sliced_q_samples,
             );
         }
     }
@@ -855,7 +871,8 @@ impl<'a> RealGQAFixture<'a> {
         let output = affine_quantized::Matmul::new(&self.device, gqa_output_affine_config(self.model));
         let sdpa_config = gqa_sdpa_config(self.num_reqs, self.end_context_len, self.model);
         let sdpa_shape = gqa_sdpa_shape(self.batch_metadata.replay_shape());
-        let sdpa = backend_single_q::Compute::new(&self.device, sdpa_config, self.batch_metadata.variant(), sdpa_shape);
+        let sdpa =
+            backend_sliced_kv::Compute::new(&self.device, sdpa_config, self.batch_metadata.variant(), sdpa_shape);
 
         let qgkv_replay = build_single_invocation_replay(
             &self.stream,
@@ -936,10 +953,10 @@ impl<'a> RealGQAFixture<'a> {
                 ReplayU32::Fixed(0),
             ),
         );
-        let split_kv_single_q_replay = {
+        let sdpa_sliced_kv_replay = {
             let mut recorder = MetalReplayRuntime::new(&self.stream).create_recorder();
             recorder.record(ReplayOp::opaque(sdpa.invoke_map(
-                backend_single_q::MapBuffers {
+                backend_sliced_kv::MapBuffers {
                     q: &self._q_norm_rope,
                     kv_pages: &self._kv_pages,
                     req_slots: self.batch_metadata.req_slots(),
@@ -954,7 +971,7 @@ impl<'a> RealGQAFixture<'a> {
                 ReplayU32::Fixed(sdpa_shape.num_total_sdpa_map_task_templates),
             )));
             recorder.record_with_barrier_before(ReplayOp::opaque(sdpa.invoke_reduce(
-                backend_single_q::ReduceBuffers {
+                backend_sliced_kv::ReduceBuffers {
                     partial_exp_sums: &self._sdpa_partial_exp_sums,
                     partial_max_logits: &self._sdpa_partial_max_logits,
                     partial_output: &self._sdpa_partial_output,
@@ -965,60 +982,60 @@ impl<'a> RealGQAFixture<'a> {
             )));
             recorder.build()
         };
-        let tiled_config = gqa_split_kv_tiled_q_config(page_table_layout, self.model);
-        let tiled_shape = backend_tiled_q::Shape {
+        let sliced_q_config = gqa_sdpa_sliced_q_config(page_table_layout, self.model);
+        let sliced_q_shape = backend_sliced_q::Shape {
             num_total_tokens: self.num_tokens,
-            num_total_q_token_tiles: self.tiled_batch_metadata.replay_shape().num_q_token_tiles,
+            num_total_q_token_tiles: self.sliced_q_batch_metadata.replay_shape().num_q_token_tiles,
             num_total_sdpa_map_task_templates: self
-                .tiled_batch_metadata
+                .sliced_q_batch_metadata
                 .replay_shape()
                 .num_total_sdpa_map_task_templates,
         };
-        let tiled_kernel = backend_tiled_q::Compute::new(
+        let sliced_q_kernel = backend_sliced_q::Compute::new(
             &self.device,
-            tiled_config,
-            self.tiled_batch_metadata.variant(),
-            tiled_shape,
+            sliced_q_config,
+            self.sliced_q_batch_metadata.variant(),
+            sliced_q_shape,
         );
-        let tiled_replay = {
+        let sliced_q_replay = {
             let mut recorder = MetalReplayRuntime::new(&self.stream).create_recorder();
-            recorder.record(ReplayOp::opaque(tiled_kernel.invoke_map(
-                backend_tiled_q::MapBuffers {
+            recorder.record(ReplayOp::opaque(sliced_q_kernel.invoke_map(
+                backend_sliced_q::MapBuffers {
                     q: &self._q_norm_rope,
                     kv_pages: &self._kv_pages,
-                    req_slots: self.tiled_batch_metadata.req_slots(),
+                    req_slots: self.sliced_q_batch_metadata.req_slots(),
                     page_ids: &self._page_ids,
-                    visible_kv_token_ranges: self.tiled_batch_metadata.visible_kv_token_ranges(),
-                    q_token_ranges: self.tiled_batch_metadata.q_token_ranges(),
-                    sdpa_map_task_templates: self.tiled_batch_metadata.sdpa_map_task_templates(),
+                    visible_kv_token_ranges: self.sliced_q_batch_metadata.visible_kv_token_ranges(),
+                    q_token_ranges: self.sliced_q_batch_metadata.q_token_ranges(),
+                    sdpa_map_task_templates: self.sliced_q_batch_metadata.sdpa_map_task_templates(),
                     partial_output: &self._tiled_partial_output,
                     partial_exp_sums: &self._tiled_partial_exp_sums,
                     partial_max_logits: &self._tiled_partial_max_logits,
                 },
                 ReplayU32::Fixed(0),
                 ReplayU32::Fixed(self.num_tokens),
-                ReplayU32::Fixed(tiled_shape.num_total_q_token_tiles),
-                ReplayU32::Fixed(tiled_shape.num_total_sdpa_map_task_templates),
+                ReplayU32::Fixed(sliced_q_shape.num_total_q_token_tiles),
+                ReplayU32::Fixed(sliced_q_shape.num_total_sdpa_map_task_templates),
             )));
-            recorder.record_with_barrier_before(ReplayOp::opaque(tiled_kernel.invoke_reduce(
-                backend_tiled_q::ReduceBuffers {
+            recorder.record_with_barrier_before(ReplayOp::opaque(sliced_q_kernel.invoke_reduce(
+                backend_sliced_q::ReduceBuffers {
                     partial_output: &self._tiled_partial_output,
                     partial_exp_sums: &self._tiled_partial_exp_sums,
                     partial_max_logits: &self._tiled_partial_max_logits,
-                    q_token_ranges: self.tiled_batch_metadata.q_token_ranges(),
-                    cu_sdpa_partial_outputs: self.tiled_batch_metadata.cu_sdpa_partial_outputs(),
+                    q_token_ranges: self.sliced_q_batch_metadata.q_token_ranges(),
+                    cu_sdpa_partial_outputs: self.sliced_q_batch_metadata.cu_sdpa_partial_outputs(),
                     output: &self._tiled_attention_output,
                 },
-                ReplayU32::Fixed(tiled_shape.num_total_q_token_tiles),
+                ReplayU32::Fixed(sliced_q_shape.num_total_q_token_tiles),
             )));
             recorder.build()
         };
         let runtime = MetalReplayRuntime::new(&self.stream);
-        runtime.submit_replay(&split_kv_single_q_replay).wait();
-        runtime.submit_replay(&tiled_replay).wait();
-        let split_kv_single_q_output = &self._attention_output;
+        runtime.submit_replay(&sdpa_sliced_kv_replay).wait();
+        runtime.submit_replay(&sliced_q_replay).wait();
+        let sdpa_sliced_kv_output = &self._attention_output;
         assert_bf16_close(
-            split_kv_single_q_output,
+            sdpa_sliced_kv_output,
             &self._tiled_attention_output,
             self.num_tokens as usize * self.model.q_dim(),
             0.0625,
@@ -1090,16 +1107,16 @@ impl<'a> RealGQAFixture<'a> {
         );
         self.measure_subcomponent(
             selected_subcomponents,
-            "split-kv-single-q",
-            &split_kv_single_q_replay,
+            "sdpa-sliced-kv",
+            &sdpa_sliced_kv_replay,
             warmup_iters,
             iters,
             runs,
         );
         self.measure_subcomponent(
             selected_subcomponents,
-            "split-kv-tiled-q",
-            &tiled_replay,
+            "sdpa-sliced-q",
+            &sliced_q_replay,
             warmup_iters,
             iters,
             runs,

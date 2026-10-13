@@ -1,8 +1,8 @@
 use inference_backend_metal::components::gqa::kv_page_write as backend_kv_page_write;
 use inference_backend_metal::components::gqa::qkv_split as backend_qkv_split;
 use inference_backend_metal::components::gqa::sdpa as backend_sdpa;
-use inference_backend_metal::components::gqa::split_kv::single_q as backend_single_q;
-use inference_backend_metal::components::gqa::split_kv::tiled_q as backend_tiled_q;
+use inference_backend_metal::components::gqa::sdpa::sliced_kv as backend_sliced_kv;
+use inference_backend_metal::components::gqa::sdpa::sliced_q as backend_sliced_q;
 use inference_backend_metal::components::rms_norm_rope;
 use inference_backend_metal::metal::Buffer;
 use inference_backend_metal::metal::Device;
@@ -36,6 +36,7 @@ pub const UNGATED_GQA_NUM_ACTIVE_KV_SPLITS: ReplayParameterKey =
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct UngatedGQAReplayTopology {
     pub sdpa_execution: backend_sdpa::ExecutionVariant,
+    pub sdpa_direct_output: bool,
     pub qkv_affine: affine_quantized::KernelKind,
     pub output_affine: affine_quantized::KernelKind,
 }
@@ -46,10 +47,12 @@ pub fn add_ungated_gqa_private_replay_arguments(
     arguments: &mut ReplayArguments,
 ) {
     shape.validate();
-    if topology.sdpa_execution.map.thread_block.max_q_tokens > 1 {
+    if topology.sdpa_execution.map.kind != backend_sdpa::MapKernelKind::SlicedKv {
         arguments.set_u32(UNGATED_GQA_NUM_ACTIVE_Q_TOKEN_TILES, shape.num_q_token_tiles);
     }
-    arguments.set_u32(UNGATED_GQA_NUM_ACTIVE_KV_SPLITS, shape.num_sdpa_map_task_templates);
+    if !topology.sdpa_direct_output {
+        arguments.set_u32(UNGATED_GQA_NUM_ACTIVE_KV_SPLITS, shape.num_sdpa_map_task_templates);
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -103,7 +106,7 @@ pub type UngatedGQAOutput<'a> = &'a Buffer;
 ///                                                           +--------+
 ///                                                                    |
 ///                                                                    v
-///                              backend_single_q::Compute or backend_tiled_q::Compute
+///                              backend_sliced_kv::Compute or backend_sliced_q::Compute
 ///                                -> scratch.sdpa_partial_exp_sums
 ///                                -> scratch.sdpa_partial_max_logits
 ///                                -> scratch.sdpa_partial_output
@@ -158,24 +161,24 @@ impl UngatedGQA {
         }
     }
 
-    pub fn new(device: &Device, core: UngatedGQACore, config: GQAMetalConfig, max_tokens: usize) -> Self {
+    pub fn new(
+        device: &Device,
+        core: UngatedGQACore,
+        config: GQAMetalConfig,
+        max_tokens: usize,
+        page_table_layout: GQAPageTableLayout,
+    ) -> Self {
         core.validate();
         validate_config_for_core(&core, config);
         let qkv = core.qkv_shape();
         let output = core.output_shape();
+        let sdpa_config = gqa_sdpa_config(config, core.num_q_heads, core.num_kv_heads, core.head_dim);
+        let sdpa_selector = Selector::for_lookup(sdpa_config, max_tokens, page_table_layout);
         Self {
             device: device.clone(),
             core: core.clone(),
             config,
-            sdpa_selector: Selector::new(
-                backend_sdpa::Registry::new(gqa_sdpa_config(
-                    config,
-                    core.num_q_heads,
-                    core.num_kv_heads,
-                    core.head_dim,
-                )),
-                max_tokens,
-            ),
+            sdpa_selector,
             qkv: affine_quantized::Matmul::new(device, affine_config(qkv.out_dim, qkv.in_dim, config)),
             qkv_to_q_k_v: backend_qkv_split::Compute::new(device, qkv_to_q_k_v_config(&core, config)),
             q_norm_rope: rms_norm_rope::Compute::new(device, norm_rope_config(&core, config, core.num_q_heads)),
@@ -191,6 +194,15 @@ impl UngatedGQA {
 
     pub fn new_scratch(&self) -> UngatedGQAScratch {
         UngatedGQAScratch::new(&self.device, &self.core, self.config, &self.sdpa_selector)
+    }
+
+    pub fn new_metadata(&self) -> GQAMetadataBuffers {
+        let limits = self.sdpa_selector.limits();
+        GQAMetadataBuffers::new(
+            &self.device,
+            limits.max_tokens as usize,
+            limits.max_map_task_templates as usize,
+        )
     }
 
     pub fn prepare(
@@ -215,6 +227,10 @@ impl UngatedGQA {
         self.validate_token_capacity_topology(num_tokens, num_total_tokens);
         assert_eq!(
             batch_metadata.max_tokens(),
+            self.sdpa_selector.limits().max_tokens as usize
+        );
+        assert_eq!(
+            batch_metadata.max_map_task_templates(),
             self.sdpa_selector.limits().max_map_task_templates as usize
         );
         let request_shapes = RequestShape::from_batch(token_indices, cu_tokens);
@@ -222,8 +238,12 @@ impl UngatedGQA {
         batch_metadata.update(req_slots, token_indices, cu_tokens, &selection)
     }
 
-    pub fn replay_bucket_policy(&self, max_tokens: u32) -> GQAReplayBucketPolicy {
-        GQAReplayBucketPolicy::new(max_tokens, &self.replay_token_topology_boundaries())
+    pub fn replay_bucket_policy(&self) -> GQAReplayBucketPolicy {
+        GQAReplayBucketPolicy::new(
+            self.sdpa_selector.limits().max_tokens,
+            self.sdpa_selector.limits().max_map_task_templates,
+            &self.replay_token_topology_boundaries(),
+        )
     }
 
     fn replay_token_topology_boundaries(&self) -> Box<[u32]> {
@@ -252,6 +272,7 @@ impl UngatedGQA {
         shape.validate();
         UngatedGQAReplayTopology {
             sdpa_execution: batch_metadata.variant(),
+            sdpa_direct_output: batch_metadata.direct_output(),
             qkv_affine: self.qkv.topology(shape.num_total_tokens),
             output_affine: self.output.topology(shape.num_total_tokens),
         }
@@ -377,17 +398,12 @@ impl UngatedGQA {
             ReplayU32::Fixed(shape.num_sdpa_map_task_templates)
         };
         let execution = batch_metadata.variant();
-        let map_constants = execution.map.thread_block;
-        if map_constants.max_q_tokens == 1 {
-            let sdpa_config = self.split_kv_single_q_config(page_table_layout);
-            let sdpa = backend_single_q::Compute::new(
-                &self.device,
-                sdpa_config,
-                execution,
-                self.split_kv_single_q_shape(shape),
-            );
+        if execution.map.kind == backend_sdpa::MapKernelKind::SlicedKv {
+            let sdpa_config = self.sdpa_sliced_kv_config(page_table_layout);
+            let sdpa =
+                backend_sliced_kv::Compute::new(&self.device, sdpa_config, execution, self.sdpa_sliced_kv_shape(shape));
             recorder.record_with_barrier_before(ReplayOp::opaque(sdpa.invoke_map(
-                backend_single_q::MapBuffers {
+                backend_sliced_kv::MapBuffers {
                     q: scratch.q_norm_rope,
                     kv_pages: kv_cache.kv_pages,
                     req_slots: batch_metadata.req_slots(),
@@ -402,7 +418,7 @@ impl UngatedGQA {
                 active_kv_splits,
             )));
             recorder.record_with_barrier_before(ReplayOp::opaque(sdpa.invoke_reduce(
-                backend_single_q::ReduceBuffers {
+                backend_sliced_kv::ReduceBuffers {
                     partial_exp_sums: scratch.sdpa_partial_exp_sums,
                     partial_max_logits: scratch.sdpa_partial_max_logits,
                     partial_output: scratch.sdpa_partial_output,
@@ -411,12 +427,35 @@ impl UngatedGQA {
                 },
                 active_tokens,
             )));
+        } else if batch_metadata.direct_output() {
+            let sdpa = backend_sliced_q::Compute::new_direct(
+                &self.device,
+                self.sdpa_sliced_q_config(page_table_layout),
+                execution,
+                self.sdpa_sliced_q_shape(shape),
+            );
+            let direct = sdpa.invoke_direct(
+                backend_sliced_q::DirectBuffers {
+                    q: scratch.q_norm_rope,
+                    kv_pages: kv_cache.kv_pages,
+                    req_slots: batch_metadata.req_slots(),
+                    page_ids: kv_cache.page_ids,
+                    visible_kv_token_ranges: batch_metadata.visible_kv_token_ranges(),
+                    q_token_ranges: batch_metadata.q_token_ranges(),
+                    sdpa_map_task_templates: batch_metadata.sdpa_map_task_templates(),
+                    output: scratch.attention_output,
+                },
+                gqa_layer_index,
+                active_tokens,
+                active_q_token_tiles,
+            );
+            recorder.record_with_barrier_before(ReplayOp::opaque(direct));
         } else {
-            let sdpa_config = self.split_kv_tiled_q_config(page_table_layout);
+            let sdpa_config = self.sdpa_sliced_q_config(page_table_layout);
             let sdpa =
-                backend_tiled_q::Compute::new(&self.device, sdpa_config, execution, self.split_kv_tiled_q_shape(shape));
+                backend_sliced_q::Compute::new(&self.device, sdpa_config, execution, self.sdpa_sliced_q_shape(shape));
             recorder.record_with_barrier_before(ReplayOp::opaque(sdpa.invoke_map(
-                backend_tiled_q::MapBuffers {
+                backend_sliced_q::MapBuffers {
                     q: scratch.q_norm_rope,
                     kv_pages: kv_cache.kv_pages,
                     req_slots: batch_metadata.req_slots(),
@@ -434,7 +473,7 @@ impl UngatedGQA {
                 active_kv_splits,
             )));
             recorder.record_with_barrier_before(ReplayOp::opaque(sdpa.invoke_reduce(
-                backend_tiled_q::ReduceBuffers {
+                backend_sliced_q::ReduceBuffers {
                     partial_output: scratch.sdpa_partial_output,
                     partial_exp_sums: scratch.sdpa_partial_exp_sums,
                     partial_max_logits: scratch.sdpa_partial_max_logits,
@@ -471,8 +510,8 @@ impl UngatedGQA {
         }
     }
 
-    fn split_kv_single_q_config(&self, page_table_layout: GQAPageTableLayout) -> backend_single_q::Config {
-        backend_single_q::Config {
+    fn sdpa_sliced_kv_config(&self, page_table_layout: GQAPageTableLayout) -> backend_sliced_kv::Config {
+        backend_sliced_kv::Config {
             num_q_heads: self
                 .core
                 .num_q_heads
@@ -495,15 +534,15 @@ impl UngatedGQA {
         }
     }
 
-    fn split_kv_single_q_shape(&self, shape: GQAReplayShape) -> backend_single_q::Shape {
-        backend_single_q::Shape {
+    fn sdpa_sliced_kv_shape(&self, shape: GQAReplayShape) -> backend_sliced_kv::Shape {
+        backend_sliced_kv::Shape {
             num_total_tokens: shape.num_total_tokens,
             num_total_sdpa_map_task_templates: shape.num_total_sdpa_map_task_templates,
         }
     }
 
-    fn split_kv_tiled_q_config(&self, page_table_layout: GQAPageTableLayout) -> backend_tiled_q::Config {
-        backend_tiled_q::Config {
+    fn sdpa_sliced_q_config(&self, page_table_layout: GQAPageTableLayout) -> backend_sliced_q::Config {
+        backend_sliced_q::Config {
             num_q_heads: self
                 .core
                 .num_q_heads
@@ -526,8 +565,8 @@ impl UngatedGQA {
         }
     }
 
-    fn split_kv_tiled_q_shape(&self, shape: GQAReplayShape) -> backend_tiled_q::Shape {
-        backend_tiled_q::Shape {
+    fn sdpa_sliced_q_shape(&self, shape: GQAReplayShape) -> backend_sliced_q::Shape {
+        backend_sliced_q::Shape {
             num_total_tokens: shape.num_total_tokens,
             num_total_q_token_tiles: shape.num_total_q_token_tiles,
             num_total_sdpa_map_task_templates: shape.num_total_sdpa_map_task_templates,
@@ -609,5 +648,159 @@ fn affine_config(n: usize, k: usize, config: GQAMetalConfig) -> affine_quantized
         input_dtype: config.io_dtype,
         output_dtype: config.io_dtype,
         scale_bias_dtype: config.io_dtype,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use half::bf16;
+    use inference_backend_metal::components::gqa::fp8::bf16_to_fp8_e4m3;
+    use inference_backend_metal::components::rms_norm_rope::RopeScaling;
+    use inference_backend_metal::metal::Stream;
+
+    use super::*;
+    use crate::attn::gqa::backend::GQA_NUM_ACTIVE_TOKENS;
+    use crate::def::replay_op::MetalReplayRuntime;
+
+    #[test]
+    fn test_fixed_partitions_and_direct_sdpa_preserve_causal_output_and_active_tokens() {
+        let device = Device::system_default();
+        let stream = Stream::new(&device);
+        let runtime = MetalReplayRuntime::new(&stream);
+        let core = UngatedGQACore::new(0, 32, 128, 6, 1, 128_f32.sqrt().recip());
+        let config = GQAMetalConfig {
+            group_size: 32,
+            bits: 8,
+            page_bytes: 2 * 8 * 128,
+            rope_dim: 128,
+            norm_eps: 1.0e-6,
+            rope_theta: 10_000.0,
+            rope_scaling: RopeScaling::Default,
+            io_dtype: Dtype::Bfloat16,
+        };
+        let mut component = UngatedGQA::new(
+            &device,
+            core.clone(),
+            config,
+            8,
+            GQAPageTableLayout {
+                num_req_slots: 1,
+                num_blocks: 1,
+                num_gqa_layers: 1,
+                num_page_ids_per_block: 1,
+            },
+        );
+        let sdpa_config = gqa_sdpa_config(config, 6, 1, 128);
+        let variants = [
+            backend_sdpa::ExecutionVariant::sliced_kv(sdpa_config, 128, 128, 6),
+            backend_sdpa::ExecutionVariant::sliced_q_per_head(sdpa_config, 8, 16, 6),
+            backend_sdpa::ExecutionVariant::sliced_q(
+                sdpa_config,
+                backend_sdpa::MapKernelKind::QHeadsPerToken,
+                4,
+                16,
+                6,
+            ),
+            backend_sdpa::ExecutionVariant::sliced_q(
+                sdpa_config,
+                backend_sdpa::MapKernelKind::QTokensAndHeads,
+                4,
+                16,
+                6,
+            ),
+        ];
+        component.sdpa_selector = Selector::for_partitions(
+            backend_sdpa::Registry::from_variants(sdpa_config, variants.to_vec()),
+            8,
+            1,
+            |_| 8_u32.div_ceil(3),
+        );
+        let scratch = component.new_scratch();
+        let metadata = component.new_metadata();
+        let attention_output = scratch.bindings().attention_output;
+        let policy = component.replay_bucket_policy();
+        let mut pages = vec![0_u8; config.page_bytes as usize];
+        for token in 0..8 {
+            let value = bf16_to_fp8_e4m3(bf16::from_f32(token as f32 * 0.25));
+            pages[(8 + token) * 128..(9 + token) * 128].fill(value);
+        }
+        let kv_pages = Buffer::from_slice(&device, &pages);
+        let page_ids = Buffer::from_slice(&device, &[0_u32]);
+        // This test records only the private SDPA stage. Projection bindings are unused.
+        let unused = Buffer::new_zeroed_elements(&device, 1, Dtype::Uint32);
+        let page_table_layout = GQAPageTableLayout {
+            num_req_slots: 1,
+            num_blocks: 1,
+            num_gqa_layers: 1,
+            num_page_ids_per_block: 1,
+        };
+        let routes = variants
+            .into_iter()
+            .flat_map(|variant| [8, 3, 5].map(|slice| (variant, slice, false)))
+            .chain(
+                variants
+                    .into_iter()
+                    .filter(|variant| variant.map.kind != backend_sdpa::MapKernelKind::SlicedKv)
+                    .map(|variant| (variant, 8, true)),
+            );
+        for (variant, kv_slice, direct_output) in routes {
+            for num_active_tokens in [3_u32, 8, 1, 5] {
+                let requests = RequestShape::from_batch(&[0], &[0, num_active_tokens]);
+                let selection =
+                    component
+                        .sdpa_selector
+                        .select_partitioned(variant, kv_slice, direct_output, &requests, &policy, 8);
+                let shape = metadata.update(&[0], &[0], &[0, num_active_tokens], &selection);
+                attention_output.zero_bytes(0, attention_output.len_bytes());
+                let mut recorder = runtime.create_recorder();
+                component.record_sdpa(
+                    &mut recorder,
+                    UngatedGQAInput {
+                        page_table_layout,
+                        gqa_layer_index: ReplayU32::Fixed(0),
+                        batch_metadata: &metadata,
+                        hidden_state: &unused,
+                        next_hidden_state: &unused,
+                        kv_cache: GQAKVCacheBindings {
+                            kv_pages: &kv_pages,
+                            page_ids: &page_ids,
+                        },
+                        weights: UngatedGQAWeights {
+                            qkv_weight: &unused,
+                            qkv_scales: &unused,
+                            qkv_biases: &unused,
+                            q_norm_weight: &unused,
+                            k_norm_weight: &unused,
+                            output_weight: &unused,
+                            output_scales: &unused,
+                            output_biases: &unused,
+                        },
+                        scratch: scratch.bindings(),
+                        num_active_tokens: ReplayU32::Parameter(GQA_NUM_ACTIVE_TOKENS),
+                    },
+                );
+                let replay = recorder.build();
+                let mut arguments = ReplayArguments::new();
+                arguments.set_u32(GQA_NUM_ACTIVE_TOKENS, num_active_tokens);
+                add_ungated_gqa_private_replay_arguments(shape, component.replay_topology(&metadata), &mut arguments);
+                runtime.submit_replay_with_arguments(&replay, &arguments).wait();
+                let actual = attention_output.read_typed::<u16>(0, 8 * core.q_dim());
+                for (token, q_token_heads) in actual.chunks_exact(core.q_dim()).enumerate() {
+                    // Q and K are zero. Softmax is uniform over tokens 0..=token.
+                    let expected = if token < num_active_tokens as usize {
+                        token as f32 * 0.125
+                    } else {
+                        0.0
+                    };
+                    for &bits in q_token_heads {
+                        assert!(
+                            (bf16::from_bits(bits).to_f32() - expected).abs() <= 0.015625,
+                            "route={variant:?}, slice={kv_slice}, direct={direct_output}, active={num_active_tokens}, \
+                             token={token}"
+                        );
+                    }
+                }
+            }
+        }
     }
 }

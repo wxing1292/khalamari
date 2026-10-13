@@ -182,18 +182,21 @@ impl Qwen3MainGQAState {
             "qwen3 Main cache page IDs must fit u32"
         );
         page_table_layout.validate();
-        let backend = Rc::new(UngatedGQA::new(device, core.clone(), metal, max_tokens));
+        let backend = Rc::new(UngatedGQA::new(
+            device,
+            core.clone(),
+            metal,
+            max_tokens,
+            page_table_layout,
+        ));
         let scratch = Rc::new(backend.new_scratch());
-        let replay_bucket_policy = backend.replay_bucket_policy(
-            max_tokens
-                .try_into()
-                .expect("qwen3 Main GQA token capacity must fit u32"),
-        );
+        let metadata = backend.new_metadata();
+        let replay_bucket_policy = backend.replay_bucket_policy();
         Self {
             backend: Some(backend),
             scratch: Some(scratch),
             request_page_table: Some(Rc::new(GQARequestPageTable::new(device, page_table_layout))),
-            metadata: Some(GQAMetadataBuffers::new(device, max_tokens)),
+            metadata: Some(metadata),
             replay_bucket_policy,
             core,
             metal,
@@ -321,11 +324,19 @@ impl Qwen3MainGQAState {
                 && self.metadata.is_none(),
             "qwen3 Main GQA state resources are already loaded"
         );
-        let backend = Rc::new(UngatedGQA::new(device, self.core.clone(), self.metal, self.max_tokens));
+        let backend = Rc::new(UngatedGQA::new(
+            device,
+            self.core.clone(),
+            self.metal,
+            self.max_tokens,
+            self.page_table_layout,
+        ));
         let scratch = Rc::new(backend.new_scratch());
+        let metadata = backend.new_metadata();
+        self.replay_bucket_policy = backend.replay_bucket_policy();
         self.backend = Some(backend);
         self.scratch = Some(scratch);
         self.request_page_table = Some(Rc::new(GQARequestPageTable::new(device, self.page_table_layout)));
-        self.metadata = Some(GQAMetadataBuffers::new(device, self.max_tokens));
+        self.metadata = Some(metadata);
     }
 }

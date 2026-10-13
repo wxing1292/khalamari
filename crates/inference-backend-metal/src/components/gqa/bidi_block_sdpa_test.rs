@@ -9,7 +9,7 @@ use crate::components::gqa::fp8::f32_to_bf16;
 use crate::components::gqa::fp8::fp8_e4m3_to_bf16;
 use crate::components::gqa::kv_page_write::PageTableLayout;
 use crate::components::gqa::sdpa;
-use crate::components::gqa::split_kv::tiled_q;
+use crate::components::gqa::sdpa::sliced_q;
 use crate::metal::ReplayArguments;
 use crate::metal::ReplayParameterKey;
 use crate::metal::ReplayU32;
@@ -156,7 +156,7 @@ fn test_full_history_composite() {
 #[test]
 fn test_windowed_history_composite() {
     // Use a scaled-down left window to exercise a different lower bound for
-    // each Q row while the local block remains inside the window.
+    // each Q token while the local block remains inside the window.
     assert_composite_matches_reference(&[4, 5, 6, 7, 8, 9, 10, 11]);
 }
 
@@ -171,7 +171,7 @@ fn assert_composite_matches_reference(visible_kv_token_begins: &[u32]) {
     let tokens_per_page = 8usize;
     let page_bytes = 2 * num_kv_heads * tokens_per_page * head_dim * size_of::<u8>();
     let scale = (head_dim as f32).sqrt().recip();
-    let tiled_config = tiled_q::Config {
+    let sliced_q_config = sliced_q::Config {
         num_q_heads: num_q_heads as u32,
         num_kv_heads: num_kv_heads as u32,
         head_dim: head_dim as u32,
@@ -192,8 +192,8 @@ fn assert_composite_matches_reference(visible_kv_token_begins: &[u32]) {
         head_dim: head_dim as u32,
         tokens_per_page: tokens_per_page as u32,
     };
-    let execution = sdpa::ExecutionVariant::tiled_q(sdpa_config, 8, 16, 5);
-    let tiled_shape = tiled_q::Shape {
+    let execution = sdpa::ExecutionVariant::sliced_q_per_head(sdpa_config, 8, 16, 5);
+    let sliced_q_shape = sliced_q::Shape {
         num_total_tokens: num_q_tokens as u32,
         num_total_q_token_tiles: 1,
         num_total_sdpa_map_task_templates: 3,
@@ -261,11 +261,11 @@ fn assert_composite_matches_reference(visible_kv_token_begins: &[u32]) {
     let partial_output = Buffer::new_zeroed_elements(&device, partial_state_groups * head_dim, Dtype::Bfloat16);
     let output = Buffer::new_zeroed_elements(&device, num_q_tokens * num_q_heads * head_dim, Dtype::Bfloat16);
 
-    let tiled = tiled_q::Compute::new(&device, tiled_config, execution, tiled_shape);
+    let sliced_q = sliced_q::Compute::new(&device, sliced_q_config, execution, sliced_q_shape);
     let block = Compute::new(&device, block_config);
     let mut builder = stream.create_replay_program();
-    builder.record(tiled.invoke_map(
-        tiled_q::MapBuffers {
+    builder.record(sliced_q.invoke_map(
+        sliced_q::MapBuffers {
             q: &q,
             kv_pages: &kv_pages,
             req_slots: &req_slots,
@@ -296,8 +296,8 @@ fn assert_composite_matches_reference(visible_kv_token_begins: &[u32]) {
             partial_output: &partial_output,
         },
     ));
-    builder.record_with_barrier_before(tiled.invoke_reduce(
-        tiled_q::ReduceBuffers {
+    builder.record_with_barrier_before(sliced_q.invoke_reduce(
+        sliced_q::ReduceBuffers {
             partial_output: &partial_output,
             partial_exp_sums: &partial_exp_sums,
             partial_max_logits: &partial_max_logits,

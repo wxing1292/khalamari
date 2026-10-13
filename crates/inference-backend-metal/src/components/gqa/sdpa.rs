@@ -1,9 +1,14 @@
 use crate::metal::Dtype;
 
+pub mod sliced_kv;
+pub mod sliced_q;
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct MapThreadBlockConstants {
     pub max_q_tokens: u32,
     pub max_q_heads: u32,
+    /// KV interval used to partition Map tasks. Sliced-Q also uses it as its staging width.
+    /// Sliced-KV processes 16 KV tokens per SIMDgroup per step independently of this interval.
     pub kv_tokens_per_iteration: u32,
     pub required_threads: u32,
 }
@@ -13,8 +18,18 @@ pub struct KVCacheConstants {
     pub tokens_per_page: u32,
 }
 
+/// Algorithm and Q-token/head assignment within one Map threadblock.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum MapKernelKind {
+    SlicedKv,
+    QTokensPerHead,
+    QHeadsPerToken,
+    QTokensAndHeads,
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct MapKernelConstants {
+    pub kind: MapKernelKind,
     pub thread_block: MapThreadBlockConstants,
     pub kv_cache: KVCacheConstants,
 }
@@ -33,9 +48,8 @@ pub struct ReduceKernelConstants {
 
 /// One compatible GQA SDPA Map and Reduce execution variant.
 ///
-/// `map.thread_block.max_q_tokens == 1` describes the current SingleQ geometry. A larger value
-/// describes a current TiledQ geometry. The selector does not expose a
-/// SingleQ/TiledQ execution enum.
+/// `map.kind` identifies the Q-token/head assignment. Token capacity does not identify the
+/// algorithm: sliced-Q variants can also process one Q token.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct ExecutionVariant {
     pub map: MapKernelConstants,
@@ -43,13 +57,14 @@ pub struct ExecutionVariant {
 }
 
 impl ExecutionVariant {
-    pub fn single_q(config: Config, kv_tokens_per_iteration: u32, required_threads: u32, max_q_heads: u32) -> Self {
+    pub fn sliced_kv(config: Config, kv_tokens_per_iteration: u32, required_threads: u32, max_q_heads: u32) -> Self {
         config.validate();
         let reduce_output_coordinates = 256 / config.head_dim.min(256);
         let reduce_max_q_heads = config.num_q_heads.min(reduce_output_coordinates).max(1);
         let reduce_max_q_tokens = (reduce_output_coordinates / reduce_max_q_heads).max(1);
         let execution = Self {
             map: MapKernelConstants {
+                kind: MapKernelKind::SlicedKv,
                 thread_block: MapThreadBlockConstants {
                     max_q_tokens: 1,
                     max_q_heads,
@@ -72,11 +87,56 @@ impl ExecutionVariant {
         execution
     }
 
-    pub fn tiled_q(config: Config, max_q_tokens: u32, kv_tokens_per_iteration: u32, max_q_heads: u32) -> Self {
+    pub fn sliced_q_per_head(
+        config: Config,
+        max_q_tokens: u32,
+        kv_tokens_per_iteration: u32,
+        max_q_heads: u32,
+    ) -> Self {
+        Self::sliced_q(
+            config,
+            MapKernelKind::QTokensPerHead,
+            max_q_tokens,
+            kv_tokens_per_iteration,
+            max_q_heads,
+        )
+    }
+
+    pub fn sliced_q(
+        config: Config,
+        kind: MapKernelKind,
+        max_q_tokens: u32,
+        kv_tokens_per_iteration: u32,
+        max_q_heads: u32,
+    ) -> Self {
         config.validate();
-        let required_threads = max_q_tokens / 8 * max_q_heads * 32;
+        assert!(matches!(max_q_tokens, 1 | 2 | 4 | 8 | 16 | 32));
+        assert!(max_q_heads > 0 && max_q_heads <= config.q_heads_per_kv_head());
+        let num_simdgroups = match kind {
+            MapKernelKind::SlicedKv => panic!("SlicedKv uses its own constructor"),
+            MapKernelKind::QTokensPerHead => {
+                max_q_tokens
+                    .div_ceil(8)
+                    .checked_mul(max_q_heads)
+                    .expect("GQA tile geometry must fit u32")
+            },
+            MapKernelKind::QHeadsPerToken => {
+                max_q_heads
+                    .div_ceil(8)
+                    .checked_mul(max_q_tokens)
+                    .expect("GQA tile geometry must fit u32")
+            },
+            MapKernelKind::QTokensAndHeads => {
+                max_q_tokens
+                    .checked_mul(max_q_heads)
+                    .expect("GQA tile geometry must fit u32")
+                    .div_ceil(8)
+            },
+        };
+        let required_threads = num_simdgroups.checked_mul(32).expect("GQA thread count must fit u32");
         let execution = Self {
             map: MapKernelConstants {
+                kind,
                 thread_block: MapThreadBlockConstants {
                     max_q_tokens,
                     max_q_heads,
@@ -115,11 +175,12 @@ impl ExecutionVariant {
             return false;
         }
 
-        if map.max_q_tokens == 1 {
+        if self.map.kind == MapKernelKind::SlicedKv {
             let reduce_output_coordinates = 256 / config.head_dim.min(256);
             let expected_reduce_max_q_heads = config.num_q_heads.min(reduce_output_coordinates).max(1);
             let expected_reduce_max_q_tokens = (reduce_output_coordinates / expected_reduce_max_q_heads).max(1);
-            return map.max_q_heads <= 8
+            return map.max_q_tokens == 1
+                && map.max_q_heads <= 8
                 && map.kv_tokens_per_iteration <= 1024
                 && map.required_threads.is_power_of_two()
                 && (32..=256).contains(&map.required_threads)
@@ -128,14 +189,26 @@ impl ExecutionVariant {
                 && reduce.required_threads == 256;
         }
 
+        let expected_threads = match self.map.kind {
+            MapKernelKind::SlicedKv => unreachable!(),
+            MapKernelKind::QTokensPerHead => map.max_q_tokens.div_ceil(8).checked_mul(map.max_q_heads),
+            MapKernelKind::QHeadsPerToken => map.max_q_heads.div_ceil(8).checked_mul(map.max_q_tokens),
+            MapKernelKind::QTokensAndHeads => {
+                map.max_q_tokens
+                    .checked_mul(map.max_q_heads)
+                    .map(|q_token_heads| q_token_heads.div_ceil(8))
+            },
+        };
+        let Some(expected_threads) = expected_threads.and_then(|groups| groups.checked_mul(32)) else {
+            return false;
+        };
         let profile = (config.head_dim, config.tokens_per_page);
         config.io_dtype == Dtype::Bfloat16
             && matches!(profile, (128, 8 | 16) | (256, 8 | 16 | 32))
-            && config.q_heads_per_kv_head() <= 8
-            && matches!(map.max_q_tokens, 8 | 16)
-            && matches!(map.kv_tokens_per_iteration, 8 | 16 | 32)
-            && map.required_threads == map.max_q_tokens / 8 * map.max_q_heads * 32
-            && map.required_threads <= 256
+            && matches!(map.max_q_tokens, 1 | 2 | 4 | 8 | 16 | 32)
+            && matches!(map.kv_tokens_per_iteration, 8 | 16 | 32 | 64 | 128)
+            && map.required_threads == expected_threads
+            && map.required_threads <= 1024
             && reduce.max_q_tokens == map.max_q_tokens
             && reduce.max_q_heads == 1
             && reduce.required_threads == map.required_threads
@@ -180,18 +253,18 @@ pub struct Registry {
 impl Registry {
     pub fn new(config: Config) -> Self {
         config.validate();
-        let mut variants = vec![single_q_variant(config)];
-        if supports_tiled_q(config) {
-            let full_q_heads = config.q_heads_per_kv_head().min(max_tiled_q_heads(8));
+        let mut variants = vec![sliced_kv_variant(config)];
+        if supports_sliced_q(config) {
+            let full_q_heads = config.q_heads_per_kv_head().min(max_sliced_q_heads(8));
             if !matches!((config.head_dim, config.tokens_per_page), (128, 8 | 16)) {
-                let half_q_heads = config.q_heads_per_kv_head().div_ceil(2).min(max_tiled_q_heads(8));
+                let half_q_heads = config.q_heads_per_kv_head().div_ceil(2).min(max_sliced_q_heads(8));
                 if half_q_heads != full_q_heads {
-                    variants.push(tiled_q_variant(config, half_q_heads));
+                    variants.push(sliced_q_variant(config, half_q_heads));
                 }
             }
-            variants.push(tiled_q_variant(config, full_q_heads));
+            variants.push(sliced_q_variant(config, full_q_heads));
             if config.head_dim == 256 {
-                variants.push(ExecutionVariant::tiled_q(config, 8, 32, full_q_heads));
+                variants.push(ExecutionVariant::sliced_q_per_head(config, 8, 32, full_q_heads));
             }
         }
         Self::from_variants(config, variants)
@@ -199,8 +272,8 @@ impl Registry {
 
     /// Creates a registry from explicit backend variants.
     ///
-    /// Backend benchmarks can use this constructor to force one legal
-    /// variant. Production model components use [`Self::new`].
+    /// The executor lookup uses this constructor for its reachable variants.
+    /// Backend benchmarks can use it to force one legal variant.
     pub fn from_variants(config: Config, variants: Vec<ExecutionVariant>) -> Self {
         config.validate();
         assert!(!variants.is_empty(), "GQA SDPA registry requires an execution variant");
@@ -228,28 +301,28 @@ impl Registry {
     }
 }
 
-fn supports_tiled_q(config: Config) -> bool {
+fn supports_sliced_q(config: Config) -> bool {
     let profile = (config.head_dim, config.tokens_per_page);
     config.io_dtype == Dtype::Bfloat16
         && matches!(profile, (128, 8 | 16) | (256, 8 | 16 | 32))
         && config.q_heads_per_kv_head() <= 8
 }
 
-fn single_q_variant(config: Config) -> ExecutionVariant {
+fn sliced_kv_variant(config: Config) -> ExecutionVariant {
     let kv_tokens_per_iteration = config.head_dim.clamp(32, 256).next_power_of_two();
-    // SingleQ partitions KV tiles across SIMDgroups. Four groups retain enough
+    // SlicedKv partitions KV tiles across SIMDgroups. Four groups retain enough
     // parallelism without the shared-memory cost of the former eight-group map.
     let required_threads = kv_tokens_per_iteration.min(128);
     let max_q_heads = config.q_heads_per_kv_head().min(8);
-    ExecutionVariant::single_q(config, kv_tokens_per_iteration, required_threads, max_q_heads)
+    ExecutionVariant::sliced_kv(config, kv_tokens_per_iteration, required_threads, max_q_heads)
 }
 
-fn tiled_q_variant(config: Config, max_q_heads: u32) -> ExecutionVariant {
+fn sliced_q_variant(config: Config, max_q_heads: u32) -> ExecutionVariant {
     let max_q_tokens = 8;
-    ExecutionVariant::tiled_q(config, max_q_tokens, 16, max_q_heads)
+    ExecutionVariant::sliced_q_per_head(config, max_q_tokens, 16, max_q_heads)
 }
 
-fn max_tiled_q_heads(max_q_tokens: u32) -> u32 {
+fn max_sliced_q_heads(max_q_tokens: u32) -> u32 {
     256 / (max_q_tokens / 8 * 32)
 }
 

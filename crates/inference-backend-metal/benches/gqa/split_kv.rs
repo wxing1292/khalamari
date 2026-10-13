@@ -10,7 +10,7 @@ use inference_backend_metal::components::gqa::fp8::bf16_to_fp8_e4m3;
 use inference_backend_metal::components::gqa::fp8::f32_to_bf16;
 use inference_backend_metal::components::gqa::kv_page_write as backend_kv_page_write;
 use inference_backend_metal::components::gqa::sdpa as backend_sdpa;
-use inference_backend_metal::components::gqa::split_kv::single_q as backend_single_q;
+use inference_backend_metal::components::gqa::sdpa::sliced_kv as backend_sliced_kv;
 use inference_backend_metal::metal::Buffer;
 use inference_backend_metal::metal::Device;
 use inference_backend_metal::metal::Dtype;
@@ -34,7 +34,7 @@ fn bench_gqa_split_kv(c: &mut Criterion) {
     for context_len in GQA_CONTEXT_LENS {
         let fixture = GQAFixture::new(&device, &[context_len]);
         group.throughput(Throughput::Elements(context_len as u64));
-        group.bench_function(format!("single-q/replay/ctx{context_len}"), |b| {
+        group.bench_function(format!("sliced-kv/replay/ctx{context_len}"), |b| {
             b.iter(|| {
                 fixture.run_replay();
                 black_box(&fixture.output);
@@ -47,7 +47,7 @@ fn bench_gqa_split_kv(c: &mut Criterion) {
     group.throughput(Throughput::Elements(
         ragged_context_lens.iter().map(|&context_len| context_len as u64).sum(),
     ));
-    group.bench_function("single-q/replay/ragged-7x128-1x4096", |b| {
+    group.bench_function("sliced-kv/replay/ragged-7x128-1x4096", |b| {
         b.iter(|| {
             fixture.run_replay();
             black_box(&fixture.output);
@@ -79,7 +79,7 @@ impl GQAFixture {
             num_gqa_layers: 1,
             num_page_ids_per_block: 1,
         };
-        let config = backend_single_q::Config {
+        let config = backend_sliced_kv::Config {
             num_q_heads: GQA_NUM_Q_HEADS,
             num_kv_heads: GQA_NUM_KV_HEADS,
             head_dim: GQA_HEAD_DIM,
@@ -88,7 +88,7 @@ impl GQAFixture {
             page_table_layout,
             dtype: Dtype::Bfloat16,
         };
-        let execution = backend_sdpa::ExecutionVariant::single_q(
+        let execution = backend_sdpa::ExecutionVariant::sliced_kv(
             backend_sdpa::Config {
                 io_dtype: config.dtype,
                 num_q_heads: config.num_q_heads,
@@ -100,7 +100,7 @@ impl GQAFixture {
             GQA_NUM_THREADS_PER_THREADBLOCK,
             (GQA_NUM_Q_HEADS / GQA_NUM_KV_HEADS).min(GQA_Q_HEAD_TILE_SIZE_CAP),
         );
-        let shape = backend_single_q::Shape {
+        let shape = backend_sliced_kv::Shape {
             num_total_tokens: num_tokens,
             num_total_sdpa_map_task_templates: num_total_kv_splits,
         };
@@ -119,10 +119,10 @@ impl GQAFixture {
         let page_ids = Buffer::from_slice(device, &(0..num_page_ids).collect::<Vec<_>>());
         let kv_splits = Buffer::from_slice(device, &kv_split_values);
         let cu_kv_splits = Buffer::from_slice(device, &cu_kv_split_values);
-        let scratch = backend_single_q::Scratch::new(device, config, shape);
+        let scratch = backend_sliced_kv::Scratch::new(device, config, shape);
         let output = Buffer::new_zeroed(device, config.q_bytes(shape));
         let stream = Stream::new(device);
-        let kernels = backend_single_q::Compute::new(device, config, execution, shape);
+        let kernels = backend_sliced_kv::Compute::new(device, config, execution, shape);
         let replay = build_gqa_replay(
             &stream,
             &kernels,
@@ -192,7 +192,7 @@ fn split_kv_plan(context_lens: &[u32]) -> (Vec<u32>, Vec<u32>) {
 #[allow(clippy::too_many_arguments)]
 fn build_gqa_replay(
     stream: &Stream,
-    kernels: &backend_single_q::Compute,
+    kernels: &backend_sliced_kv::Compute,
     q: &Buffer,
     kv_pages: &Buffer,
     req_slots: &Buffer,
@@ -201,7 +201,7 @@ fn build_gqa_replay(
     cu_kv_splits: &Buffer,
     num_tokens: u32,
     num_kv_splits: u32,
-    scratch: &backend_single_q::Scratch,
+    scratch: &backend_sliced_kv::Scratch,
     output: &Buffer,
 ) -> ReplayProgram {
     let mut builder = stream.create_replay_program();

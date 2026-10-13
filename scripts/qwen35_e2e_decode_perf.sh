@@ -49,7 +49,7 @@ MAX_TOKENS_PER_REQUEST=64
 CACHE_BLOCK_TOKENS=2048
 # User-supplied compact results received on REFERENCE_DATE.
 # The user identified main tip. The commit below is HEAD at receipt, before history cleanup.
-# This reference precedes the TiledQ pipeline-capacity fix. Dirty state was not supplied.
+# This reference precedes the SlicedQ pipeline-capacity fix. Dirty state was not supplied.
 # Config checks below use the producing script's defaults, not recovered raw CONFIG rows.
 # Run count, variance, TTFT, and exact token hashes were not supplied.
 REFERENCE_MACHINE="apple_m3_max_40_gpu_cores"

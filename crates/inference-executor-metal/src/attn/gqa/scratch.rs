@@ -49,7 +49,7 @@ impl GQAScratch {
     pub fn new(device: &Device, core: &GQACore, config: GQAMetalConfig, sdpa_selector: &Selector) -> Self {
         core.validate();
         config.validate();
-        let max_tokens = sdpa_selector.limits().max_map_task_templates as usize;
+        let max_tokens = sdpa_selector.limits().max_tokens as usize;
         let num_sdpa_partial_state_groups = sdpa_selector.limits().partial_state_group_capacity;
         let num_sdpa_partial_states = num_sdpa_partial_state_groups
             .checked_mul(core.num_q_heads)
@@ -103,6 +103,55 @@ impl GQAScratch {
 #[cfg(test)]
 mod tests {
     use super::assert_u32_element_index_domain;
+
+    #[test]
+    fn test_gated_and_ungated_activations_retain_token_capacity() {
+        use inference_backend_metal::components::gqa::sdpa as backend_sdpa;
+        use inference_backend_metal::components::rms_norm_rope::RopeScaling;
+        use inference_backend_metal::metal::Device;
+        use inference_backend_metal::metal::Dtype;
+        use inference_executor_core::attn::GQACore;
+        use inference_executor_core::attn::UngatedGQACore;
+
+        use super::GQAScratch;
+        use crate::attn::gqa::backend::GQAMetalConfig;
+        use crate::attn::gqa::sdpa::Selector;
+        use crate::attn::gqa::ungated_scratch::UngatedGQAScratch;
+
+        let device = Device::system_default();
+        let config = GQAMetalConfig {
+            group_size: 32,
+            bits: 8,
+            page_bytes: 512,
+            rope_dim: 32,
+            norm_eps: 1.0e-6,
+            rope_theta: 10_000.0,
+            rope_scaling: RopeScaling::Default,
+            io_dtype: Dtype::Bfloat16,
+        };
+        let registry = backend_sdpa::Registry::new(backend_sdpa::Config {
+            io_dtype: Dtype::Bfloat16,
+            num_q_heads: 1,
+            num_kv_heads: 1,
+            head_dim: 32,
+            tokens_per_page: 8,
+        });
+        let selector = Selector::new(registry, 4, 32, 32);
+        let core = GQACore::new(0, 32, 32, 1, 1, 1.0);
+        let gated = GQAScratch::new(&device, &core, config, &selector);
+        let ungated_core = UngatedGQACore::new(0, 32, 32, 1, 1, 1.0);
+        let ungated = UngatedGQAScratch::new(&device, &ungated_core, config, &selector);
+        let gated = gated.bindings();
+        let ungated = ungated.bindings();
+        assert_eq!(gated.qgkv.len_bytes(), 4 * 128 * 2);
+        assert_eq!(ungated.qkv.len_bytes(), 4 * 96 * 2);
+        assert_eq!(gated.attention_output.len_bytes(), 4 * 32 * 2);
+        assert_eq!(ungated.attention_output.len_bytes(), 4 * 32 * 2);
+        assert_eq!(gated.sdpa_partial_exp_sums.len_bytes(), 32 * 4);
+        assert_eq!(ungated.sdpa_partial_exp_sums.len_bytes(), 32 * 4);
+        assert_eq!(gated.sdpa_partial_output.len_bytes(), 32 * 32 * 2);
+        assert_eq!(ungated.sdpa_partial_output.len_bytes(), 32 * 32 * 2);
+    }
 
     #[test]
     fn test_u32_element_index_domain_accepts_two_to_32_elements() {

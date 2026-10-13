@@ -682,9 +682,9 @@ GDN continues to bucket requests independently.
 These dimensions use private replay arguments.
 All Main token-row commands use the single `qwen3.5.main.num_active_tokens` parameter.
 The Main replay does not declare the GQA or GDN component-local active-token parameters.
-A single-query Main replay declares three parameters: the Main token count, the GQA TaskTemplate count, and the GDN
+A sliced-KV Main replay declares three parameters: the Main token count, the GQA TaskTemplate count, and the GDN
 request count.
-A tiled-query Main replay also declares the GQA Q-token-tile count.
+A sliced-Q Main replay also declares the GQA Q-token-tile count.
 
 The production Main replay key records the selected token capacity, all GQA and GDN capacities and categorical
 topologies, and the ordered MLP topology for every model layer.
@@ -724,9 +724,9 @@ GQA continues to bucket Q-token tiles and SDPA map TaskTemplates independently a
 All MTP body token-row commands use the single `qwen3.5.mtp.num_active_tokens` parameter.
 The body does not declare the component-local `gqa.num_active_tokens` parameter.
 Each MTP step also supplies `qwen3.5.mtp.gqa_layer_index`.
-A single-query MTP replay declares three parameters: the MTP token count, the GQA TaskTemplate count, and the dynamic
+A sliced-KV MTP replay declares three parameters: the MTP token count, the GQA TaskTemplate count, and the dynamic
 GQA layer index.
-A tiled-query MTP replay also declares the GQA Q-token-tile count.
+A sliced-Q MTP replay also declares the GQA Q-token-tile count.
 
 The production MTP replay key records the selected token capacity, all GQA capacities and categorical topology, and
 the categorical dense-MLP or full-MoE topology.

@@ -641,7 +641,12 @@ fn print_gqa_split_plan(gqa_state: &Qwen3xGQAState, max_tokens: usize, component
     let metadata = gqa_state.metadata();
     let shape = metadata.replay_shape();
     let map = metadata.variant().map.thread_block;
-    let variant_name = if map.max_q_tokens == 1 { "single_q" } else { "tiled_q" };
+    let variant_name =
+        if metadata.variant().map.kind == inference_backend_metal::components::gqa::sdpa::MapKernelKind::SlicedKv {
+            "sliced_kv"
+        } else {
+            "sliced_q"
+        };
     let max_q_tokens = map.max_q_tokens;
     let kv_tokens_per_iteration = map.kv_tokens_per_iteration;
     let cu_kv_splits = metadata

@@ -123,7 +123,7 @@ pub struct MapBuffers<'a> {
 }
 
 /// Sparse QSA Map. S=1 writes normalized BF16 output directly. S>1 writes
-/// SplitKV partials for the shared SingleQ reducer.
+/// SplitKV partials for the shared SlicedKv reducer.
 ///
 /// ```text
 /// Q [Tq,24,256] + group IDs [Tq,512] + tail [0..3 tokens]

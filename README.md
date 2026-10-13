@@ -193,7 +193,7 @@ The reference profile is Apple M3 Max (40 GPU cores), macOS 27.0, arm64.
 | DFlash2=7 |    47.769 |   21.303 |         — |        — |
 
 Output lengths and acceptance trajectories vary by case. These results are not performance thresholds.
-The user identified main tip at receipt: `d6dc5da7`, before history cleanup and the TiledQ pipeline-capacity fix.
+The user identified main tip at receipt: `d6dc5da7`, before history cleanup and the SlicedQ pipeline-capacity fix.
 These values are a baseline for that fix, not measurements of the revised code.
 Dirty state, run count, and variance were not supplied. A dash means no reference result.
 See the [perf script](scripts/qwen35_e2e_decode_perf.sh) for all 48 rows, output counts, and acceptance metrics.

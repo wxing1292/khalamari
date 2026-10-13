@@ -33,7 +33,7 @@ inline void load_kv_tile(
     simdgroup_barrier(mem_flags::mem_threadgroup);
 }
 
-kernel void gqa_split_kv_single_q_map(
+kernel void gqa_sdpa_sliced_kv_map(
     device const T* q [[buffer(0)]],
     device const uchar* kv_pages [[buffer(1)]],
     device const uint* req_slots [[buffer(2)]],
@@ -71,10 +71,10 @@ kernel void gqa_split_kv_single_q_map(
     threadgroup float stats[num_simdgroups * 8 * 2];
     threadgroup float global_stats[8 * 2];
     threadgroup bfloat16_t* kv = reinterpret_cast<threadgroup bfloat16_t*>(workspace + simdgroup_index * 8 * 64);
-    threadgroup float* row_sum = stats + simdgroup_index * 16;
-    threadgroup float* row_max = row_sum + 8;
+    threadgroup float* q_head_exp_sums = stats + simdgroup_index * 16;
+    threadgroup float* q_head_max_logits = q_head_exp_sums + 8;
     const short2 coord = mlx::steel::BaseMMAFrag<float, 8, 8>::get_coord(ushort(lane));
-    const uint row = uint(coord.y);
+    const uint q_head_offset = uint(coord.y);
     const uint col = uint(coord.x);
     mlx::steel::MMATile<float, 1, num_head_fragments> output;
     float running_max = -INFINITY;
@@ -92,8 +92,8 @@ kernel void gqa_split_kv_single_q_map(
                     #pragma unroll
                     for (uint i = 0; i < 2; ++i) {
                         const uint dim = tile * 64 + d * 8 + col + i;
-                        if (row < num_heads && dim < KV_HEAD_DIM) {
-                            q_values[i] = q[((ulong)q_token * NUM_Q_HEADS + head_begin + row) * KV_HEAD_DIM + dim];
+                        if (q_head_offset < num_heads && dim < KV_HEAD_DIM) {
+                            q_values[i] = q[((ulong)q_token * NUM_Q_HEADS + head_begin + q_head_offset) * KV_HEAD_DIM + dim];
                         }
                     }
                     reinterpret_cast<thread vec<T, 2>&>(q_fragment.thread_elements()) = q_values;
@@ -115,7 +115,7 @@ kernel void gqa_split_kv_single_q_map(
             #pragma unroll
             for (uint i = 0; i < 2; ++i) {
                 float score = scores.frag_at(0, f)[i];
-                score = row < num_heads && begin + f * 8 + col + i < kv_end ? score * ATTENTION_SCALE : -INFINITY;
+                score = q_head_offset < num_heads && begin + f * 8 + col + i < kv_end ? score * ATTENTION_SCALE : -INFINITY;
                 scores.frag_at(0, f)[i] = score;
                 local_max = max(local_max, score);
             }
@@ -162,7 +162,7 @@ kernel void gqa_split_kv_single_q_map(
             simdgroup_barrier(mem_flags::mem_threadgroup);
         }
     }
-    if (col == 0) { row_sum[row] = running_sum; row_max[row] = running_sum > 0.0f ? running_max : -INFINITY; }
+    if (col == 0) { q_head_exp_sums[q_head_offset] = running_sum; q_head_max_logits[q_head_offset] = running_sum > 0.0f ? running_max : -INFINITY; }
     threadgroup_barrier(mem_flags::mem_threadgroup);
     if (simdgroup_index == 0 && lane < num_heads) {
         float maximum = -INFINITY;
@@ -183,12 +183,12 @@ kernel void gqa_split_kv_single_q_map(
         #pragma unroll
         for (uint d = 0; d < 8; ++d) {
             if (tile * 8 + d < num_head_fragments) {
-                workspace[simdgroup_index * 8 * 64 + row * 64 + d * 8 + col] = output.frag_at(0, tile * 8 + d)[0];
-                workspace[simdgroup_index * 8 * 64 + row * 64 + d * 8 + col + 1] = output.frag_at(0, tile * 8 + d)[1];
+                workspace[simdgroup_index * 8 * 64 + q_head_offset * 64 + d * 8 + col] = output.frag_at(0, tile * 8 + d)[0];
+                workspace[simdgroup_index * 8 * 64 + q_head_offset * 64 + d * 8 + col + 1] = output.frag_at(0, tile * 8 + d)[1];
             }
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
-        if (simdgroup_index == 0 && row < num_heads) {
+        if (simdgroup_index == 0 && q_head_offset < num_heads) {
             #pragma unroll
             for (uint d = 0; d < 8; ++d) {
                 #pragma unroll
@@ -197,11 +197,11 @@ kernel void gqa_split_kv_single_q_map(
                     if (dim < KV_HEAD_DIM) {
                         float value = 0.0f;
                         for (uint sg = 0; sg < num_simdgroups; ++sg) {
-                            const float scale = stats[sg * 16 + row] > 0.0f ? metal::exp(stats[sg * 16 + 8 + row] - global_stats[8 + row]) : 0.0f;
-                            value += workspace[sg * 8 * 64 + row * 64 + d * 8 + col + i] * scale;
+                            const float scale = stats[sg * 16 + q_head_offset] > 0.0f ? metal::exp(stats[sg * 16 + 8 + q_head_offset] - global_stats[8 + q_head_offset]) : 0.0f;
+                            value += workspace[sg * 8 * 64 + q_head_offset * 64 + d * 8 + col + i] * scale;
                         }
-                        const ulong partial = (ulong)task * NUM_Q_HEADS + head_begin + row;
-                        partial_output[partial * KV_HEAD_DIM + dim] = T(global_stats[row] > 0.0f ? value / global_stats[row] : 0.0f);
+                        const ulong partial = (ulong)task * NUM_Q_HEADS + head_begin + q_head_offset;
+                        partial_output[partial * KV_HEAD_DIM + dim] = T(global_stats[q_head_offset] > 0.0f ? value / global_stats[q_head_offset] : 0.0f);
                     }
                 }
             }

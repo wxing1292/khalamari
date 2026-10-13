@@ -203,6 +203,9 @@ V tile: [Tkv_tile, D]
 
 `T` identifies a token dimension. `H` identifies a head dimension. Add `_tile` to the tiled axis.
 
+Describe GQA work with Q tokens, Q heads, KV tokens, and head dimensions.
+Do not replace these coordinates with an unqualified `row` in GQA names or explanations.
+
 Do not introduce the ambiguous names `Bq` or `Bkv`. Outside the SDPA tensor or kernel boundary, use `token_tile`.
 Use `q_*` only for the Q tensor and its dimensions.
 

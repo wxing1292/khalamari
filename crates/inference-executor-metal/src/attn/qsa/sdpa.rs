@@ -1,4 +1,4 @@
-use inference_backend_metal::components::gqa::split_kv::single_q;
+use inference_backend_metal::components::gqa::sdpa::sliced_kv;
 use inference_backend_metal::components::qsa_sdpa;
 use inference_backend_metal::components::qsa_sparse_gqa;
 use inference_backend_metal::metal::Buffer;
@@ -153,8 +153,8 @@ pub const QSA_NUM_ACTIVE_SPARSE_QUERIES: ReplayParameterKey = ReplayParameterKey
 /// Buffers owned by one recorded QSA SDPA shape.
 pub struct QSASDPAScratch {
     shape: QSASDPAShape,
-    dense: single_q::Scratch,
-    sparse_partials: Option<single_q::Scratch>,
+    dense: sliced_kv::Scratch,
+    sparse_partials: Option<sliced_kv::Scratch>,
 }
 
 #[derive(Clone, Copy)]
@@ -198,12 +198,12 @@ impl QSASDPA {
 
     pub fn new_scratch(&self, shape: QSASDPAShape) -> QSASDPAScratch {
         shape.validate();
-        let dense_shape = single_q::Shape {
+        let dense_shape = sliced_kv::Shape {
             num_total_tokens: shape.num_total_tokens,
             num_total_sdpa_map_task_templates: shape.num_total_tokens,
         };
         let sparse_splits = qsa_sparse_gqa::Compute::selected_split_count(shape.num_total_sparse_queries);
-        let sparse_shape = single_q::Shape {
+        let sparse_shape = sliced_kv::Shape {
             num_total_tokens: shape.num_total_sparse_queries,
             num_total_sdpa_map_task_templates: shape
                 .num_total_sparse_queries
@@ -211,13 +211,13 @@ impl QSASDPA {
                 .expect("QSA sparse task capacity must fit u32"),
         };
         let sparse_partials = (sparse_splits > 1).then(|| {
-            let mut sparse_partial_config = dense_single_q_config(self.config);
+            let mut sparse_partial_config = dense_sliced_kv_config(self.config);
             sparse_partial_config.dtype = Dtype::Float32;
-            single_q::Scratch::new(&self.device, sparse_partial_config, sparse_shape)
+            sliced_kv::Scratch::new(&self.device, sparse_partial_config, sparse_shape)
         });
         QSASDPAScratch {
             shape,
-            dense: single_q::Scratch::new(&self.device, dense_single_q_config(self.config), dense_shape),
+            dense: sliced_kv::Scratch::new(&self.device, dense_sliced_kv_config(self.config), dense_shape),
             sparse_partials,
         }
     }
@@ -237,14 +237,14 @@ impl QSASDPA {
         let metadata_active = input.metadata.active();
         validate_replay(active, metadata_active);
 
-        let dense_shape = single_q::Shape {
+        let dense_shape = sliced_kv::Shape {
             num_total_tokens: shape.num_total_tokens,
             num_total_sdpa_map_task_templates: shape.num_total_tokens,
         };
         let dense_execution = input.metadata.dense_variant();
-        let dense_config = dense_single_q_config(self.config);
-        let dense_map = single_q::Compute::new(&self.device, dense_config, dense_execution, dense_shape);
-        let dense_reduce = single_q::MappedReduce::new(
+        let dense_config = dense_sliced_kv_config(self.config);
+        let dense_map = sliced_kv::Compute::new(&self.device, dense_config, dense_execution, dense_shape);
+        let dense_reduce = sliced_kv::MappedReduce::new(
             &self.device,
             dense_config,
             dense_execution,
@@ -262,11 +262,11 @@ impl QSASDPA {
             sparse_split_count,
         );
         let sparse_reduce = if sparse_split_count > 1 {
-            let sparse_reduce_shape = single_q::Shape {
+            let sparse_reduce_shape = sliced_kv::Shape {
                 num_total_tokens: shape.num_total_sparse_queries,
                 num_total_sdpa_map_task_templates: shape.num_total_sparse_queries * sparse_split_count,
             };
-            Some(single_q::MappedReduce::new(
+            Some(sliced_kv::MappedReduce::new(
                 &self.device,
                 dense_config,
                 dense_execution,
@@ -317,12 +317,12 @@ impl QSASDPA {
             input.page_table_index,
         );
         let dense_reduce = dense_reduce.invoke(
-            single_q::MappedReduceBuffers {
+            sliced_kv::MappedReduceBuffers {
                 partial_exp_sums: &input.scratch.dense.partial_exp_sums,
                 partial_max_logits: &input.scratch.dense.partial_max_logits,
                 partial_output: &input.scratch.dense.partial_output,
                 cu_sdpa_partial_outputs: input.metadata.dense_cu_partial_outputs(),
-                output_query_rows: input.metadata.dense_query_rows(),
+                output_query_indices: input.metadata.dense_query_rows(),
                 output: input.output,
             },
             active.num_active_dense_queries,
@@ -334,12 +334,12 @@ impl QSASDPA {
                 .as_ref()
                 .expect("QSA sparse split reduce requires partial scratch");
             sparse_reduce.invoke(
-                single_q::MappedReduceBuffers {
+                sliced_kv::MappedReduceBuffers {
                     partial_exp_sums: &sparse_partials.partial_exp_sums,
                     partial_max_logits: &sparse_partials.partial_max_logits,
                     partial_output: &sparse_partials.partial_output,
                     cu_sdpa_partial_outputs: input.metadata.sparse_cu_partial_outputs(),
-                    output_query_rows: input.metadata.sparse_query_rows(),
+                    output_query_indices: input.metadata.sparse_query_rows(),
                     output: input.output,
                 },
                 active.num_active_sparse_queries,
@@ -368,8 +368,8 @@ fn assert_replay_fixed(value: ReplayU32, expected: u32) {
     }
 }
 
-fn dense_single_q_config(config: QSASDPAConfig) -> single_q::Config {
-    single_q::Config {
+fn dense_sliced_kv_config(config: QSASDPAConfig) -> sliced_kv::Config {
+    sliced_kv::Config {
         num_q_heads: config.num_q_heads,
         num_kv_heads: config.num_kv_heads,
         head_dim: config.head_dim,

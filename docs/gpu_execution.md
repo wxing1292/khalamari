@@ -159,7 +159,7 @@ Variant
 ```
 
 Do not create separate selector layers for algorithm choice and shape-specific kernel choice. One registry entry must
-identify the complete selectable combination. GQA SingleQ and TiledQ entries each identify the Map and Reduce kernels
+identify the complete selectable combination. GQA SlicedKv and SlicedQ entries each identify the Map and Reduce kernels
 and their matching constants.
 
 `Variant` can own ready `CompiledKernel` values. It can also contain stable descriptions that another owner uses to

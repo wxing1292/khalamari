@@ -30,6 +30,7 @@ crates/inference-executor-metal/src/attn/
   gqa/
     mod.rs                  GQA Metal module root
     sdpa.rs                 executor-owned candidate construction and execution selection
+    sdpa_test.rs            host selection, partition coverage, and replay-envelope contracts
     batch_metadata.rs       capacity-sized GPU upload target for one SDPA selection
     backend.rs              gated QGKV Metal replay wiring
     backend_full_test.rs    gated GQA owner replay and CPU parity
@@ -81,23 +82,23 @@ crates/inference-backend-metal/src/components/
     qgkv_split.rs           gated QGKV split component
     qkv_split.rs            ungated QKV split component
     sdpa.rs                 backend-owned SDPA variant registry, constants, and capability checks
-    split_kv/
-      mod.rs                SplitKV component module root
-      single_q.rs           SplitKV SingleQ Map/Reduce component
-      single_q_test.rs      SplitKV SingleQ Metal parity and replay contracts
-      tiled_q.rs            SplitKV TiledQ Map/Reduce component
-      tiled_q_test.rs       SplitKV TiledQ Metal parity and padded replay contracts
-  rms_norm_rope.rs          reusable Metal head-row RMSNorm/RoPE component
+    sdpa/
+      sliced_kv.rs           SplitKV SlicedKv Map/Reduce component
+      sliced_kv_test.rs      SplitKV SlicedKv Metal parity and replay contracts
+      sliced_q.rs            Q-token/head Map/Reduce and unsplit direct-output component
+      sliced_q_test.rs       SplitKV SlicedQ Metal parity and padded replay contracts
+  rms_norm_rope.rs          reusable Metal token/head RMSNorm/RoPE component
   metal/
     gqa_qgkv_split.metal       gated QGKV split source
     gqa_qkv_split.metal        ungated QKV split source
-    rms_norm_rope.metal         Metal head-row RMSNorm/RoPE source
+    rms_norm_rope.metal         Metal token/head RMSNorm/RoPE source
     gqa_kv_page_write.metal     Metal KV page-write source
     gqa_fp8.metal                      shared packed FP8-to-BF16 decode
-    gqa_split_kv_single_q_map.metal     Metal SplitKV SingleQ map source
-    gqa_split_kv_single_q_reduce.metal  Metal SplitKV SingleQ reduce source
-    gqa_split_kv_tiled_q_map.metal      Steel SplitKV TiledQ map source
-    gqa_split_kv_tiled_q_reduce.metal   Metal SplitKV TiledQ reduce source
+    gqa_sdpa_sliced_kv_map.metal     Metal SplitKV SlicedKv map source
+    gqa_sdpa_sliced_kv_reduce.metal  Metal SplitKV SlicedKv reduce source
+    gqa_sdpa_sliced_q_per_head_map.metal      Steel SplitKV SlicedQ map source
+    gqa_sdpa_sliced_q_map.metal   generic Q-token/head map source
+    gqa_sdpa_sliced_q_reduce.metal   Metal SplitKV SlicedQ reduce source
     gqa_bidi_block_sdpa.metal         Metal bidirectional local-block SDPA partial-output source
     gqa_activation_gate.metal    Metal attention-output gate source
 ```
@@ -115,8 +116,9 @@ lanes into model-role and GQA-layer coordinates before it writes the table.
 
 The gated, ungated, and BiDiBlockGQA backends give each quantized projection to one adaptive affine operator.
 The caller provides the fixed projection dimensions, quantization layout, and dtype when it creates the operator.
-It provides the current active token count when it records the projection.
+It provides the recorded token capacity and the submission-time active token count.
 The affine operator selects QMV or a QMM tile.
+The shared [affine selection policy](executor_dense_mlp.md#backend-selection) also owns sliced-K MMA token and output-feature tiling.
 GQA code does not store separate QMV/QMM kernels or a projection threshold.
 This contract applies to fused Main QGKV/QKV projections and output projections.
 BiDiBlockGQA gives Q, K, V, and output independent affine layouts.
@@ -124,7 +126,7 @@ Its checkpoint owner may store Q/K/V in one physical buffer and supply explicit 
 It may also supply independent buffers.
 This layout supports mixed projection bit widths without a transpose or aggregation copy.
 The Metal backend registry derives legal SDPA execution variants from the static attention and KV-cache shape.
-The Metal executor selector chooses one complete Map/Reduce execution from the prepared batch shape.
+The Metal executor selector chooses a complete execution from the prepared batch shape.
 Model plans do not specify Metal SDPA tiles or threadblock sizes.
 An exact backend microbenchmark may construct a low-level SDPA component with explicit geometry.
 
@@ -132,9 +134,9 @@ SplitKV is the local KV-range map/reduce computation on one Metal device. It par
 segments. It maps the segments and reduces the partial outputs on the same device. This document does not call this
 computation ContextParallel. ContextParallel is reserved for KV or context sharding across devices or ranks.
 
-`SingleQ` and `TiledQ` describe the current concrete kernel families and Q tiling. These names are orthogonal to
-SplitKV. The selector identifies the selected execution by its complete variant. It does not expose a
-SingleQ/TiledQ selector enum.
+`SlicedKv` and `SlicedQ` describe the current concrete kernel families and Q tiling. These names are orthogonal to
+SplitKV. The selector identifies the selected execution by its complete variant.
+`MapKernelKind` identifies the algorithm and Q-token/head assignment independently of token capacity.
 
 ## Ownership
 
@@ -200,12 +202,12 @@ Qwen3x DSpark constructs `BiDiBlockGQACore` and `BiDiBlockGQA`.
 Its QKV attention graph is independent from Main and MTP.
 The shared BiDiBlockGQA owner also supports per-query half-open history ranges.
 Qwen3x DFlash2 constructs its own `Qwen3xDFlash2Attention` owner around the same low-level `BiDiBlockGQA` contract.
-It supplies row-relative sliding-history ranges and its own layer composition.
+It supplies query-position-relative sliding-history ranges and its own layer composition.
 
 Init-time component constants supply the head dimensions, head counts, RoPE constants, and page geometry. A
 model-specific runtime branch does not supply these values.
 
-The `rms_norm_rope` component operates on token-head rows. It does not own query grouping, KV grouping, or attention state.
+The `rms_norm_rope` component operates on (token, head) coordinates. It does not own query grouping, KV grouping, or attention state.
 
 `RopeScaling` selects unscaled default RoPE or Yarn RoPE.
 Initialization resolves the correction range and the complete inverse-frequency table.
@@ -231,11 +233,11 @@ arithmetic after this proof. Debug bounds protect private invocation errors.
 req_slots[num_tokens]
 flat_token_indices[num_tokens]
 visible_kv_token_ranges[num_tokens][request_local_kv_token_begin, request_local_kv_token_end]
-q_token_ranges[num_q_token_tiles][flat_q_token_begin/flat_q_token_end]  // TiledQ
+q_token_ranges[num_q_token_tiles][flat_q_token_begin/flat_q_token_end]  // SlicedQ
 sdpa_map_task_templates[num_total_sdpa_map_task_templates]
     [q_token_range_index/request_local_kv_token_begin/request_local_kv_token_end]
-cu_sdpa_partial_outputs[num_tokens + 1]                                  // SingleQ
-cu_sdpa_partial_outputs[num_q_token_tiles + 1]                           // TiledQ
+cu_sdpa_partial_outputs[num_tokens + 1]                                  // SlicedKv
+cu_sdpa_partial_outputs[num_q_token_tiles + 1]                           // SlicedQ
 ```
 
 `gqa::sdpa::Selector` validates cumulative-token monotonicity and request context ranges. It materializes the Q-token
@@ -253,18 +255,51 @@ The grid supplies `kv_head_index` and `q_head_range_index`. These coordinates co
 logical `MapThreadBlockTask`. One threadblock owns each task in a `1:1` relation. The buffer does not duplicate the
 grid-derived coordinates.
 
-The current one-Q variant uses one-token Q ranges. The current tiled-Q variants build request-local
+The sliced-KV variant uses one-token Q ranges. The sliced-Q variants build request-local
 Q-token ranges.
 
-The selector assigns additional KV splits to the Q-token range with the largest KV-iteration count per split.
+The default causal selector uses the compact geometry and KV-slice lookup described in [SDPA selection](gqa_sdpa_selection.md#default-lookup).
+Explicit and composite registries assign additional KV splits to the Q-token range with the largest KV-iteration count per split.
 A max-heap preserves this greedy policy and selects the earlier Q-token range on ties. KV splits for one Q-token
 range are contiguous. See [SDPA selection](gqa_sdpa_selection.md) for the count units and allocation sequence.
 
-The Map task-template capacity is `max_tokens`. The partial-state capacity is
-`max_tokens * largest registered max_q_tokens`. This allocation covers every legal Map task template, so the
-selector does not need a separate active partial-state budget.
-For `max_tokens=128` and eight-token Q ranges, 128 input tokens can use 128 Map task templates and 1024 partial-state
-groups. Each Q range can therefore use eight KV splits. This policy does not increase scratch allocation.
+`SelectorLimits` separates token capacity, Map task-template capacity, and partial-state-group capacity.
+`Selector::new` accepts all three capacities from its initialization owner.
+Token and Q-range metadata use the token capacity. Map metadata uses the Map task-template capacity.
+Replay uses separate token and Map bucket ceilings.
+The selector verifies that the padded Map extent times the selected Q-range width fits the partial-state capacity.
+
+### Resource initialization
+
+`Selector::for_partitions` initializes resources for an explicit-route policy.
+Its caller supplies the token limit `M`, request limit `R`, and each variant's maximum splits per Q range.
+The caller must bound splits over the complete configured context domain, including policy transitions.
+The caller must honor the request limit when it selects work.
+The envelope does not derive split bounds from a measured context grid.
+It is independent of the default lookup resource contract.
+
+For positive request lengths and token-tile width `T`, the maximum number of Q ranges is:
+
+```text
+r = min(R, M)
+max_q_token_ranges(T) = r + floor((M - r) / T)
+max_maps(variant) = max_q_token_ranges(T) * max_kv_splits(variant)
+map_capacity = max_variants(max_maps(variant))
+partial_state_group_capacity = max_variants(map_bucket(max_maps(variant)) * T)
+```
+
+`map_bucket` uses the actual shared replay buckets at `map_capacity`.
+The calculation keeps each variant's Map bound and token width together.
+It must not multiply the largest Map bound by the largest token width from another variant.
+`GQA::new_scratch`, `UngatedGQA::new_scratch`, metadata factories, and replay policy use the resulting selector limits.
+
+The Main and MTP constructors use `Selector::for_lookup` for supported D128/D256 cache profiles.
+They derive request and context capacities from the existing page-table layout.
+The lookup bounds shared Map and partial storage independently of the Q-token/context product.
+It increases a KV slice when the proposed partitions exceed that initialized capacity.
+Both gated and ungated components use this contract.
+Other static profiles retain their original legal variants and allocation contract.
+See [default lookup](gqa_sdpa_selection.md#default-lookup) for the capacity proof and calibration limits.
 
 For a fixed Q-token/head output coordinate, adjacent `cu_sdpa_partial_outputs` values select the
 `SDPAPartialOutput`s for the reducer.
@@ -273,11 +308,12 @@ For a fixed Q-token/head output coordinate, adjacent `cu_sdpa_partial_outputs` v
 capacity policy. Unused tail Map task templates contain an invalid Q-token-range index and do not write a map result.
 BiDiBlockGQA uses this padded count as the replay-cache shape. It supplies `num_sdpa_map_task_templates` as a
 submission-time replay argument. Thus, different active history lengths can share one recorded capacity.
-BiDiBlockGQA token and Q-token-range capacities are currently identity capacities.
+BiDiBlockGQA token and Q-token-range totals cover the materialized request slots.
+Active counts can be smaller than those totals when Spec Decode uses a padded request bucket.
 The recording still dispatches the total Q-token-range extent and receives the active Q-token-range count at
 submission.
 
-The SplitKV `SingleQ` map also permits an invalid-Q-token-range `SDPAMapTaskTemplate` in one token's generic composite
+The SplitKV `SlicedKv` map also permits an invalid-Q-token-range `SDPAMapTaskTemplate` in one token's generic composite
 range. This template does not write a history partial output for that slot.
 
 A caller may populate the reserved max-logit, exp-sum, and normalized `SDPAPartialOutput` through
@@ -315,9 +351,9 @@ req_slot -> gqa_layer_index -> block_index -> page_id_index -> page_id -> KV pag
 ```
 
 The main page-ID table uses a fixed compact main `gqa_layer_index`.
-The optional MTP has an independent table with `K` GQA layer rows.
-Runtime cache lane `step_index + 1` supplies the page IDs for MTP table row `step_index`.
-`Qwen35MTP` performs this model-specific lane-to-row conversion through the generic page-table write API.
+The optional MTP has an independent table with `K` GQA layer entries.
+Runtime cache lane `step_index + 1` supplies the page IDs for MTP table entry `step_index`.
+`Qwen35MTP` performs this model-specific lane-to-layer-index conversion through the generic page-table write API.
 
 Qwen3 DSpark and Qwen3x DFlash2 have separate role-local page tables.
 Runtime cache lane 0 contains one flat page-ID list for each block: `[Main IDs | Spec IDs]` in a persistent BiDiBlockGQA
@@ -352,8 +388,8 @@ Main GQA layers borrow the Main state domain. The optional MTP owns its backend,
 Layer owners retain immutable weights and a `gqa_layer_index`. A main layer does not retain model-level GQA
 configuration or batch metadata.
 The physical MTP layer binds its logical `gqa_layer_index` as a submission-time replay parameter.
-MTP step `step_index` binds GQA layer row `step_index`.
-Page preparation maps runtime cache lane `step_index + 1` to that row.
+MTP step `step_index` binds GQA layer entry `step_index`.
+Page preparation maps runtime cache lane `step_index + 1` to that entry.
 The step index does not enter the replay key.
 
 ## Backend constants and variants
@@ -366,8 +402,8 @@ split
 q-norm-rope
 k-norm-rope
 kv-page-write
-split-kv-single-q
-split-kv-tiled-q
+sdpa-sliced-kv
+sdpa-sliced-q
 gate
 output-proj
 ```
@@ -380,7 +416,7 @@ not materialize a forward-local dense context window.
 
 The path does not upload per-forward block tables before it launches the selected Metal attention kernels.
 
-`SingleQ` and `TiledQ` map/reduce generate Metal source from the exact selected component geometry.
+`SlicedKv` and `SlicedQ` map/reduce generate Metal source from the exact selected component geometry.
 Immutable head, dtype, page, scale, and backend-selected variant values become source constants.
 
 Replay work determines the cached recorded variant. This work includes `num_tokens`, Q-token ranges, the total
@@ -392,18 +428,18 @@ token count as a replay argument.
 The common kernel source-hash cache reuses identical generated pipelines. This compilation does not introduce
 model-specific backend types or names.
 
-Recording materializes the replay-specific `gqa::split_kv::single_q::Compute` or
-`gqa::split_kv::tiled_q::Compute`. The recorded invocation retains its Metal pipelines. The GQA owner must not add a
+Recording materializes the replay-specific `gqa::sdpa::sliced_kv::Compute` or
+`gqa::sdpa::sliced_q::Compute`. The recorded invocation retains its Metal pipelines. The GQA owner must not add a
 second pipeline cache.
 
-SplitKV `SingleQ` and `TiledQ` separate model and storage facts from selected kernel constants and dynamic replay work:
+SplitKV `SlicedKv` and `SlicedQ` separate model and storage facts from selected kernel constants and dynamic replay work:
 
 ```text
-single_q::Config or tiled_q::Config    backend_sdpa::ExecutionVariant
+sliced_kv::Config or sliced_q::Config    backend_sdpa::ExecutionVariant
   num_q_heads                           map KernelConstants
   num_kv_heads                          reduce KernelConstants
   head_dim
-  scale                                single_q::Shape or tiled_q::Shape
+  scale                                sliced_kv::Shape or sliced_q::Shape
   page_bytes                            replay capacities
   page_table_layout
   dtype
@@ -411,8 +447,8 @@ single_q::Config or tiled_q::Config    backend_sdpa::ExecutionVariant
 
 The selected `backend_sdpa::ExecutionVariant` is the only source for `max_q_tokens`, `max_q_heads`,
 `kv_tokens_per_iteration`, and Map and Reduce `required_threads`. `GQAMetadataBuffers` retains this exact value.
-Recording passes it to `single_q::Compute::new(...)` or `tiled_q::Compute::new(...)` without copying its fields into
-`Config`.
+Recording passes it to `sliced_kv::Compute::new(...)`, `sliced_q::Compute::new(...)`, or `sliced_q::Compute::new_direct(...)`.
+Recording does not copy variant fields into `Config`.
 
 Both SplitKV compute owners validate immutable configuration and shape at construction.
 Map and Reduce recording validate the newly supplied buffer ranges and replay arguments.
@@ -442,7 +478,7 @@ The state receives static attention and KV-cache facts through `backend_sdpa::Co
 `backend_sdpa::Registry::new(...)` provides the legal history variants. `bidi_block_gqa::sdpa::Selector` derives the maximum
 Q-token-range extent, scratch extent, replay extent, and launch-cost metrics for each candidate. Its `Selection`
 contains the execution variant and `BiDiBlockGQACapacity`. The selector first minimizes how many times one history K/V
-token must be loaded for the fixed proposal. It then compares the kernel KV-iteration width, padded Q rows, scratch
+token must be loaded for the fixed proposal. It then compares the kernel KV-iteration width, padded Q-token/head coordinates, scratch
 extent, and Q-head coverage. The state freezes this result at initialization. The runtime metadata builder then
 materializes the current history and block-partial composition.
 
@@ -499,7 +535,7 @@ cache-format kernel.
 
 The cache conversion uses fixed unit scale and IEEE-style round-to-nearest, ties-to-even. It saturates finite overflow
 and infinity to `±448`. It preserves the sign of zero. It encodes NaN with an E4M3FN NaN code. The cache does not own a
-scale buffer, scale metadata, or a scale lifecycle. `SingleQ` and `TiledQ` decode
+scale buffer, scale metadata, or a scale lifecycle. `SlicedKv` and `SlicedQ` decode
 eight adjacent cache bytes directly to packed BF16 bit patterns for threadgroup K/V storage. Matrix operations use
 the configured query dtype, BF16 K/V, and F32 accumulation.
 
@@ -529,10 +565,10 @@ num_total_sdpa_map_task_templates  recorded SDPA map TaskTemplate capacity
 reduce_sdpa_partial_outputs        whether the active batch selection semantically requires partial reduction
 ```
 
-For `SingleQ`, `num_q_token_tiles` equals `num_tokens`. The variant does not consume the active-Q-token-range replay
+For `SlicedKv`, `num_q_token_tiles` equals `num_tokens`. The variant does not consume the active-Q-token-range replay
 parameter.
 
-`SingleQ` replay always records the reduce command. It records this command even when each token has only one map
+`SlicedKv` replay always records the reduce command. It records this command even when each token has only one map
 KV split.
 
 This rule lets both SplitKV variants share one recorded program for the same Q-token-range and KV-split geometry. The
@@ -554,12 +590,12 @@ Parameterized GQA execution consumes these submission values:
 
 ```text
 gqa.num_active_tokens                    qgkv/output affine, KV write, and attention token guards
-gqa.num_active_q_token_tiles             TiledQ map and reduce guards
+gqa.num_active_q_token_tiles             SlicedQ map and reduce guards
 gqa.num_active_kv_splits                  SplitKV map guard
 ```
 
 Projection split, norm/RoPE, KV write, activation gate, and the qgkv/output affine kernels return before an inactive
-token reads input or metadata, mutates a page, or writes output. SplitKV SingleQ and TiledQ also return before inactive
+token reads input or metadata, mutates a page, or writes output. SplitKV SlicedKv and SlicedQ also return before inactive
 KV splits or Q-token ranges read their metadata. All token-domain commands use the same active-token parameter key
 and range.
 The ungated QKV split follows the same active/total contract and uses the caller-owned active-token key.
@@ -598,21 +634,21 @@ One logical block therefore owns one page per GQA layer. It owns 40 pages across
 For Qwen3.5 model replay, the Qwen executor validates runtime cache lane 0 and writes the Main page table. DSpark or
 DFlash2 mode also writes its independent role-local page table. `Qwen35MTP` separately maps runtime cache lane
 `step_index + 1` to MTP
-GQA layer row `step_index`. `GQA::prepare(...)` selects the SDPA execution and builds the complete batch selection once.
+GQA layer entry `step_index`. `GQA::prepare(...)` selects the SDPA execution and builds the complete batch selection once.
 Every GQA layer reuses this selection.
 
-`SingleQ` replay always records partial-output reduction. This rule also applies when each batch token has one
+`SlicedKv` replay always records partial-output reduction. This rule also applies when each batch token has one
 KV split.
 
 The shared `Qwen35GQAReplayKey` contains the three recorded capacities. It also contains the complete
-`backend_sdpa::ExecutionVariant`, qgkv affine topology, and output affine topology. Active counts remain submission
-values and do not enter this GQA subkey.
+`backend_sdpa::ExecutionVariant`, `sdpa_direct_output`, qgkv affine topology, and output affine topology.
+Active counts remain submission values and do not enter this GQA subkey.
 
 `Qwen35MainReplayKey` and `Qwen35MTPReplayKey` use this shared GQA subkey. Qwen3.5 Main selects one composite token
-capacity and forces GQA metadata to use it. All Main token-row commands use the caller-owned Main active-token key.
+capacity and forces GQA metadata to use it. All Main token commands use the caller-owned Main active-token key.
 The Q-token-range and KV-split counts remain private GQA replay dimensions. The Main key also contains the
 non-optional GDN request-count subkey. Qwen3.5 MTP independently selects one composite body token capacity and forces
-its GQA metadata to use it. All MTP body token-row commands use the caller-owned MTP active-token key. MTP does not
+its GQA metadata to use it. All MTP body token commands use the caller-owned MTP active-token key. MTP does not
 declare the component-local GQA active-token parameter.
 
 MTP keeps its separate GQA and MLP composite key.
@@ -622,11 +658,11 @@ Main recording supplies each physical layer's fixed index through the same kerne
 
 Qwen3 uses its separate ungated GQA implementation.
 DSpark and DFlash2 keep separate model-level replay keys and submission ABIs.
-Both use the BiDiBlockGQA replay shape with identity token and Q-token-range capacities and shared TaskTemplate padding.
+Both use the BiDiBlockGQA replay shape with materialized token and Q-token-range capacities and shared TaskTemplate padding.
 The active token, Q-token-range, and TaskTemplate counts remain submission values.
 The generic composite map includes one block partial-output slot.
 All SplitKV and bidirectional local-block SDPA partial producers store `partial_max_logits` as natural logits.
-SingleQ, TiledQ, and bidirectional local-block SDPA use the natural exponential for online softmax and partial reduction.
+SlicedKv, SlicedQ, and bidirectional local-block SDPA use the natural exponential for online softmax and partial reduction.
 This rule keeps one log domain across every producer and consumer of the shared partial-state ABI.
 
 ### Execution strategy
@@ -638,14 +674,15 @@ tokens per KV page. `backend_sdpa::Registry::new(...)` derives legal `backend_sd
 contains one compatible Map and Reduce constant set. `supports(...)` checks only static capability and correctness
 conditions.
 
-`gqa::sdpa::Selector` owns the dynamic workload and replay capacity. It first applies the request-local Q-range density
-and Q-head rules. It does not allocate KV splits or metadata for variants that these rules reject.
-For D=256 with 16-token pages, it still constructs both remaining candidates for the measured cost comparison.
-Each constructed candidate uses the same greedy KV-segment allocation and complete metrics.
+`gqa::sdpa::Selector` owns the dynamic workload and replay capacity.
+The default `Selector::for_lookup(...)` uses the [compact lookup criteria](gqa_sdpa_selection.md#default-lookup) for supported BF16 geometry.
+It selects one execution variant, KV slice, and output mode. It constructs metadata only for that selection.
+Other inputs and `Selector::new(...)` retain the original Q-range density rules and candidate cost comparison.
+Each original candidate uses greedy KV-segment allocation and complete metrics.
 The selected `gqa::sdpa::Selection` contains the variant,
 the materialized Q-token ranges and Map task templates, cumulative partial-output offsets, replay shape, and metrics.
 
-The selector also constructs the required dynamic candidates. GQA does not have a separate planner layer.
+The selector owns both execution selection and metadata construction. GQA does not have a separate planner layer.
 It returns a rich selection because the variant, request-local work partition, and replay extents form one coupled result.
 The selection is the atomic boundary between dynamic choice and metadata upload.
 
@@ -655,7 +692,7 @@ select again. Both current concrete kernel families partition a long visible KV 
 Each BiDiBlockGQA owner selects one variant from `backend_sdpa::Registry::new(...)` at initialization.
 `bidi_block_gqa::sdpa::Selector` compares
 the complete fixed-proposal candidates. Its primary cost is the K/V load multiplicity for one history token. It then
-compares the kernel KV-iteration width, padded Q rows, reserved partial-state groups, and Q-head coverage. Its
+compares the kernel KV-iteration width, padded Q-token/head coordinates, reserved partial-state groups, and Q-head coverage. Its
 `Selection` freezes the variant and the coupled capacity. The SplitKV history map and bidirectional local-block map produce
 that physical partial layout for one shared Reduce.
 DSpark and DFlash2 keep model-specific metadata construction.
@@ -684,20 +721,20 @@ The fixed quota can contain an empty history range after rejection changes the a
 Both selected Map implementations write the canonical empty partial for an empty range.
 Reduce therefore combines the empty history contribution with the preserved bidirectional local-block partial.
 
-TiledQ requires one half-open `visible_kv_token_ranges` entry for each flat Q token. The Map kernel computes the
-intersection of this row range and the Map TaskTemplate K/V range. It does not infer a missing lower bound or causal
-upper bound. If the intersection is empty, TiledQ writes the empty partial state `exp_sum = 0` and
+SlicedQ requires one half-open `visible_kv_token_ranges` entry for each flat Q token. The Map kernel computes the
+intersection of this Q token's range and the Map TaskTemplate K/V range. It does not infer a missing lower bound or causal
+upper bound. If the intersection is empty, SlicedQ writes the empty partial state `exp_sum = 0` and
 `max_logit = -infinity`. Reduce ignores that partial.
 
-Ordinary causal GQA uploads `[0, q_position + 1)` for each Q row. DSpark uploads `[0, anchor)` for every anchor and mask
-row in one proposal block. Therefore, every DSpark row sees the same complete persistent history.
-The shared BiDiBlockGQA metadata also accepts a distinct half-open history range for each Q row.
-A tiled task covers the union of its rows' ranges. The TiledQ kernel applies each row's exact range mask.
+Ordinary causal GQA uploads `[0, q_position + 1)` for each Q token. DSpark uploads `[0, anchor)` for every anchor and mask
+token in one proposal block. Therefore, every DSpark Q token sees the same complete persistent history.
+The shared BiDiBlockGQA metadata also accepts a distinct half-open history range for each Q token.
+A tiled task covers the union of its Q tokens' ranges. The SlicedQ kernel applies each Q token's exact range mask.
 
-The same backend TiledQ component represents DFlash2 row-relative sliding history.
-For a window of `W` tokens and a separate local block, row position `q` uploads
+The same backend SlicedQ component represents DFlash2 query-position-relative sliding history.
+For a window of `W` tokens and a separate local block, Q-token position `q` uploads
 `[max(0, q + 1 - W), anchor)` for persistent history.
-The composite parity test covers different explicit row bounds, a fully masked history segment, and one full local
+The composite parity test covers different explicit Q-token bounds, a fully masked history segment, and one full local
 block.
 The DFlash2 owner derives and validates the exact window and Spec-block sizes.
 It does not add a DFlash mode flag to `BiDiBlockGQA`.
@@ -706,27 +743,39 @@ It does not add a DFlash mode flag to `BiDiBlockGQA`.
 It reads persistent history K/V only through the accepted anchor.
 It does not write proposal-block K/V to the paged cache.
 `BiDiBlockGQAKVCacheWriter` is the persistent K/V writer used by Spec Prefill.
-Qwen3.5 Spec Prefill writes every Main row, and runtime already owns the physical blocks for those rows.
+Qwen3.5 Spec Prefill writes every Main token, and runtime already owns the physical blocks for those tokens.
 The GPU-prepared Decode path therefore does not require scheduler-budget, logical-history, context-window, or trie-page
 reservation changes.
 
-The current concrete kernel families differ in the number of Q tokens and Q heads that one Map threadblock computes:
+The two SDPA implementations assign work within a Map threadblock in different ways:
 
 ```text
-shape: num_tokens grouped into request-local Q-token ranges
-parallelism: KV split x KV head x Q-head range
-input: normalized Q plus paged K/V selected through the request page table
-output: partial attention states for one KV range, followed by one numerically stable reduce
+                                  one Map threadblock
+                          +--------------------------------+
+sliced_kv                 | same Q token and Q-head tile    |
+                          | SG0 -> KV chunk 0, 4, 8, ...    |
+                          | SG1 -> KV chunk 1, 5, 9, ...    |
+                          | SG2 -> KV chunk 2, 6, 10, ...   |
+                          | SG3 -> KV chunk 3, 7, 11, ...   |
+                          |        merge SG partial states |
+                          +--------------------------------+
 
-SingleQ    one Q token per range; Steel matrix rows are Q heads
-TiledQ    several Q tokens per range; Steel matrix rows are Q tokens
+sliced_q                  +--------------------------------+
+                          | SG0 -> Q-token/head subset 0   |
+                          | SG1 -> Q-token/head subset 1   |
+                          | SG2 -> Q-token/head subset 2   |
+                          | all SGs reuse the same KV tile |
+                          | each SG owns distinct outputs |
+                          +--------------------------------+
 ```
 
-Both variants use GQA head sharing. If `G = Hq / Hkv`, KV head `k` supplies K/V to Q heads
+Both implementations use GQA head sharing. If `G = Hq / Hkv`, KV head `k` supplies K/V to Q heads
 `[k * G, (k + 1) * G)`.
+Both can split the visible KV range across multiple threadblocks. That split is separate from the SIMDgroup
+assignment inside a threadblock.
 
-A buffered Map task template supplies the Q-token-range index and half-open request-local KV-token range. The grid
-supplies the regular head coordinates:
+A buffered Map task template supplies a Q-token-range index and a half-open request-local KV-token range.
+The grid supplies the KV head and Q-head range:
 
 ```text
 Map task template                                grid coordinates
@@ -735,59 +784,29 @@ Map task template                                grid coordinates
                      +------ one Map threadblock
 
 visible KV range [0, N)
-  -> one or more KV splits
-  -> independent partial output + max + exponential sum
-  -> reduce to final [Q token, Q head, D]
+  -> one or more Map tasks
+  -> partial output + maximum + exponential sum for each (Q token, Q head)
+  -> Reduce -> final output[Q token, Q head, D]
 ```
 
-`cu_sdpa_partial_outputs` selects the consecutive partials for each Q-token range. Padded replay Map task templates use
-`q_token_range_index = u32::MAX`. Their threadblocks return without writing.
+`cu_sdpa_partial_outputs` selects consecutive partials for each Q-token range.
+Padded replay templates use `q_token_range_index = u32::MAX`. Their threadblocks return without writing.
+An unsplit `sliced_q` execution can write final output directly and omit Reduce.
 
-The registry always includes the current one-Q variant. It includes tiled-Q variants only for supported static shapes.
-The low-level profiles are `(D=128, 8 or 16 KV tokens/page)` and `(D=256, 8, 16, or 32 KV tokens/page)`. The current
-FP8 production profiles are `(D=128, 16)`, `(D=256, 16)`, and `(D=256, 32)`.
+The backend registry owns legal static geometries. The executor selector owns workload selection.
+The [selection document](gqa_sdpa_selection.md#default-lookup) defines the current default lookup and the explicit
+candidate policy. Token capacity alone does not identify the implementation: `sliced_q` can process one Q token.
 
-All profiles support at most 8 Q heads per KV head. The gated backend currently reaches only the `D=256` profiles.
-
-The selector uses the average useful tokens per request-local Q range. It does not use floating-point division:
-
-```text
-num_tokens < 2 * num_q_token_ranges       -> SingleQ
-D=128 profile                             -> TiledQ, full Q/KV group
-D=256 and num_tokens < 4 * num_q_token_ranges
-                                          -> TiledQ, roughly half the Q/KV group
-otherwise                                 -> TiledQ, full Q/KV group
-```
-
-The gated `(D=256, 16 KV tokens/page)` production profile uses an additional measured policy. This policy applies only to complete
-selections for legal backend variants. It uses each request's Q-token count and history length. Each candidate
-already contains the current greedy KV-split allocation at the metadata capacity. The policy does not change that
-allocation.
-
-The policy derives scheduled and active QK token pairs, Map threadblock and SIMDgroup-wave counts, active partial
-states, and padded replay partial-state groups. It selects `TiledQ` only when active QK token pairs use at least half of
-the scheduled QK token pairs. It also requires the existing selection-score crossover. This rule keeps `T1`, `T2`,
-small `T25` workloads, and long one-token request tails on `SingleQ`. It selects `TiledQ` for the measured long-context
-`T4` and larger workloads. The complete execution variant remains part of the existing replay topology key. The
-policy does not add a replay key.
-
-`TiledQ` requires at most 256 threads. Its `max_q_tokens` and `max_q_heads` values determine this requirement. Current
-reachable model variants are:
-
-| Model | `Hq / Hkv / D` | KV tokens/page | Production variant |
-| --- | --- | ---: | --- |
-| Qwen3-14B | `40 / 8 / 128` | 16 | selector policy above, tiled `max_q_heads=5` |
-| Qwen3.6/Qwen3.8-27B | `24 / 4 / 256` | 16 | measured selector policy above |
-| Qwen3.6-35B-A3B | `16 / 2 / 256` | 32 | selector policy above |
-| Qwen3 DSpark | checkpoint-derived | model-derived | selected SplitKV history + block bidirectional |
-| Qwen3x DFlash2 | checkpoint-derived | model-derived | selected sliding SplitKV history + block bidirectional |
-
-For 35B, `TiledQ` uses `max_q_heads=4` below four useful tokens per Q-token range. It uses `max_q_heads=8` otherwise.
+The original `Registry::new` candidate set supports up to eight Q heads per KV head for `sliced_q`.
+`Selector::for_lookup` also registers the generic Q-token/head assignments and legal head ranges for larger ratios.
+Supported BF16/FP8 profiles are `D128/P8,16` and `D256/P8,16,32`.
+Generic `sliced_q` variants permit up to 1024 threads, subject to the compiled pipeline limit.
+The selected token/head assignment determines the thread count.
 
 Both Map kernels use MLX Steel 8x8 fragments and native SIMDgroup matrix operations.
 QK multiplies BF16 or F32 Q by BF16 K and accumulates F32 scores.
 PV multiplies F32 softmax weights by BF16 V and accumulates an F32 output numerator.
-The Steel fragment layout supplies the lane coordinates for masking, row reductions, and stores.
+The Steel fragment layout supplies the lane coordinates for masking, per-Q-token/head reductions, and stores.
 There is no TensorOps layout probe, architecture-name check, or alternate Map implementation.
 
 Kernel initialization validates shape, SIMD width, thread limits, and SMEM capacity.
@@ -795,9 +814,55 @@ Replay recording validates borrowed buffer extents and parameter bounds once for
 Cached replay submission supplies active counts without repeating static shape checks.
 Active head, token, and KV-range masks remain part of attention semantics.
 
-#### `SingleQ`
+#### Short-context selection
 
-`SingleQ` always uses `max_q_tokens=1`.
+The selector uses visible KV work and the query count per request.
+For one Q token per request, direct output is useful only through 32 visible KV tokens.
+Above that limit, the normal single-query policy retains KV parallelism.
+The multi-query direct-output limit remains 512 visible KV tokens.
+The [selection document](gqa_sdpa_selection.md#default-lookup) owns the complete criteria.
+
+The following input shows the corrected single-query routing. It uses the same tensors in both paths.
+
+```text
+Input: B=1 request, Q[1 token, 16 heads, D=256]
+       paged K/V[385 KV tokens, 2 heads, D=256]
+       history=384; each KV head serves 8 Q heads
+
+BEFORE: short-context override -> sliced_q, QTokensAndHeads
+  grid=(2 KV heads, 1 Map task, 1), threadgroup=(32 threads, 1, 1)
+  TG(head=0):
+    Q[t0, heads 0..8, D] -> SG0 registers
+    KV head 0: [0,16) -> [16,32) -> ... -> [384,385)
+                  all 25 sequential KV iterations belong to SG0
+      -> QK / online softmax / PV -> final output[t0, heads 0..8, D]
+  TG(head=1) does the same for Q heads 8..16.
+
+AFTER: normal single-query policy -> sliced_kv, KV slice=256
+  grid=(2 Map tasks, 2 KV heads, 1), threadgroup=(128 threads, 1, 1)
+  TG(task=0, head=0): KV[0,256)
+    SG0: KV[0,16), [64,80), [128,144), [192,208)
+    SG1: KV[16,32), [80,96), [144,160), [208,224)
+    SG2: KV[32,48), [96,112), [160,176), [224,240)
+    SG3: KV[48,64), [112,128), [176,192), [240,256)
+      each SG reads the SAME Q[t0, heads 0..8, D]
+      -> QK / online softmax / PV -> four states for the SAME outputs
+      -> merge inside TG -> partial state A[t0, heads 0..8, D]
+  TG(task=1, head=0): KV[256,385), same division and final visibility mask
+      -> partial state B[t0, heads 0..8, D]
+  Reduce: merge A and B -> final output[t0, heads 0..8, D]
+  The other two TGs supply Q heads 8..16 through KV head 1.
+
+Changed: sequential KV work -> parallel KV work + softmax-aware merges
+Same:    tensors, causal visibility, FP8 cache, BF16 output coordinates
+```
+
+The cutoff is an empirical M3 Max crossover. It is not a semantic limit on context length.
+One-query and multi-query workloads retain the same registry, scratch ownership, and replay-key contract.
+
+#### `SlicedKv`
+
+`SlicedKv` always uses `max_q_tokens=1`.
 One block owns one Q token, one KV head, up to `max_q_heads` Q heads, and one KV split.
 The dispatch grid uses X for Map task templates and Y for KV heads and Q-head ranges.
 Task capacity belongs to the dispatch shape. It does not specialize the shader.
@@ -808,7 +873,7 @@ Each SIMDgroup takes a disjoint sequence of 16-token tiles from the split.
 It loads one 8x8 Q fragment from GMEM for each QK dimension step.
 It does not retain the complete Q tile across KV iterations.
 It retains F32 online-softmax statistics and the output numerator in REGISTER.
-The matrix rows are Q heads, padded to eight.
+The Q-head extent is padded to eight.
 Each QK or PV operation consists of 8x8 SIMDgroup matrix operations.
 
 ```text
@@ -837,58 +902,131 @@ The 128-thread production variant uses 8,512 bytes. The 256-thread variant uses 
 This SMEM footprint does not grow with head width. The output REGISTER payload grows with head width.
 Q loads retain only one fragment at a time to limit the live REGISTER payload.
 
-#### `TiledQ`
+#### `SlicedQ`
 
-The request-shape selector chooses SingleQ or TiledQ from the prepared batch.
+The request-shape selector chooses SlicedKv or SlicedQ from the prepared batch.
 Token, Q-token-range, and Map task capacities belong to the dispatch shape and replay bindings.
 They do not specialize Map or Reduce shaders. New replay capacities reuse compiled pipelines.
 Map and Reduce compile independently. Only Map includes the Steel fragment definitions and FP8 decoder.
 
-One SIMDgroup owns one Q head and eight Q rows.
-It loads Q once from GMEM into REGISTER before the KV loop.
-Each score tile has eight rows and `kv_tokens_per_iteration` columns.
-The supported KV iteration widths are 8, 16, and 32 tokens. Each width uses complete 8x8 fragments.
-Each SIMDgroup retains its full `[8, D]` F32 output numerator in REGISTER.
+Each SIMDgroup owns up to eight `(Q token, Q head)` coordinates per fragment.
+`MapKernelKind` defines that assignment:
 
 ```text
-GMEM Q -> REGISTER BF16 Q[8, D]
+Input for all three assignments:
+  Q[4 Q tokens, 24 Q heads, D=256]
+  K/V[256 KV tokens, 4 KV heads, D=256]
+  G = 24 / 4 = 6 Q heads per KV head
+  history = 252 tokens; causal ends = 253, 254, 255, 256
 
-for each KV tile:
-    paged FP8 K -> SMEM BF16 KV[KV width, D+8]
-    REGISTER Q x SMEM K^T -> REGISTER F32 scores
-    barrier: all SIMDgroups finish reading K
-    paged FP8 V -> the same SMEM KV region
-    visible-range mask + online softmax -> REGISTER F32 E, maximum, denominator
-    barrier: V staging completes
-    REGISTER E x SMEM V -> REGISTER F32 output numerator
-    barrier: all SIMDgroups finish reading V
+For KV head 2, local head h=0..5 means global Q head 12+h.
+Each entry below is (Q token t, local Q head h).
 
-normalize -> GMEM BF16 partial output + F32 statistics
+QTokensPerHead: one fixed Q head per SIMDgroup
+  SG0: (t0,h0) (t1,h0) (t2,h0) (t3,h0) [4 masked token positions]
+  SG1: (t0,h1) (t1,h1) (t2,h1) (t3,h1) [4 masked token positions]
+  ...
+  SG5: (t0,h5) (t1,h5) (t2,h5) (t3,h5) [4 masked token positions]
+  6 SGs = 192 threads; token capacity is padded to 8 per head.
+
+QHeadsPerToken: one fixed Q token per SIMDgroup
+  SG0: (t0,h0..5) [2 masked head positions]
+  SG1: (t1,h0..5) [2 masked head positions]
+  SG2: (t2,h0..5) [2 masked head positions]
+  SG3: (t3,h0..5) [2 masked head positions]
+  4 SGs = 128 threads; six Q heads use eight physical head positions.
+
+QTokensAndHeads: consecutive token/head coordinates
+  SG0: (t0,h0..5) (t1,h0..1)
+  SG1: (t1,h2..5) (t2,h0..3)
+  SG2: (t2,h4..5) (t3,h0..5)
+  3 SGs = 96 threads; 4 * 6 = 24 useful coordinates.
+
+All three assignments read Q at its original [token, head, D] address.
+They do not allocate a packed Q buffer.
 ```
 
-K and V share one SMEM tile. The kernel does not double-buffer them.
-The working tile uses `kv_tokens_per_iteration * (D+8) * sizeof(bfloat)` bytes.
-The host reserves SMEM for at least 32 KV rows plus 19 F32 values per query row and head.
-The additional reservation limits threadblock residency. The kernel does not read or write the unused bytes.
-Softmax weights and row statistics remain in REGISTER.
+The following comparison uses the same input and one unsplit `[0, 256)` KV range.
+It shows the intra-threadblock work division. Multiple KV ranges add Map tasks and a subsequent Reduce.
 
-The shared FP8 decoder loads eight cache bytes and produces eight packed BF16 values.
-It converts subnormals with `mantissa * 2^-9` and uses no constant-address-space lookup table.
-Cached prefixes, per-row visibility, causal masks, partial-state layout, and Reduce retain their contracts.
-The Map remains one command in the parent ICB and adds no submission or CPU wait.
+```text
+sliced_kv: 4 SGs process the SAME output tile
 
-Both variants reduce partial attention states by rescaling them to one global maximum. `SingleQ` reduces flat
-`[token, Q head, D]` elements.
+  grid = (4 Q-token tasks, 4 KV heads, 1)
+  threadgroup = (128 threads, 1, 1); total = 16 threadblocks
 
-`TiledQ` launches one Reduce block per `(Q head, Q-token range)`. The block strides over active `token x D` elements.
+  TG(task=t2, head=2): Q[t2, heads 12..18, D]
+    K/V chunks are 16 KV tokens each:
+    SG0: KV[  0..16) [ 64..80) [128..144) [192..208)
+    SG1: KV[ 16..32) [ 80..96) [144..160) [208..224)
+    SG2: KV[ 32..48) [ 96..112)[160..176) [224..240)
+    SG3: KV[ 48..64) [112..128)[176..192) [240..256)
+      |         each SG: QK -> online softmax -> PV
+      v
+    four partial states for the SAME [t2, heads 12..18, D]
+      -> softmax-aware merge inside TG
+      -> GMEM partial[t2, heads 12..18, D] + statistics
+      -> Reduce -> output[t2, heads 12..18, D]
 
-`SingleQ` records reduce even for one KV split per token. This rule keeps the replay topology stable.
-`TiledQ` always records its tiled reduce.
+sliced_q, QTokensAndHeads: 3 SGs process DISTINCT output coordinates
+
+  grid = (4 KV heads, 1 Q-token-range task, 1)
+  threadgroup = (96 threads, 1, 1); total = 4 threadblocks
+
+  TG(head=2, task=t0..t4):
+    Q[t0..t4, heads 12..18, D] -> SG registers as shown above
+    KV[0..16, head 2, D] -> shared SMEM tile
+       +----------------+----------------+----------------+
+       | SG0 reads tile | SG1 reads tile | SG2 reads tile |
+       | 8 coordinates  | 8 coordinates  | 8 coordinates  |
+       +----------------+----------------+----------------+
+    repeat for KV[16..32), ..., KV[240..256)
+    each coordinate applies its own causal end
+       -> QK -> online softmax -> PV, independently in each SG
+       -> output[t0..t4, heads 12..18, D], direct unsplit stores
+    no merge between SGs: they own different output coordinates
+```
+
+Each SIMDgroup loads its Q fragments once before the KV loop.
+It retains the complete F32 output numerator in registers.
+The threadblock stages K and V into the same shared-memory region in sequence.
+All SIMDgroups reuse that region. Barriers separate staging and use.
+
+```text
+GMEM Q[token, head, D] -> REGISTER Q fragments
+
+for each assigned KV tile:
+    paged FP8 K -> shared SMEM BF16 K
+    Q x K^T -> REGISTER F32 scores
+    visible-range mask + online softmax -> REGISTER probabilities and statistics
+    paged FP8 V -> the same SMEM region
+    probabilities x V -> REGISTER F32 output numerator
+
+split execution: normalize -> partial output + statistics -> Reduce
+unsplit direct:  normalize -> final output, no Reduce
+```
+
+The generic source supports KV iteration widths `8, 16, 32, 64, 128`.
+It chunks the head dimension when a complete shared-memory tile would exceed 32 KiB.
+The specialized `QTokensPerHead` source retains its original `8, 16, 32` KV widths and memory reservation.
+The backend uses the generic source for the other assignments, extended geometries, and direct output.
+
+The shared FP8 decoder converts eight cache bytes to packed BF16 values.
+Probabilities, online-softmax statistics, and output accumulators remain F32.
+Cached prefixes, per-Q-token visibility, causal masks, and the partial-state ABI retain their contracts.
+Map adds no CPU wait or separate submission.
+
+Both implementations merge KV partial states by rescaling them to one global maximum.
+`sliced_kv` reduces flat `[Q token, Q head, D]` elements.
+`sliced_q` launches one Reduce block per `(Q head, Q-token range)`.
+`sliced_kv` retains Reduce for one split to preserve its replay topology.
+The direct `sliced_q` path omits Reduce; its split path retains Reduce.
 
 Focused fixed, request-tail, multi-range, and ragged cases compare both variants with the CPU reference.
 
 Qwen3.5 keeps reusable gated-GQA scratch in the directly owned `Qwen3xGQAState`. The `GQA` backend creates this scratch
-from its selector limits and maximum registered Q-range width. Individual GQA layers do not own this scratch.
+from its selector limits. Ordinary activation buffers use `max_tokens`.
+Partial buffers use `partial_state_group_capacity`. Individual GQA layers do not own this scratch.
 
 The executor owns one Main `GQAScratch`. The optional MTP owns one matching scratch because its GQA configuration can
 differ. All logical MTP steps reuse this one MTP scratch owner.
@@ -898,6 +1036,11 @@ gated graph requires these buffers.
 
 Qwen3 Main owns `UngatedGQAScratch`. The `UngatedGQA` backend creates this scratch from the same selector limits. The
 scratch contains the QKV projection, norm/RoPE, and SDPA buffers for the fixed ungated graph. It has no gate buffers.
+
+Both backends create metadata with `new_metadata()` and replay buckets with `replay_bucket_policy()`.
+These methods use the same selector limits as `new_scratch()`.
+State allocation and reallocation obtain all three resources from that backend owner.
+The state refreshes its replay bucket policy during reallocation.
 
 Both scratch types expose matching borrowed replay bindings. The model stream serializes Main and MTP execution.
 Therefore, submissions reuse their buffers without per-layer allocation.
@@ -913,7 +1056,7 @@ P_capacity = next_power_of_two(max(T_capacity, 2 * Q_capacity))
 ```
 
 `P_capacity` is the Map task-template capacity. It retains enough history task parallelism without multiplying the
-legacy SingleQ capacity by the selected Q-tile width.
+legacy SlicedKv capacity by the selected Q-tile width.
 It does not depend on `max_position_embeddings`.
 `BiDiBlockGQACapacity` owns this Metal resource rule.
 The backend-neutral `BiDiBlockCapacity` contains only request and block geometry.
@@ -931,7 +1074,7 @@ hidden_state / next_hidden_state     bf16 model boundary buffers shaped [num_tok
 req_slots                            request slot repeated per flat token
 flat_token_indices                   request-absolute token index per flat token; used for RoPE and KV-page writes
 visible_kv_token_ranges              request-local [begin, end) visible K/V range per flat Q token
-q_token_ranges                      request-local flat-Q-token ranges consumed by SplitKV TiledQ
+q_token_ranges                      request-local flat-Q-token ranges consumed by SplitKV SlicedQ
 sdpa_map_task_templates             materialized Q-token-range index and request-local KV-token range for Map tasks
 cu_sdpa_partial_outputs             cumulative partial-output counts selected per Q-token range by SplitKV Reduce
 page_ids                             fixed-stride [req_slot, gqa_layer_index, block_index, page_id_index]
@@ -1038,10 +1181,10 @@ reduce(flat_token, q_head)
 Reduce uses per-partial-output max logits to combine exp sums and weighted outputs. It does not materialize a dense
 context window.
 
-`SingleQ` replay records this reduce even when each token has one KV split. This rule keeps the replay topology
+`SlicedKv` replay records this reduce even when each token has one KV split. This rule keeps the replay topology
 stable.
 
-Qwen3-14B `SingleQ` uses `kv_tokens_per_iteration=128`, `required_threads=128`, and `max_q_heads=5`.
+Qwen3-14B `SlicedKv` uses `kv_tokens_per_iteration=128`, `required_threads=128`, and `max_q_heads=5`.
 
 Qwen3.5 uses `kv_tokens_per_iteration=256`, `required_threads=128`, and `max_q_heads <= 8`.
 The planning grain stays at 256 KV tokens. The independent thread count limits the block to four SIMDgroups.
@@ -1069,36 +1212,51 @@ Recommendation: The model/layer boundary does not add an implicit every-command 
 
 Explicit component barriers and backend-inferred buffer hazards provide the required internal order.
 
+Both gated and ungated replay owners support explicit fixed-slice and direct-output selections.
+The automatic Main/MTP selector retains its existing Map/Reduce policy.
+Direct output uses one Map template per Q range and equal padded extents for both domains.
+Its replay omits partial-output bindings, Reduce, and the private active-KV-split parameter.
+The output mode enters the replay topology, even when both paths have equal recorded capacities.
+See [explicit route materialization](gqa_sdpa_selection.md#explicit-and-composite-selection) for the partition contract.
+
 ## Tests and benches
 
 Focused backend and component tests provide part of the correctness coverage. Qwen wiring and model tests provide the
 remaining coverage.
 
-`gqa/split_kv/single_q_test.rs` compares SplitKV SingleQ with the CPU projected-GQA reference. Its main replay test uses
+The executor selector tests cover fixed slices across ragged causal requests and independent direct replay padding.
+The gated full-replay test compares direct and Map/Reduce output with the CPU reference across changing active counts.
+It verifies separate cached replays for both output modes with equal recorded extents.
+The ungated SDPA-stage test covers six logical query heads, causal output, and unchanged inactive Q tokens for both modes.
+
+`gqa/sdpa/sliced_kv_test.rs` compares SplitKV SlicedKv with the CPU projected-GQA reference. Its main replay test uses
 one isolated cache and the complete active-count sequence for capacity `8`. Focused cases cover a ragged batch and a
 logical cache block that spans multiple physical page IDs, BF16 and F32 activations, and head dimensions up to 256.
 The cases validate compact KV-split indexing,
 online-softmax iteration merging, request slots, page-table lookup, and causal visibility.
 
-The TiledQ tests exercise the Steel Map with 8-, 16-, and 32-token KV iterations.
+The SlicedQ tests exercise the Steel Map with 8-, 16-, and 32-token KV iterations.
+The generic Q-token/head test also checks 64- and 128-token staging, head-dimension chunking,
+6/8/12 GQA ratios, request tails, sliding masks, empty visibility, and direct final output.
+It verifies the padded-head and joint `4 x 6` mappings against the CPU reference.
 They use the production recorder and preserve one partial-state ABI.
 They cover all five supported `(D, tokens_per_page)` profiles, non-contiguous pages, a cached prefix, multiple KV
-heads, Q-head tails, multiple Q fragments, sliding visibility, fully masked rows, and padded replay capacity.
+heads, Q-head tails, multiple Q fragments, sliding visibility, fully masked Q tokens, and padded replay capacity.
 
-`gqa/split_kv/tiled_q_test.rs` compares the BF16-output SplitKV TiledQ map and reduce variant, with an FP8 E4M3FN KV
+`gqa/sdpa/sliced_q_test.rs` compares the BF16-output SplitKV SlicedQ map and reduce variant, with an FP8 E4M3FN KV
 cache, against the same CPU reference. The replay test uses one isolated cache with a total token capacity
 of `4` and the active-count sequence `1, 4, 3, 2`. The Q-token-tile and map-task capacities stay fixed.
-The paged-range case also verifies that inactive output rows retain their sentinel values.
+The paged-range case also verifies that inactive output Q tokens retain their sentinel values.
 
 `gqa/bidi_block_sdpa_test.rs` records one total Q-token-range capacity of `8` and replays
 `1, 8, 3, 7, 2, 6, 4, 5` active ranges. It compares each active partial state and output with a CPU softmax reference.
 This test protects the BiDiBlockGQA total-dispatch and active-guard contract.
 
 `gqa/qkv_split.rs` records one total token capacity of `8` and uses the same non-monotonic active-count sequence.
-It compares Q, K, and V active rows with the exact CPU row-split reference.
+It compares active Q, K, and V tokens with the exact CPU split reference.
 
 `gqa/qgkv_split.rs` and `gqa/activation_gate.rs` use the same isolated-cache sequence. They compare the active Q/G/K/V
-rows and gated attention values with exact CPU references. `gqa/kv_page_write.rs` compares the complete affected FP8
+tokens and gated attention values with exact CPU references. `gqa/kv_page_write.rs` compares the complete affected FP8
 page arena with a CPU page-table, page-offset, and E4M3FN conversion reference because page writes update persistent
 state.
 
@@ -1118,13 +1276,18 @@ cargo bench --bench gqa_bidi_block_sdpa -- \
   --iters 1 --warmup-iters 0 --runs 1
 ```
 
-The GQA backend bench records SplitKV SingleQ building blocks only in Metal replay/ICB paths. GQA Metal code does not
+`gqa-sdpa-bench` compares generic SlicedKv, QTokensPerHead, QHeadsPerToken, and QTokensAndHeads candidates.
+It uses forced KV slices and tests split and unsplit output through the same backend APIs.
+It generates coverage reports and calibration lookup tables. The production selector does not consume these tables.
+[`executor_benchmarks.md`](executor_benchmarks.md#generic-gqa-matrix) contains the serial scan commands.
+
+The `gqa_split_kv` backend bench records SplitKV SlicedKv building blocks only in Metal replay/ICB paths. GQA Metal code does not
 benchmark or expose direct-submit component or forward wiring.
 
 `gqa_bidi_block_sdpa` records only `gqa::bidi_block_sdpa::Compute`.
 It measures the dense bidirectional local-block map contribution used by DSpark.
 It does not measure history attention, partial reduction, projections, or a DSpark layer.
-Its default `max_q_tokens = 8` uses the production TiledQ partial-state layout. The option can select a different legal
+Its default `max_q_tokens = 8` uses the production SlicedQ partial-state layout. The option can select a different legal
 partial-state width for an exact comparison.
 
 One bidirectional local-block SDPA Task owns one Q token and one Q head. The grid supplies the Q-head index,
@@ -1162,7 +1325,7 @@ cargo bench --bench qwen3_dspark -- \
 
 cargo bench --bench qwen35_gqa -- \
   --model-dir <27b-model-dir> --gqa-model 27b --tokens 1 \
-  --contexts 0 --num-reqs 1 --gqa-split-kv-variants single_q \
+  --contexts 0 --num-reqs 1 --gqa-split-kv-variants sliced_kv \
   --iters 1 --warmup-iters 0 --runs 1
 ```
 
@@ -1179,12 +1342,12 @@ It also reports exact QKV and output-projection measurements for QMV, QMM BM8/BN
 These forced projection paths are benchmark-only.
 Production GQA continues to use `affine_quantized::Matmul` selection from the complete shape and dtype.
 
-Its SplitKV SingleQ and TiledQ constant arguments are configurable. `--validate` compares full SingleQ and
-TiledQ outputs for a workload where production selects the TiledQ variant.
+Its SplitKV SlicedKv and SlicedQ constant arguments are configurable. `--validate` compares full SlicedKv and
+SlicedQ outputs for a workload where production selects the SlicedQ variant.
 
-Use `--split-kv-single-q-kv-tokens-per-iteration`, `--split-kv-single-q-required-threads`, and
-`--split-kv-single-q-max-q-heads` to configure SingleQ. Use `--split-kv-tiled-q-max-q-tokens`,
-`--split-kv-tiled-q-kv-tokens-per-iteration`, and `--split-kv-tiled-q-max-q-heads` to configure TiledQ.
+Use `--sdpa-sliced-kv-kv-tokens-per-iteration`, `--sdpa-sliced-kv-required-threads`, and
+`--sdpa-sliced-kv-max-q-heads` to configure SlicedKv. Use `--sdpa-sliced-q-max-q-tokens`,
+`--sdpa-sliced-q-kv-tokens-per-iteration`, and `--sdpa-sliced-q-max-q-heads` to configure SlicedQ.
 
 The validation also prints threadgroup memory and logical accumulator counts. These counts do not measure compiler register allocation.
 
@@ -1219,20 +1382,20 @@ The default is 128, which matches the server default. Each case reports Q-token
 ranges, Map task templates, active and reserved partial-state groups, replay slots, and KV iterations per Map
 task template.
 
-The comparison replay reports `split_kv_variant=single_q` or `split_kv_variant=tiled_q`. Model execution uses the
+The comparison replay reports `split_kv_variant=sliced_kv` or `split_kv_variant=sliced_q`. Model execution uses the
 automatic selector policy described above.
 
-`--gqa-split-kv-single-q-kv-tokens-per-iteration`, `--gqa-split-kv-single-q-required-threads`, and
-`--gqa-split-kv-single-q-max-q-heads` override the `SingleQ` defaults.
+`--gqa-sdpa-sliced-kv-kv-tokens-per-iteration`, `--gqa-sdpa-sliced-kv-required-threads`, and
+`--gqa-sdpa-sliced-kv-max-q-heads` override the `SlicedKv` defaults.
 
-`--gqa-split-kv-tiled-q-max-q-tokens`, `--gqa-split-kv-tiled-q-kv-tokens-per-iteration`, and
-`--gqa-split-kv-tiled-q-max-q-heads` configure the `TiledQ` comparison variant.
+`--gqa-sdpa-sliced-q-max-q-tokens`, `--gqa-sdpa-sliced-q-kv-tokens-per-iteration`, and
+`--gqa-sdpa-sliced-q-max-q-heads` configure the `SlicedQ` comparison variant.
 
 When the Q-head override is absent, the bench uses the production half/full Q/KV-group rule. The benchmark CLI and
 output use the production constant terms `max_q_tokens`, `kv_tokens_per_iteration`, `max_q_heads`, and
 `required_threads`.
 
-`--print-limits` prints the device threadblock-memory limit. It also prints the derived `SingleQ`
+`--print-limits` prints the device threadblock-memory limit. It also prints the derived `SlicedKv`
 threadblock-memory footprint.
 
 The current backend records explicit data-dependency barriers. The replay layer also infers hazards from declared
@@ -1304,6 +1467,6 @@ A Metal page-write test covers negative zero, subnormal values, tie values, fini
 
 The deterministic 64-token projected-GQA quality fixture compares FP8-cache output with a BF16-cache oracle.
 The fixture requires no saturated values, maximum absolute error `<= 0.025`, and mean absolute error `<= 0.005`.
-SingleQ, TiledQ, BiDiBlockGQA, and the complete GQA owner also retain their CPU-oracle parity tests.
+SlicedKv, SlicedQ, BiDiBlockGQA, and the complete GQA owner also retain their CPU-oracle parity tests.
 
 Shared GPU serialization and benchmark methods are in [`executor_benchmarks.md`](executor_benchmarks.md).

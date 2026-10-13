@@ -28,7 +28,6 @@ use super::GQAMetalConfig;
 use super::GQAReplayTopology;
 use super::GQAWeights;
 use super::add_gqa_replay_arguments;
-use crate::attn::gqa::batch_metadata::GQAMetadataBuffers;
 use crate::def::layer::ReplayLayer;
 use crate::def::replay_op::MetalReplayRuntime;
 use crate::def::replay_op::ReplayRecorder;
@@ -48,21 +47,47 @@ const ROPE_THETA: f32 = 10_000.0;
 
 #[test]
 fn test_replay_matches_cpu_reference_across_active_counts() {
+    run_replay_reference(HEAD_DIM, None);
+}
+
+#[test]
+fn test_direct_output_replay_and_output_mode_cache_identity() {
+    run_replay_reference(128, Some(&[true, false, true]));
+}
+
+fn run_replay_reference(head_dim: usize, output_modes: Option<&[bool]>) {
     let device = Device::system_default();
     let stream = Stream::new(&device);
     let runtime = MetalReplayRuntime::new(&stream);
-    let core = fixture_core();
-    let config = fixture_config();
-    let component = GQA::new(&device, core.clone(), config, NUM_TOTAL_TOKENS as usize);
-    let scratch = component.new_scratch();
-    let policy = component.replay_bucket_policy(NUM_TOTAL_TOKENS);
-    let metadata = GQAMetadataBuffers::new(&device, NUM_TOTAL_TOKENS as usize);
+    let core = fixture_core(head_dim);
+    let config = fixture_config(head_dim);
     let page_table_layout = GQAPageTableLayout {
         num_req_slots: 1,
         num_blocks: 1,
         num_gqa_layers: 1,
         num_page_ids_per_block: 1,
     };
+    let mut component = GQA::new(
+        &device,
+        core.clone(),
+        config,
+        NUM_TOTAL_TOKENS as usize,
+        page_table_layout,
+    );
+    if output_modes.is_some() {
+        let sdpa_config = super::gqa_sdpa_config(config, core.num_q_heads, core.num_kv_heads, core.head_dim);
+        let variant =
+            inference_backend_metal::components::gqa::sdpa::ExecutionVariant::sliced_q_per_head(sdpa_config, 8, 16, 1);
+        component.sdpa_selector = crate::attn::gqa::sdpa::Selector::for_partitions(
+            inference_backend_metal::components::gqa::sdpa::Registry::from_variants(sdpa_config, vec![variant]),
+            NUM_TOTAL_TOKENS,
+            1,
+            |_| 1,
+        );
+    }
+    let scratch = component.new_scratch();
+    let policy = component.replay_bucket_policy();
+    let metadata = component.new_metadata();
     let hidden_values = generated_bf16_values(NUM_TOTAL_TOKENS as usize * HIDDEN_DIM, 0x8A2E_91D4);
     let hidden = bf16_buffer(&device, &hidden_values);
     let next_hidden = Buffer::new_zeroed_elements(&device, NUM_TOTAL_TOKENS as usize * HIDDEN_DIM, Dtype::Bfloat16);
@@ -73,50 +98,80 @@ fn test_replay_matches_cpu_reference_across_active_counts() {
     let mut recorded_keys = HashSet::new();
 
     for num_active_tokens in [1_u32, 8, 3, 7, 2, 6, 4, 5] {
-        let shape = replay.component().0.prepare(
-            &metadata,
-            &[0],
-            &[0],
-            &[0, num_active_tokens],
-            &policy,
-            NUM_TOTAL_TOKENS,
+        for &direct_output in output_modes.unwrap_or(&[false]) {
+            let component = &replay.component().0;
+            let shape = if output_modes.is_some() {
+                let sdpa_config = super::gqa_sdpa_config(config, core.num_q_heads, core.num_kv_heads, core.head_dim);
+                let variant = inference_backend_metal::components::gqa::sdpa::ExecutionVariant::sliced_q_per_head(
+                    sdpa_config,
+                    8,
+                    16,
+                    1,
+                );
+                let requests = crate::attn::gqa::sdpa::RequestShape::from_batch(&[0], &[0, num_active_tokens]);
+                let selection = component.sdpa_selector.select_partitioned(
+                    variant,
+                    NUM_TOTAL_TOKENS,
+                    direct_output,
+                    &requests,
+                    &policy,
+                    NUM_TOTAL_TOKENS,
+                );
+                metadata.update(&[0], &[0], &[0, num_active_tokens], &selection)
+            } else {
+                component.prepare(
+                    &metadata,
+                    &[0],
+                    &[0],
+                    &[0, num_active_tokens],
+                    &policy,
+                    NUM_TOTAL_TOKENS,
+                )
+            };
+            let topology = replay.component().0.replay_topology(&metadata);
+            let input = GQAInput {
+                page_table_layout,
+                gqa_layer_index: ReplayU32::Fixed(0),
+                batch_metadata: &metadata,
+                hidden_state: &hidden,
+                next_hidden_state: &next_hidden,
+                kv_cache: GQAKVCacheBindings {
+                    kv_pages: &kv_pages,
+                    page_ids: &page_ids,
+                },
+                weights: weights.bindings(),
+                scratch: scratch.bindings(),
+                num_active_tokens: ReplayU32::Parameter(GQA_NUM_ACTIVE_TOKENS),
+            };
+            let (key, cache_hit) = replay.record(&runtime, &input);
+            let seen = !recorded_keys.insert(key);
+            assert_eq!(cache_hit, seen);
+
+            kv_pages.zero_bytes(0, config.page_bytes as usize);
+            next_hidden.zero_bytes(0, next_hidden.len_bytes());
+            let mut arguments = ReplayArguments::new();
+            add_gqa_replay_arguments(shape, topology, &mut arguments);
+            runtime
+                .submit_replay_with_arguments(replay.replay(&key), &arguments)
+                .wait();
+
+            let reference = gqa_reference(&core, config, num_active_tokens as usize, &hidden_values, &weights);
+            let actual_hidden = read_bf16_values(&next_hidden, reference.output.len());
+            assert_close(&actual_hidden, &reference.output, 0.03125);
+            let actual_pages = kv_pages
+                .read_typed::<u8>(0, config.page_bytes as usize)
+                .into_iter()
+                .map(|bits| bf16_to_f32(fp8_e4m3_to_bf16(bits)))
+                .collect::<Vec<_>>();
+            assert_close(&actual_pages, &reference.kv_pages, 0.0);
+        }
+    }
+    if output_modes.is_some() {
+        assert_eq!(
+            recorded_keys.len(),
+            2,
+            "direct and Map/Reduce executions need distinct replay keys with equal padded extents"
         );
-        let topology = replay.component().0.replay_topology(&metadata);
-        let input = GQAInput {
-            page_table_layout,
-            gqa_layer_index: ReplayU32::Fixed(0),
-            batch_metadata: &metadata,
-            hidden_state: &hidden,
-            next_hidden_state: &next_hidden,
-            kv_cache: GQAKVCacheBindings {
-                kv_pages: &kv_pages,
-                page_ids: &page_ids,
-            },
-            weights: weights.bindings(),
-            scratch: scratch.bindings(),
-            num_active_tokens: ReplayU32::Parameter(GQA_NUM_ACTIVE_TOKENS),
-        };
-        let (key, cache_hit) = replay.record(&runtime, &input);
-        let seen = !recorded_keys.insert(key);
-        assert_eq!(cache_hit, seen);
-
-        kv_pages.zero_bytes(0, config.page_bytes as usize);
-        next_hidden.zero_bytes(0, next_hidden.len_bytes());
-        let mut arguments = ReplayArguments::new();
-        add_gqa_replay_arguments(shape, topology, &mut arguments);
-        runtime
-            .submit_replay_with_arguments(replay.replay(&key), &arguments)
-            .wait();
-
-        let reference = gqa_reference(&core, config, num_active_tokens as usize, &hidden_values, &weights);
-        let actual_hidden = read_bf16_values(&next_hidden, reference.output.len());
-        assert_close(&actual_hidden, &reference.output, 0.03125);
-        let actual_pages = kv_pages
-            .read_typed::<u8>(0, config.page_bytes as usize)
-            .into_iter()
-            .map(|bits| bf16_to_f32(fp8_e4m3_to_bf16(bits)))
-            .collect::<Vec<_>>();
-        assert_close(&actual_pages, &reference.kv_pages, 0.0);
     }
 }
 
@@ -166,10 +221,10 @@ impl FixtureWeights {
         let output_shape = affine_reference_shape(1, core.hidden_dim, core.q_dim());
         let (qgkv_weight_values, qgkv_scale_values, qgkv_bias_values) = affine_values(qgkv_shape, 0xC81A_1137);
         let (output_weight_values, output_scale_values, output_bias_values) = affine_values(output_shape, 0xC81A_1138);
-        let q_norm_values = (0..HEAD_DIM)
+        let q_norm_values = (0..core.head_dim)
             .map(|index| bf16::from_f32(0.75 + (index % 7) as f32 * 0.03125).to_f32())
             .collect::<Vec<_>>();
-        let k_norm_values = (0..HEAD_DIM)
+        let k_norm_values = (0..core.head_dim)
             .map(|index| bf16::from_f32(0.875 + (index % 5) as f32 * 0.025).to_f32())
             .collect::<Vec<_>>();
         Self {
@@ -230,17 +285,17 @@ fn gqa_reference(
     let mut g = Vec::with_capacity(num_tokens * core.g_dim());
     let mut k = Vec::with_capacity(num_tokens * core.k_dim());
     let mut v = Vec::with_capacity(num_tokens * core.v_dim());
-    for row in qgkv.chunks_exact(core.qgkv_dim()) {
+    for q_token_head_values in qgkv.chunks_exact(core.qgkv_dim()) {
         let q_end = core.q_dim();
         let g_end = q_end + core.g_dim();
         let k_end = g_end + core.k_dim();
-        q.extend_from_slice(&row[..q_end]);
-        g.extend_from_slice(&row[q_end..g_end]);
-        k.extend_from_slice(&row[g_end..k_end]);
-        v.extend_from_slice(&row[k_end..]);
+        q.extend_from_slice(&q_token_head_values[..q_end]);
+        g.extend_from_slice(&q_token_head_values[q_end..g_end]);
+        k.extend_from_slice(&q_token_head_values[g_end..k_end]);
+        v.extend_from_slice(&q_token_head_values[k_end..]);
     }
-    let q = rms_norm_rope_reference(&q, num_tokens, NUM_Q_HEADS, &weights.q_norm_values, config);
-    let k = rms_norm_rope_reference(&k, num_tokens, NUM_KV_HEADS, &weights.k_norm_values, config);
+    let q = rms_norm_rope_reference(&q, num_tokens, core.num_q_heads, &weights.q_norm_values, config);
+    let k = rms_norm_rope_reference(&k, num_tokens, core.num_kv_heads, &weights.k_norm_values, config);
     let quantized_k = fp8_e4m3_round_trip(&k);
     let quantized_v = fp8_e4m3_round_trip(&v);
     let attention = bf16_round_trip(&projected_gqa_reference(
@@ -267,7 +322,7 @@ fn gqa_reference(
     ));
     GQAReference {
         output,
-        kv_pages: kv_page_reference(&k, &v, config),
+        kv_pages: kv_page_reference(core, &k, &v, config),
     }
 }
 
@@ -280,14 +335,16 @@ fn rms_norm_rope_reference(
 ) -> Vec<f32> {
     let mut output = vec![0.0; input.len()];
     let rope_half = config.rope_dim as usize / 2;
+    let head_dim = norm_weight.len();
     for token_index in 0..num_tokens {
         for head_index in 0..num_heads {
-            let row_begin = (token_index * num_heads + head_index) * HEAD_DIM;
-            let row = &input[row_begin..row_begin + HEAD_DIM];
-            let inv_rms = (row.iter().map(|value| value * value).sum::<f32>() / HEAD_DIM as f32 + config.norm_eps)
+            let q_token_head_begin = (token_index * num_heads + head_index) * head_dim;
+            let q_token_head_values = &input[q_token_head_begin..q_token_head_begin + head_dim];
+            let inv_rms = (q_token_head_values.iter().map(|value| value * value).sum::<f32>() / head_dim as f32
+                + config.norm_eps)
                 .sqrt()
                 .recip();
-            let mut normalized = row
+            let mut normalized = q_token_head_values
                 .iter()
                 .zip(norm_weight)
                 .map(|(&value, &weight)| {
@@ -303,21 +360,22 @@ fn rms_norm_rope_reference(
                 normalized[dim] = bf16_round_trip_value(x1 * cos - x2 * sin);
                 normalized[dim + rope_half] = bf16_round_trip_value(x1 * sin + x2 * cos);
             }
-            output[row_begin..row_begin + HEAD_DIM].copy_from_slice(&normalized);
+            output[q_token_head_begin..q_token_head_begin + head_dim].copy_from_slice(&normalized);
         }
     }
     output
 }
 
-fn kv_page_reference(k: &[f32], v: &[f32], config: GQAMetalConfig) -> Vec<f32> {
+fn kv_page_reference(core: &GQACore, k: &[f32], v: &[f32], config: GQAMetalConfig) -> Vec<f32> {
     let mut pages = vec![0.0; config.page_bytes as usize];
-    let num_tokens = k.len() / (NUM_KV_HEADS * HEAD_DIM);
+    let head_dim = core.head_dim;
+    let num_tokens = k.len() / core.k_dim();
     for token_index in 0..num_tokens {
-        for head_index in 0..NUM_KV_HEADS {
-            for dim in 0..HEAD_DIM {
-                let source = (token_index * NUM_KV_HEADS + head_index) * HEAD_DIM + dim;
-                let k_target = (head_index * NUM_TOKENS_PER_PAGE + token_index) * HEAD_DIM + dim;
-                let v_target = ((NUM_KV_HEADS + head_index) * NUM_TOKENS_PER_PAGE + token_index) * HEAD_DIM + dim;
+        for head_index in 0..core.num_kv_heads {
+            for dim in 0..head_dim {
+                let source = (token_index * core.num_kv_heads + head_index) * head_dim + dim;
+                let k_target = (head_index * NUM_TOKENS_PER_PAGE + token_index) * head_dim + dim;
+                let v_target = ((core.num_kv_heads + head_index) * NUM_TOKENS_PER_PAGE + token_index) * head_dim + dim;
                 pages[k_target] = bf16_to_f32(fp8_e4m3_to_bf16(bf16_to_fp8_e4m3(f32_to_bf16(k[source]))));
                 pages[v_target] = bf16_to_f32(fp8_e4m3_to_bf16(bf16_to_fp8_e4m3(f32_to_bf16(v[source]))));
             }
@@ -338,23 +396,23 @@ fn sigmoid_bf16(value: f32) -> f32 {
     }
 }
 
-fn fixture_core() -> GQACore {
+fn fixture_core(head_dim: usize) -> GQACore {
     GQACore::new(
         0,
         HIDDEN_DIM,
-        HEAD_DIM,
+        head_dim,
         NUM_Q_HEADS,
         NUM_KV_HEADS,
-        (HEAD_DIM as f32).sqrt().recip(),
+        (head_dim as f32).sqrt().recip(),
     )
 }
 
-fn fixture_config() -> GQAMetalConfig {
+fn fixture_config(head_dim: usize) -> GQAMetalConfig {
     GQAMetalConfig {
         group_size: GROUP_SIZE as u32,
         bits: BITS as u32,
-        page_bytes: (2 * NUM_KV_HEADS * NUM_TOKENS_PER_PAGE * HEAD_DIM * size_of::<u8>()) as u32,
-        rope_dim: HEAD_DIM as u32,
+        page_bytes: (2 * NUM_KV_HEADS * NUM_TOKENS_PER_PAGE * head_dim * size_of::<u8>()) as u32,
+        rope_dim: head_dim as u32,
         norm_eps: NORM_EPS,
         rope_theta: ROPE_THETA,
         rope_scaling: RopeScaling::Default,
@@ -362,9 +420,9 @@ fn fixture_config() -> GQAMetalConfig {
     }
 }
 
-fn affine_reference_shape(num_rows: usize, output_dim: usize, input_dim: usize) -> QuantizedAffineReferenceShape {
+fn affine_reference_shape(num_tokens: usize, output_dim: usize, input_dim: usize) -> QuantizedAffineReferenceShape {
     QuantizedAffineReferenceShape {
-        num_rows,
+        num_rows: num_tokens,
         output_dim,
         input_dim,
         group_size: GROUP_SIZE,

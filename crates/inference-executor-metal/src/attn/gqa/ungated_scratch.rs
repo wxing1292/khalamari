@@ -45,7 +45,7 @@ impl UngatedGQAScratch {
     pub fn new(device: &Device, core: &UngatedGQACore, config: GQAMetalConfig, sdpa_selector: &Selector) -> Self {
         core.validate();
         config.validate();
-        let max_tokens = sdpa_selector.limits().max_map_task_templates as usize;
+        let max_tokens = sdpa_selector.limits().max_tokens as usize;
         let num_sdpa_partial_state_groups = sdpa_selector.limits().partial_state_group_capacity;
         let num_sdpa_partial_states = num_sdpa_partial_state_groups
             .checked_mul(core.num_q_heads)

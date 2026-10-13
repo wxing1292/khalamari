@@ -13,15 +13,16 @@ use crate::metal::ReplayParameterKey;
 use crate::metal::Stream;
 use crate::test_support::ReplayTestCache;
 
-const NUM_ACTIVE_TOKENS: ReplayParameterKey = ReplayParameterKey::new("test.gqa.split_kv_tiled_q.num_active_tokens");
-const NUM_ACTIVE_Q_TOKEN_TILES: ReplayParameterKey = ReplayParameterKey::new("test.gqa.tiled.num_active_q_token_tiles");
-const NUM_ACTIVE_KV_SPLITS: ReplayParameterKey = ReplayParameterKey::new("test.gqa.tiled.num_active_kv_splits");
+const NUM_ACTIVE_TOKENS: ReplayParameterKey = ReplayParameterKey::new("test.gqa.sdpa_sliced_q.num_active_tokens");
+const NUM_ACTIVE_Q_TOKEN_TILES: ReplayParameterKey =
+    ReplayParameterKey::new("test.gqa.sliced_q.num_active_q_token_tiles");
+const NUM_ACTIVE_KV_SPLITS: ReplayParameterKey = ReplayParameterKey::new("test.gqa.sliced_q.num_active_kv_splits");
 
 #[test]
 fn test_pipelines_reused_across_replay_capacities() {
     let device = Device::system_default();
-    let (config, shape) = tiled_workload(128, 8);
-    let execution = tiled_execution(config);
+    let (config, shape) = sliced_q_workload(128, 8);
+    let execution = sliced_q_execution(config);
     let kernels = Compute::new(&device, config, execution, shape);
     for (num_total_tokens, num_total_q_token_tiles, num_total_sdpa_map_task_templates) in
         [(4, 1, 2), (8, 2, 4), (16, 2, 8)]
@@ -37,7 +38,10 @@ fn test_pipelines_reused_across_replay_capacities() {
             },
         );
         assert!(std::ptr::eq(kernels.map.as_raw(), other.map.as_raw()));
-        assert!(std::ptr::eq(kernels.reduce.as_raw(), other.reduce.as_raw()));
+        assert!(std::ptr::eq(
+            kernels.reduce.as_ref().unwrap().as_raw(),
+            other.reduce.as_ref().unwrap().as_raw()
+        ));
     }
 }
 
@@ -71,7 +75,8 @@ fn test_replay_paged_ranges() {
                 num_total_q_token_tiles: 4,
                 num_total_sdpa_map_task_templates: 8,
             };
-            let execution = sdpa::ExecutionVariant::tiled_q(config.sdpa_config(), 16, kv_tokens_per_iteration, 2);
+            let execution =
+                sdpa::ExecutionVariant::sliced_q_per_head(config.sdpa_config(), 16, kv_tokens_per_iteration, 2);
             let kernels = Compute::new(&device, config, execution, shape);
             let q_values = generated_bf16_values(config.q_bytes(shape) as usize / 2, 17);
             let kv_width = (config.num_kv_heads * head_dim) as usize;
@@ -214,27 +219,210 @@ fn test_replay_paged_ranges() {
 }
 
 #[test]
-#[should_panic(expected = "GQA SplitKV TiledQ supports only")]
+fn test_q_token_head_assignments_and_direct_output() {
+    let device = Device::system_default();
+    let stream = Stream::new(&device);
+    for (kind, ratio, tile, heads, stage, head_dim) in [
+        (sdpa::MapKernelKind::QHeadsPerToken, 6, 4, 6, 8, 128),
+        (sdpa::MapKernelKind::QTokensAndHeads, 6, 4, 6, 16, 128),
+        (sdpa::MapKernelKind::QTokensAndHeads, 6, 4, 3, 32, 256),
+        (sdpa::MapKernelKind::QHeadsPerToken, 8, 2, 4, 64, 256),
+        (sdpa::MapKernelKind::QTokensAndHeads, 12, 4, 12, 128, 256),
+        (sdpa::MapKernelKind::QTokensPerHead, 12, 1, 6, 64, 128),
+        (sdpa::MapKernelKind::QTokensPerHead, 6, 32, 1, 8, 128),
+        (sdpa::MapKernelKind::QHeadsPerToken, 8, 32, 8, 128, 256),
+        (sdpa::MapKernelKind::QTokensAndHeads, 12, 16, 12, 64, 256),
+        (sdpa::MapKernelKind::QHeadsPerToken, 5, 4, 3, 64, 256),
+    ] {
+        let context_tokens = if stage >= 64 { [280_usize, 257] } else { [24, 9] };
+        let blocks = context_tokens[0].div_ceil(8);
+        let num_pages = 2 * blocks;
+        let config = Config {
+            num_q_heads: ratio * 2,
+            num_kv_heads: 2,
+            head_dim,
+            scale: (head_dim as f32).sqrt().recip(),
+            page_bytes: 4 * 8 * head_dim,
+            dtype: Dtype::Bfloat16,
+            page_table_layout: PageTableLayout {
+                num_req_slots: 2,
+                num_gqa_layers: 1,
+                num_blocks: blocks as u32,
+                num_page_ids_per_block: 1,
+            },
+        };
+        let execution = sdpa::ExecutionVariant::sliced_q(config.sdpa_config(), kind, tile, stage, heads);
+        let q_width = (config.num_q_heads * head_dim) as usize;
+        let kv_width = (config.num_kv_heads * head_dim) as usize;
+        let q_values = generated_bf16_values(7 * q_width, 17);
+        let keys = context_tokens.map(|n| fp8_e4m3_round_trip(&generated_bf16_values(n * kv_width, 31)));
+        let values = context_tokens.map(|n| fp8_e4m3_round_trip(&generated_bf16_values(n * kv_width, 47)));
+        let mut pages = vec![0_u8; num_pages * config.page_bytes as usize];
+        for req in 0..2 {
+            for page in 0..keys[req].len().div_ceil(8 * kv_width) {
+                let begin = page * 8 * kv_width;
+                let end = (begin + 8 * kv_width).min(keys[req].len());
+                let mut k = vec![0.0; 8 * kv_width];
+                let mut v = k.clone();
+                k[..end - begin].copy_from_slice(&keys[req][begin..end]);
+                v[..end - begin].copy_from_slice(&values[req][begin..end]);
+                let bytes = kv_page_values(config, &k, &v);
+                let physical = num_pages - 1 - (req * blocks + page);
+                pages[physical * bytes.len()..(physical + 1) * bytes.len()].copy_from_slice(&bytes);
+            }
+        }
+        let mut visibility = Vec::new();
+        let mut expected = Vec::new();
+        for token in 0..7 {
+            let req = usize::from(token >= 5);
+            let end = if req == 0 {
+                context_tokens[0] - 4 + token
+            } else {
+                context_tokens[1] - 1 + token - 5
+            };
+            let begin = if token == 6 {
+                end
+            } else if token == 0 {
+                0
+            } else {
+                end - 7
+            };
+            visibility.extend([begin as u32, end as u32]);
+            if begin == end {
+                expected.extend(vec![0.0; q_width]);
+            } else {
+                expected.extend(projected_gqa_reference(
+                    &fixture_core(config),
+                    GQAReferenceInput {
+                        cu_tokens: &[0, 1],
+                        token_indices: &[(end - begin - 1) as u32],
+                        q: &q_values[token * q_width..(token + 1) * q_width],
+                        context_k_by_req: &[&keys[req][begin * kv_width..end * kv_width]],
+                        context_v_by_req: &[&values[req][begin * kv_width..end * kv_width]],
+                    },
+                ));
+            }
+        }
+        let q = bf16_buffer(&device, &q_values);
+        let kv_pages = Buffer::from_slice(&device, &pages);
+        let page_ids = Buffer::from_slice(&device, &(0..num_pages as u32).rev().collect::<Vec<_>>());
+        let req_slots = Buffer::from_slice(&device, &[0_u32, 0, 0, 0, 0, 1, 1]);
+        let visible = Buffer::from_slice(&device, &visibility);
+        let mut q_ranges = Vec::new();
+        for (begin, end) in [(0_u32, 5_u32), (5, 7)] {
+            for first in (begin..end).step_by(tile as usize) {
+                q_ranges.extend([first, (first + tile).min(end)]);
+            }
+        }
+        let ranges = Buffer::from_slice(&device, &q_ranges);
+        for direct in [false, true] {
+            let mut templates = Vec::new();
+            let mut cu = vec![0_u32];
+            for (index, range) in q_ranges.as_chunks::<2>().0.iter().enumerate() {
+                let end = if range[0] < 5 {
+                    context_tokens[0] as u32 - 5 + range[1]
+                } else {
+                    context_tokens[1] as u32 - 6 + range[1]
+                };
+                if direct {
+                    templates.extend([index as u32, 0, end]);
+                } else {
+                    templates.extend([index as u32, 0, 8, index as u32, 8, end]);
+                }
+                cu.push((templates.len() / 3) as u32);
+            }
+            let shape = Shape {
+                num_total_tokens: 7,
+                num_total_q_token_tiles: (q_ranges.len() / 2) as u32,
+                num_total_sdpa_map_task_templates: (templates.len() / 3) as u32,
+            };
+            let templates = Buffer::from_slice(&device, &templates);
+            let cu = Buffer::from_slice(&device, &cu);
+            let output = bf16_buffer(&device, &vec![42.0; q_values.len()]);
+            let kernels = if direct {
+                Compute::new_direct(&device, config, execution, shape)
+            } else {
+                Compute::new(&device, config, execution, shape)
+            };
+            let mut builder = stream.create_replay_program();
+            if direct {
+                builder.record(kernels.invoke_direct(
+                    DirectBuffers {
+                        q: &q,
+                        kv_pages: &kv_pages,
+                        req_slots: &req_slots,
+                        page_ids: &page_ids,
+                        visible_kv_token_ranges: &visible,
+                        q_token_ranges: &ranges,
+                        sdpa_map_task_templates: &templates,
+                        output: &output,
+                    },
+                    ReplayU32::Fixed(0),
+                    ReplayU32::Fixed(7),
+                    ReplayU32::Fixed(shape.num_total_q_token_tiles),
+                ));
+            } else {
+                let partial = Buffer::new_zeroed(&device, config.partial_output_bytes(execution, shape));
+                let sums = Buffer::new_zeroed(&device, config.partial_output_stats_bytes(execution, shape));
+                let maxs = Buffer::new_zeroed(&device, config.partial_output_stats_bytes(execution, shape));
+                builder.record(kernels.invoke_map(
+                    MapBuffers {
+                        q: &q,
+                        kv_pages: &kv_pages,
+                        req_slots: &req_slots,
+                        page_ids: &page_ids,
+                        visible_kv_token_ranges: &visible,
+                        q_token_ranges: &ranges,
+                        sdpa_map_task_templates: &templates,
+                        partial_output: &partial,
+                        partial_exp_sums: &sums,
+                        partial_max_logits: &maxs,
+                    },
+                    ReplayU32::Fixed(0),
+                    ReplayU32::Fixed(7),
+                    ReplayU32::Fixed(shape.num_total_q_token_tiles),
+                    ReplayU32::Fixed(shape.num_total_sdpa_map_task_templates),
+                ));
+                builder.record_with_barrier_before(kernels.invoke_reduce(
+                    ReduceBuffers {
+                        partial_output: &partial,
+                        partial_exp_sums: &sums,
+                        partial_max_logits: &maxs,
+                        q_token_ranges: &ranges,
+                        cu_sdpa_partial_outputs: &cu,
+                        output: &output,
+                    },
+                    ReplayU32::Fixed(shape.num_total_q_token_tiles),
+                ));
+            }
+            stream.submit_replay(&builder.build()).wait();
+            assert_close(&read_bf16_values(&output, q_values.len()), &expected, 2.0e-2);
+        }
+    }
+}
+
+#[test]
+#[should_panic(expected = "GQA SplitKV SlicedQ supports only")]
 fn test_shape_rejects_unsupported_profile() {
-    let (config, shape) = tiled_workload(192, 8);
+    let (config, shape) = sliced_q_workload(192, 8);
     shape.validate(config);
 }
 
 #[test]
-#[should_panic(expected = "GQA SplitKV TiledQ Q-token-range metadata exceeds the shader u32 element-index domain")]
+#[should_panic(expected = "GQA SplitKV SlicedQ Q-token-range metadata exceeds the shader u32 element-index domain")]
 fn test_shape_rejects_shader_index_overflow() {
     let shape = Shape {
         num_total_tokens: u32::MAX,
         num_total_q_token_tiles: u32::MAX,
         num_total_sdpa_map_task_templates: u32::MAX,
     };
-    let (config, _) = tiled_workload(256, 16);
+    let (config, _) = sliced_q_workload(256, 16);
     shape.validate(config);
 }
 
 #[test]
 #[should_panic(
-    expected = "GQA SplitKV TiledQ visible K/V-token-range metadata exceeds the shader u32 element-index domain"
+    expected = "GQA SplitKV SlicedQ visible K/V-token-range metadata exceeds the shader u32 element-index domain"
 )]
 fn test_shape_rejects_visible_range_index_overflow() {
     let shape = Shape {
@@ -242,7 +430,7 @@ fn test_shape_rejects_visible_range_index_overflow() {
         num_total_q_token_tiles: 1,
         num_total_sdpa_map_task_templates: 1,
     };
-    let (config, _) = tiled_workload(256, 16);
+    let (config, _) = sliced_q_workload(256, 16);
     shape.validate(config);
 }
 
@@ -250,13 +438,13 @@ fn test_shape_rejects_visible_range_index_overflow() {
 fn assert_replay_bucketing() {
     let device = Device::system_default();
     let stream = Stream::new(&device);
-    let (config, base_shape) = tiled_workload(128, 8);
+    let (config, base_shape) = sliced_q_workload(128, 8);
     let shape = Shape {
         num_total_tokens: 4,
         num_total_sdpa_map_task_templates: 2,
         ..base_shape
     };
-    let execution = tiled_execution(config);
+    let execution = sliced_q_execution(config);
     let kernels = Compute::new(&device, config, execution, shape);
     let q_values = generated_bf16_values(config.q_bytes(shape) as usize / size_of::<u16>(), 0x4751_4154);
     let kv_values_per_kind =
@@ -362,7 +550,7 @@ fn assert_replay_bucketing() {
     }
 }
 
-fn tiled_workload(head_dim: u32, num_tokens_per_page: u32) -> (Config, Shape) {
+fn sliced_q_workload(head_dim: u32, num_tokens_per_page: u32) -> (Config, Shape) {
     (
         Config {
             num_q_heads: 5,
@@ -386,8 +574,8 @@ fn tiled_workload(head_dim: u32, num_tokens_per_page: u32) -> (Config, Shape) {
     )
 }
 
-fn tiled_execution(config: Config) -> sdpa::ExecutionVariant {
-    sdpa::ExecutionVariant::tiled_q(config.sdpa_config(), 8, 16, 5)
+fn sliced_q_execution(config: Config) -> sdpa::ExecutionVariant {
+    sdpa::ExecutionVariant::sliced_q_per_head(config.sdpa_config(), 8, 16, 5)
 }
 
 fn fixture_core(config: Config) -> GQACore {
@@ -467,7 +655,7 @@ fn assert_close(actual: &[f32], expected: &[f32], tolerance: f32) {
     let mean_abs_tolerance = tolerance * 0.25;
     assert!(
         mean_abs_error <= mean_abs_tolerance,
-        "GQA TiledQ mean mismatch: mean_abs_error={mean_abs_error} mean_abs_tolerance={mean_abs_tolerance}"
+        "GQA SlicedQ mean mismatch: mean_abs_error={mean_abs_error} mean_abs_tolerance={mean_abs_tolerance}"
     );
     for (index, (&actual, &expected)) in actual.iter().zip(expected).enumerate() {
         assert!(

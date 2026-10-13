@@ -1241,7 +1241,7 @@ Both helpers also record cooldown and speculative-acceptance fields.
 
 The Qwen3.5/3.6/3.8 helper contains the user-supplied result table received on 2026-09-19.
 The user identified main tip at receipt: `d6dc5da7`, with source tree `38f972e038150ee351c16dba6ae33bde7242670f`.
-This reference precedes history cleanup and the TiledQ pipeline-capacity fix. It does not measure that fix.
+This reference precedes history cleanup and the SlicedQ pipeline-capacity fix. It does not measure that fix.
 Dirty state is unknown. The helper retains the existing machine and configuration profile.
 The table provides throughput, output counts, tokens per chunk, and accepted/proposed counts.
 It does not provide raw CONFIG/SUMMARY rows, run count, variance, output hashes, TTFT, or inter-chunk latency.

@@ -1,4 +1,4 @@
-use crate::components::gqa::split_kv::single_q;
+use crate::components::gqa::sdpa::sliced_kv;
 use crate::components::qsa_sparse_gqa;
 use crate::metal::Buffer;
 use crate::metal::CommandRecorder;
@@ -10,19 +10,19 @@ use crate::metal::Operator;
 /// retain their Map-to-Reduce dependencies inside the disjoint output scope.
 pub struct Invocation<'a> {
     output: &'a Buffer,
-    dense_map: single_q::MapInvocation<'a>,
+    dense_map: sliced_kv::MapInvocation<'a>,
     sparse_map: qsa_sparse_gqa::MapInvocation<'a>,
-    dense_reduce: single_q::MappedReduceInvocation<'a>,
-    sparse_reduce: Option<single_q::MappedReduceInvocation<'a>>,
+    dense_reduce: sliced_kv::MappedReduceInvocation<'a>,
+    sparse_reduce: Option<sliced_kv::MappedReduceInvocation<'a>>,
 }
 
 impl<'a> Invocation<'a> {
     pub fn new(
         output: &'a Buffer,
-        dense_map: single_q::MapInvocation<'a>,
+        dense_map: sliced_kv::MapInvocation<'a>,
         sparse_map: qsa_sparse_gqa::MapInvocation<'a>,
-        dense_reduce: single_q::MappedReduceInvocation<'a>,
-        sparse_reduce: Option<single_q::MappedReduceInvocation<'a>>,
+        dense_reduce: sliced_kv::MappedReduceInvocation<'a>,
+        sparse_reduce: Option<sliced_kv::MappedReduceInvocation<'a>>,
     ) -> Self {
         Self {
             output,

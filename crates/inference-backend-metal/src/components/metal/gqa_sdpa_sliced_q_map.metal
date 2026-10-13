@@ -1,4 +1,8 @@
-// SplitKV TiledQ SDPA map. One MapThreadBlockTask maps 1:1 to one threadblock. Its
+// Generic sliced-Q SDPA map. Q_TOKEN_HEAD_LAYOUT assigns Q tokens and Q heads
+// to SIMDgroups. Each assignment retains its token, head, and visibility mask.
+// DIRECT_OUTPUT writes final output for one full-range template per Q range.
+// Otherwise the kernel writes the shared SplitKV partial-state ABI.
+// One MapThreadBlockTask maps 1:1 to one threadblock. Its
 // fields are sourced as follows:
 //
 // Map task template {     // materialized; three u32 fields
@@ -15,14 +19,14 @@
 // }
 //
 // visible_kv_token_ranges stores one request-local half-open
-// [kv_token_begin, kv_token_end) range for each flat Q token. Each row computes
+// [kv_token_begin, kv_token_end) range for each flat Q token. Each Q token/head computes
 // the intersection of this range and its Map task-template range.
 //
 // A sentinel Map task template returns without writing any partial output or
 // statistics.
 
 // Steel fragments keep Q, softmax weights, and the output numerator in REGISTER.
-kernel void gqa_split_kv_tiled_q_map(
+kernel void gqa_sdpa_sliced_q_map(
     device const bfloat16_t* q [[buffer(0)]],
     device const uchar* kv_pages [[buffer(1)]],
     device const uint* req_slots [[buffer(2)]],
@@ -44,11 +48,9 @@ kernel void gqa_split_kv_tiled_q_map(
 {
     constexpr int NUM_SIMD_LANES = 32;
     constexpr int NUM_SIMDGROUPS = MAP_REQUIRED_THREADS / NUM_SIMD_LANES;
-    constexpr int NUM_SIMDGROUPS_PER_Q_HEAD = MAX_Q_TOKENS / 8;
     constexpr int NUM_HEAD_FRAGMENTS = HEAD_DIM / 8;
     constexpr int NUM_KV_TOKEN_FRAGMENTS = KV_TOKENS_PER_ITERATION / 8;
     constexpr int Q_HEADS_PER_KV_HEAD = NUM_Q_HEADS / NUM_KV_HEADS;
-    static_assert(NUM_SIMDGROUPS == NUM_SIMDGROUPS_PER_Q_HEAD * MAX_Q_HEADS);
 
     const uint map_task_template_index = threadblock_position.y;
     if (map_task_template_index >= num_active_kv_splits) {
@@ -74,21 +76,30 @@ kernel void gqa_split_kv_tiled_q_map(
     const uint q_head_range_begin = q_head_range_index * uint(MAX_Q_HEADS);
     const uint num_active_q_heads = min(
         uint(MAX_Q_HEADS), uint(Q_HEADS_PER_KV_HEAD) - q_head_range_begin);
-    const uint local_q_head_index = simdgroup_index / uint(NUM_SIMDGROUPS_PER_Q_HEAD);
-    const uint token_fragment_index = simdgroup_index % uint(NUM_SIMDGROUPS_PER_Q_HEAD);
+    const short2 coordinate = mlx::steel::BaseMMAFrag<float, 8, 8>::get_coord(ushort(lane));
+    const ushort fragment_col = coordinate.x;
+    const uint q_token_head_index = simdgroup_index * 8 + uint(coordinate.y);
+#if Q_TOKEN_HEAD_LAYOUT == 0
+    constexpr uint token_fragments = (MAX_Q_TOKENS + 7) / 8;
+    const uint local_q_head_index = simdgroup_index / token_fragments;
+    const uint token_offset = (simdgroup_index % token_fragments) * 8 + uint(coordinate.y);
+#elif Q_TOKEN_HEAD_LAYOUT == 1
+    constexpr uint padded_q_heads = ((MAX_Q_HEADS + 7) / 8) * 8;
+    const uint local_q_head_index = q_token_head_index % padded_q_heads;
+    const uint token_offset = q_token_head_index / padded_q_heads;
+#else
+    const uint local_q_head_index = q_token_head_index % uint(MAX_Q_HEADS);
+    const uint token_offset = q_token_head_index / uint(MAX_Q_HEADS);
+#endif
     const bool active_q_head = local_q_head_index < num_active_q_heads;
     const uint q_head_index =
         kv_head_index * uint(Q_HEADS_PER_KV_HEAD) + q_head_range_begin + local_q_head_index;
 
     constexpr int PAD = 16 / int(sizeof(bfloat16_t));
-    constexpr int LEADING_DIM = HEAD_DIM + PAD;
+    constexpr int LEADING_DIM = KV_DIM_TILE + PAD;
     threadgroup bfloat16_t* k_shared = reinterpret_cast<threadgroup bfloat16_t*>(shared_mem);
     threadgroup bfloat16_t* v_shared = k_shared;
 
-    const short2 coordinate = mlx::steel::BaseMMAFrag<float, 8, 8>::get_coord(ushort(lane));
-    const ushort token_fragment_offset = coordinate.y;
-    const ushort fragment_col = coordinate.x;
-    const uint token_offset = token_fragment_index * 8 + uint(token_fragment_offset);
     const bool inactive_token = !active_q_head || token_offset >= num_q_tokens_in_range;
     const uint flat_q_token_index = flat_token_start + token_offset;
     const uint visible_kv_token_begin = inactive_token ? 0 : visible_kv_token_ranges[flat_q_token_index * 2];
@@ -100,10 +111,10 @@ kernel void gqa_split_kv_tiled_q_map(
     QueryTile query;
     OutputTile output;
     if (!inactive_token) {
-        const device bfloat16_t* row = q + ((ulong)flat_q_token_index * NUM_Q_HEADS + q_head_index) * HEAD_DIM;
+        const device bfloat16_t* query_values = q + ((ulong)flat_q_token_index * NUM_Q_HEADS + q_head_index) * HEAD_DIM;
         #pragma unroll
         for (int f = 0; f < NUM_HEAD_FRAGMENTS; ++f) {
-            query.frag_at(0, f) = bfloat2(row[f * 8 + fragment_col], row[f * 8 + fragment_col + 1]);
+            query.frag_at(0, f) = bfloat2(query_values[f * 8 + fragment_col], query_values[f * 8 + fragment_col + 1]);
         }
     }
     float running_max = -INFINITY;
@@ -113,90 +124,43 @@ kernel void gqa_split_kv_tiled_q_map(
         (kv_token_end - kv_token_begin + uint(KV_TOKENS_PER_ITERATION - 1)) / uint(KV_TOKENS_PER_ITERATION);
     for (uint kv_iteration_index = 0; kv_iteration_index < num_kv_iterations; ++kv_iteration_index) {
         const uint kv_iteration_begin = kv_token_begin + kv_iteration_index * uint(KV_TOKENS_PER_ITERATION);
-        for (uint kv_token_offset = simdgroup_index; kv_token_offset < uint(KV_TOKENS_PER_ITERATION);
-             kv_token_offset += uint(NUM_SIMDGROUPS)) {
-            const uint kv_token_index = kv_iteration_begin + kv_token_offset;
-            if (kv_token_index < kv_token_end) {
-                const uint block_index = kv_token_index / uint(NUM_TOKENS_PER_PAGE * NUM_PAGE_IDS_PER_BLOCK);
-                const uint page_id_index =
-                    (kv_token_index / uint(NUM_TOKENS_PER_PAGE)) % uint(NUM_PAGE_IDS_PER_BLOCK);
-                const uint page_token_index = kv_token_index % uint(NUM_TOKENS_PER_PAGE);
-                const ulong page_table_index =
-                    ((((ulong)req_slot * (ulong)NUM_GQA_LAYERS + (ulong)gqa_layer_index)
-                      * (ulong)NUM_BLOCKS + (ulong)block_index)
-                     * (ulong)NUM_PAGE_IDS_PER_BLOCK) + (ulong)page_id_index;
-                const ulong page_id = (ulong)page_ids[page_table_index];
-                const ulong page_base = page_id * (ulong)PAGE_BYTES;
-                const device uchar* k = kv_pages + page_base
-                    + (ulong)(((0 * NUM_KV_HEADS + kv_head_index) * NUM_TOKENS_PER_PAGE + page_token_index) * HEAD_DIM);
-                constexpr uint LOAD_VALUES = 8;
-                #pragma unroll
-                for (uint dim = lane * LOAD_VALUES; dim < uint(HEAD_DIM);
-                     dim += uint(NUM_SIMD_LANES) * LOAD_VALUES) {
-                    const uint2 k_fp8 = *reinterpret_cast<device const uint2*>(k + dim);
-                    *reinterpret_cast<threadgroup uint4*>(
-                        k_shared + kv_token_offset * LEADING_DIM + dim) = fp8_e4m3x8_to_bf16x8(k_fp8);
-                }
-            } else {
-                constexpr uint LOAD_VALUES = 8;
-                #pragma unroll
-                for (uint dim = lane * LOAD_VALUES; dim < uint(HEAD_DIM);
-                     dim += uint(NUM_SIMD_LANES) * LOAD_VALUES) {
-                    *reinterpret_cast<threadgroup uint4*>(
-                        k_shared + kv_token_offset * LEADING_DIM + dim) = uint4(0);
-                }
-            }
-        }
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-
         ScoreTile scores;
-        #pragma unroll
-        for (int dim_fragment = 0; dim_fragment < NUM_HEAD_FRAGMENTS; ++dim_fragment) {
-            auto q_fragment = query.mat_at(0, dim_fragment);
+        for (uint dim_begin = 0; dim_begin < uint(HEAD_DIM); dim_begin += uint(KV_DIM_TILE)) {
+            for (uint kv_token_offset = simdgroup_index; kv_token_offset < uint(KV_TOKENS_PER_ITERATION);
+                 kv_token_offset += uint(NUM_SIMDGROUPS)) {
+                const uint kv_token_index = kv_iteration_begin + kv_token_offset;
+                for (uint dim = lane * 8; dim < uint(KV_DIM_TILE); dim += 32 * 8) {
+                    if (kv_token_index < kv_token_end) {
+                        const uint block_index = kv_token_index / uint(NUM_TOKENS_PER_PAGE * NUM_PAGE_IDS_PER_BLOCK);
+                        const uint page_id_index = (kv_token_index / uint(NUM_TOKENS_PER_PAGE)) % uint(NUM_PAGE_IDS_PER_BLOCK);
+                        const uint page_token_index = kv_token_index % uint(NUM_TOKENS_PER_PAGE);
+                        const ulong table_index = ((((ulong)req_slot * NUM_GQA_LAYERS + gqa_layer_index)
+                            * NUM_BLOCKS + block_index) * NUM_PAGE_IDS_PER_BLOCK) + page_id_index;
+                        const ulong address = (ulong)page_ids[table_index] * PAGE_BYTES
+                            + (ulong)((kv_head_index * NUM_TOKENS_PER_PAGE + page_token_index) * HEAD_DIM)
+                            + dim_begin + dim;
+                        *reinterpret_cast<threadgroup uint4*>(k_shared + kv_token_offset * LEADING_DIM + dim) =
+                            fp8_e4m3x8_to_bf16x8(*reinterpret_cast<device const uint2*>(kv_pages + address));
+                    } else {
+                        *reinterpret_cast<threadgroup uint4*>(k_shared + kv_token_offset * LEADING_DIM + dim) = uint4(0);
+                    }
+                }
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
             #pragma unroll
-            for (int f = 0; f < NUM_KV_TOKEN_FRAGMENTS; ++f) {
-                simdgroup_matrix<bfloat16_t, 8, 8> k_fragment;
-                simdgroup_load(k_fragment, k_shared + f * 8 * LEADING_DIM + dim_fragment * 8,
-                              LEADING_DIM, ulong2(0), true);
-                auto score_fragment = scores.mat_at(0, f);
-                simdgroup_multiply_accumulate(score_fragment, q_fragment, k_fragment, score_fragment);
-                scores.frag_at(0, f) = reinterpret_cast<thread float2&>(score_fragment.thread_elements());
-            }
-        }
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-        for (uint kv_token_offset = simdgroup_index; kv_token_offset < uint(KV_TOKENS_PER_ITERATION);
-             kv_token_offset += uint(NUM_SIMDGROUPS)) {
-            const uint kv_token_index = kv_iteration_begin + kv_token_offset;
-            if (kv_token_index < kv_token_end) {
-                const uint block_index = kv_token_index / uint(NUM_TOKENS_PER_PAGE * NUM_PAGE_IDS_PER_BLOCK);
-                const uint page_id_index =
-                    (kv_token_index / uint(NUM_TOKENS_PER_PAGE)) % uint(NUM_PAGE_IDS_PER_BLOCK);
-                const uint page_token_index = kv_token_index % uint(NUM_TOKENS_PER_PAGE);
-                const ulong page_table_index =
-                    ((((ulong)req_slot * (ulong)NUM_GQA_LAYERS + (ulong)gqa_layer_index)
-                      * (ulong)NUM_BLOCKS + (ulong)block_index)
-                     * (ulong)NUM_PAGE_IDS_PER_BLOCK) + (ulong)page_id_index;
-                const ulong page_id = (ulong)page_ids[page_table_index];
-                const ulong page_base = page_id * (ulong)PAGE_BYTES;
-                const device uchar* v = kv_pages + page_base
-                    + (ulong)(((1 * NUM_KV_HEADS + kv_head_index) * NUM_TOKENS_PER_PAGE + page_token_index) * HEAD_DIM);
-                constexpr uint LOAD_VALUES = 8;
+            for (int d = 0; d < KV_DIM_TILE / 8; ++d) {
+                auto q_fragment = query.mat_at(0, dim_begin / 8 + d);
                 #pragma unroll
-                for (uint dim = lane * LOAD_VALUES; dim < uint(HEAD_DIM);
-                     dim += uint(NUM_SIMD_LANES) * LOAD_VALUES) {
-                    const uint2 v_fp8 = *reinterpret_cast<device const uint2*>(v + dim);
-                    *reinterpret_cast<threadgroup uint4*>(
-                        v_shared + kv_token_offset * LEADING_DIM + dim) = fp8_e4m3x8_to_bf16x8(v_fp8);
-                }
-            } else {
-                constexpr uint LOAD_VALUES = 8;
-                #pragma unroll
-                for (uint dim = lane * LOAD_VALUES; dim < uint(HEAD_DIM);
-                     dim += uint(NUM_SIMD_LANES) * LOAD_VALUES) {
-                    *reinterpret_cast<threadgroup uint4*>(
-                        v_shared + kv_token_offset * LEADING_DIM + dim) = uint4(0);
+                for (int f = 0; f < NUM_KV_TOKEN_FRAGMENTS; ++f) {
+                    simdgroup_matrix<bfloat16_t, 8, 8> k_fragment;
+                    simdgroup_load(k_fragment, k_shared + f * 8 * LEADING_DIM + d * 8,
+                                  LEADING_DIM, ulong2(0), true);
+                    auto score_fragment = scores.mat_at(0, f);
+                    simdgroup_multiply_accumulate(score_fragment, q_fragment, k_fragment, score_fragment);
+                    scores.frag_at(0, f) = reinterpret_cast<thread float2&>(score_fragment.thread_elements());
                 }
             }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
         }
 
         const bool fully_visible = !inactive_token && kv_iteration_begin >= visible_kv_token_begin
@@ -255,27 +219,48 @@ kernel void gqa_split_kv_tiled_q_map(
             output.frag_at(0, dim_fragment) *= running_scale;
         }
 
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-        #pragma unroll
-        for (int kv_token_fragment = 0; kv_token_fragment < NUM_KV_TOKEN_FRAGMENTS; ++kv_token_fragment) {
-            auto probability_fragment = scores.mat_at(0, kv_token_fragment);
-            #pragma unroll
-            for (int dim_fragment = 0; dim_fragment < NUM_HEAD_FRAGMENTS; ++dim_fragment) {
-                simdgroup_matrix<bfloat16_t, 8, 8> v_fragment;
-                simdgroup_load(
-                    v_fragment,
-                    v_shared + kv_token_fragment * 8 * LEADING_DIM + dim_fragment * 8,
-                    LEADING_DIM);
-                auto output_fragment = output.mat_at(0, dim_fragment);
-                simdgroup_multiply_accumulate(output_fragment, probability_fragment, v_fragment, output_fragment);
-                output.frag_at(0, dim_fragment) =
-                    reinterpret_cast<thread float2&>(output_fragment.thread_elements());
+        for (uint dim_begin = 0; dim_begin < uint(HEAD_DIM); dim_begin += uint(KV_DIM_TILE)) {
+            for (uint kv_token_offset = simdgroup_index; kv_token_offset < uint(KV_TOKENS_PER_ITERATION);
+                 kv_token_offset += uint(NUM_SIMDGROUPS)) {
+                const uint kv_token_index = kv_iteration_begin + kv_token_offset;
+                for (uint dim = lane * 8; dim < uint(KV_DIM_TILE); dim += 32 * 8) {
+                    if (kv_token_index < kv_token_end) {
+                        const uint block_index = kv_token_index / uint(NUM_TOKENS_PER_PAGE * NUM_PAGE_IDS_PER_BLOCK);
+                        const uint page_id_index = (kv_token_index / uint(NUM_TOKENS_PER_PAGE)) % uint(NUM_PAGE_IDS_PER_BLOCK);
+                        const uint page_token_index = kv_token_index % uint(NUM_TOKENS_PER_PAGE);
+                        const ulong table_index = ((((ulong)req_slot * NUM_GQA_LAYERS + gqa_layer_index)
+                            * NUM_BLOCKS + block_index) * NUM_PAGE_IDS_PER_BLOCK) + page_id_index;
+                        const ulong address = (ulong)page_ids[table_index] * PAGE_BYTES
+                            + (ulong)(((NUM_KV_HEADS + kv_head_index) * NUM_TOKENS_PER_PAGE + page_token_index) * HEAD_DIM)
+                            + dim_begin + dim;
+                        *reinterpret_cast<threadgroup uint4*>(v_shared + kv_token_offset * LEADING_DIM + dim) =
+                            fp8_e4m3x8_to_bf16x8(*reinterpret_cast<device const uint2*>(kv_pages + address));
+                    } else {
+                        *reinterpret_cast<threadgroup uint4*>(v_shared + kv_token_offset * LEADING_DIM + dim) = uint4(0);
+                    }
+                }
             }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+            #pragma unroll
+            for (int f = 0; f < NUM_KV_TOKEN_FRAGMENTS; ++f) {
+                auto probability_fragment = scores.mat_at(0, f);
+                #pragma unroll
+                for (int d = 0; d < KV_DIM_TILE / 8; ++d) {
+                    simdgroup_matrix<bfloat16_t, 8, 8> v_fragment;
+                    simdgroup_load(v_fragment, v_shared + f * 8 * LEADING_DIM + d * 8, LEADING_DIM);
+                    auto output_fragment = output.mat_at(0, dim_begin / 8 + d);
+                    simdgroup_multiply_accumulate(output_fragment, probability_fragment, v_fragment, output_fragment);
+                    output.frag_at(0, dim_begin / 8 + d) = reinterpret_cast<thread float2&>(output_fragment.thread_elements());
+                }
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
         }
-        threadgroup_barrier(mem_flags::mem_threadgroup);
     }
 
     if (!inactive_token) {
+#if DIRECT_OUTPUT
+        const ulong partial_output_index = (ulong)flat_q_token_index * NUM_Q_HEADS + q_head_index;
+#else
         const ulong partial_output_index =
             ((ulong)map_task_template_index * NUM_Q_HEADS + (ulong)q_head_index) * MAX_Q_TOKENS
             + (ulong)token_offset;
@@ -284,6 +269,7 @@ kernel void gqa_split_kv_tiled_q_map(
             partial_max_logits[partial_output_index] =
                 running_sum == 0.0f ? -INFINITY : running_max;
         }
+#endif
         const float inverse_sum = running_sum > 0.0f ? 1.0f / running_sum : 0.0f;
         #pragma unroll
         for (int dim_fragment = 0; dim_fragment < NUM_HEAD_FRAGMENTS; ++dim_fragment) {
