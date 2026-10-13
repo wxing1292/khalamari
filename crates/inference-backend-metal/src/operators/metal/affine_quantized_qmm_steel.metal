@@ -15,8 +15,9 @@ template <typename InT, typename ParamT, typename OutT,
   constexpr bool same_dtype = is_same_v<InT, ParamT> && is_same_v<InT, OutT>;
   using T = conditional_t<same_dtype, InT, float>;
   constexpr int LD = BK + 16 / sizeof(T);
+  // WM/WN partition output fragments. Each SIMDgroup traverses all K through sequential BK stages.
   constexpr int WM = BM >= 32 ? 2 : 1;
-  constexpr int WN = 2;
+  constexpr int WN = BM < 32 ? 4 : 2;
   threadgroup T Xs[BM * LD];
   threadgroup T Ws[BN * LD];
   using mma_t = mlx::steel::BlockMMA<T, OutT, BM, BN, BK, WM, WN, false, true, LD, LD>;

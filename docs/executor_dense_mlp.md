@@ -48,7 +48,9 @@ crates/inference-backend-metal/src/components/dense_mlp.rs
 crates/inference-backend-metal/src/components/dense_mlp_test.rs
 crates/inference-backend-metal/src/operators/affine_quantized.rs
 crates/inference-backend-metal/src/operators/metal/affine_quantized_gate_up_swiglu.metal
+crates/inference-backend-metal/src/operators/metal/affine_quantized_qmm_steel.metal
 crates/inference-backend-metal/src/operators/metal/affine_quantized_gate_up_swiglu_steel.metal
+crates/inference-backend-metal/src/operators/metal/affine_quantized_small_qmm.metal
 ```
 
 ## Shape model
@@ -182,9 +184,13 @@ hidden_state[num_tokens, hidden_dim]
 
 Gate and up weights remain stacked along the output dimension. `config.n` is `2 * intermediate_dim`.
 The fused affine operator produces `intermediate_dim` output columns.
-QMV and QMM assign gate and up to separate SIMDgroups.
-Each SIMDgroup loads weights and accumulates only its assigned projection.
-Both paths transfer their rounded projection values through threadgroup memory.
+QMV assigns gate and up to separate SIMDgroups.
+QMM keeps separate gate and up accumulators in each SIMDgroup.
+Steel QMM loads the input tile once and stages the gate and up weights in sequence.
+Register QMM reads packed weights directly into the SIMDgroup operands or lane-local dot products.
+QMV transfers rounded projection values through threadgroup memory.
+Steel and sliced-K MMA QMM keep both projection accumulators in registers.
+Scalar register QMM assigns gate and up to separate SIMDgroups.
 Both paths round gate and up to the output dtype, compute
 `(gate / (1 + exp(-gate))) * up` in F32, and round the result to the output dtype.
 This sequence preserves the dense MLP reference contract.
@@ -244,19 +250,108 @@ choices so that a replay bucket cannot cross either topology boundary.
 It constructs the gate/up/SwiGLU operator with `new_gate_up_swiglu` and the down operator with `new`.
 Each `affine_quantized::Matmul` owns the QMV/QMM candidates and selects its kernel from the fixed epilogue and total
 row count. Selection and topology boundaries use the same selector. They do not depend on registry entry order.
-QMM uses Steel `BlockMMA` with F32 accumulators and 8x8 SIMDgroup matrix operations.
+`operators/metal/affine_quantized_small_qmm.metal` owns the register-based small-row kernels.
+The shared affine selector uses dimensions, quantization, and dtypes. Model code does not arm a separate route.
+For eligible Q4 FP16 or BF16 operands, rows 4 through 8 use `QmmSlicedK`.
+sliced-K MMA constructs exact `128 + q` matrix operands in registers. It applies scale and bias after each group dot product.
+The kernel retains F32 accumulators and the storage-dtype SwiGLU intermediate rounding.
+It does not round each dequantized weight to BF16 or FP16 before the dot product.
+This reduction and weight-rounding sequence can differ numerically from Steel QMM.
+
+sliced-K MMA uses sliced-K: it assigns K partitions to SIMDgroups in one threadgroup.
+The family name does not require eight SIMDgroups. The geometry selects four or eight.
+`n` is the output width of one projection. For fused gate/up, it is `config.n / 2`.
+The K partition count stays fixed across row tiles.
+
+| Projection shape | SIMDgroups per threadgroup | Default CT for 4–8 rows |
+| --- | ---: | ---: |
+| `n >= 65536` | 4 | 4 |
+| `n < 65536` and `k >= 16384` | 8 | 2 |
+| Other shapes | 8 | 1 |
+
+Eligibility requires one shared operand dtype, Q4, `n >= 1024`, complete output tiles, and
+`k % (group_size * num_simdgroups) == 0`.
+The existing affine contract supports group sizes 32, 64, and 128. It does not add Q5 support.
+Rows 4–8 use RT1 and the default CT above.
+The 9–64-row policy requires BF16, group64, `n >= 4096`, and `k >= 4096`.
+It rounds the recorded row capacity up to a multiple of eight before it selects RT and CT.
+
+| Rounded row capacity | Ordinary RT / initial CT | Fused SwiGLU RT / CT |
+| ---: | --- | --- |
+| 16 | 2 / 4 | 2 / 1 |
+| 24 | 3 / 4 | 3 / 1 |
+| 32 | 2 / 4 | 4 / 1 |
+| 40 | 1 / 2 | 1 / 2 |
+| 48 | 3 / 4 | 3 / 1 |
+| 56 | 1 / 2 | 1 / 2 |
+| 64 | 2 / 4 | Steel |
+
+For `n >= 65536`, rounded capacities 32, 56, and 64 retain Steel.
+For the other entries, CT halves until `n % (8 * CT) == 0`.
+Ordinary entries with RT greater than one also reduce CT until the grid has at least 256 threadblocks or CT reaches one.
+This condition preserves output parallelism for smaller projection widths.
+The selector uses the recorded row capacity. It does not use the active row count.
+
+```text
+one threadgroup:
+  output tile = (8 * RT) rows x (8 * CT) columns
+  threads     = 32 * num_simdgroups
+  grid        = ceil(num_total_rows / (8 * RT)) x (n / (8 * CT))
+
+  packed weight fragment --+--> row tile 0
+                           +--> row tile 1
+                           +--> row tile 2
+                           +--> row tile 3
+
+  K partitions -> F32 partials in threadgroup memory -> one reduction
+  threadgroup memory bytes = matrices * RT * CT * num_simdgroups * 32 * 8
+  matrices = 1 for ordinary projection; 2 for fused gate/up
+```
+
+RT reuses each packed weight fragment across 8-row matrix tiles.
+It preserves each row's group accumulation order, K partitions, and reduction order.
+It also preserves storage-dtype gate/up rounding before SwiGLU.
+The kernel does not allocate a global partial buffer or use a second reduction dispatch.
+Active rows are submission parameters. A threadgroup outside the active row range returns before it loads input.
+Padded lanes in the last active tile read the last active input row and never write inactive output rows.
+Initialization registers only variants that fit device threadgroup memory and pipeline thread limits.
+An unavailable sliced-K MMA geometry uses the existing base policy.
+Topology boundaries use the actual registered selection.
+`KernelKind::QmmSlicedK` records RT and CT. Active row changes do not compile a kernel.
+MLP, GQA projections, GDN projections, and the LM head use this same affine selector.
+
+Three-row projections use lane-strided QMM when all operands share FP16 or BF16,
+weights use Q4 or Q8, `n >= 4096`, `n % 4 == 0`, and `k % 64 == 0`.
+For `n >= 100000` with `n % 32 == 0`, `QmmSimdgroupsBm4Bn32` assigns four columns to each of eight SIMDgroups.
+Otherwise, `QmmSlicedKBm3Bn4` assigns two K partitions to each four-column threadgroup.
+This scalar kernel partitions K across SIMDgroups in one threadgroup.
+The K-partition reduction stays inside that threadgroup. It needs no global partial buffer or second dispatch.
+Both variants support stacked gate/up weights and the storage-dtype SwiGLU epilogue.
+Each SIMDgroup keeps one projection's accumulator array. Fused gate/up doubles the SIMDgroup count.
+The threadgroup transfers both projection results before the fused activation. It does not allocate a device scratch buffer.
+The compiler emits literal row and column accumulator indices. The column kernel unrolls each packed-value loop.
+Weight, scale, and bias row bases use 64-bit offsets before the K loop. The loop uses row-local indices.
+
+Other shapes retain the existing QMV and Steel QMM policy.
+Steel QMM uses `BlockMMA` with F32 accumulators and 8x8 SIMDgroup matrix operations.
 `operators/metal/affine_quantized_qmm_steel.metal` owns ordinary QMM.
 `operators/metal/affine_quantized_gate_up_swiglu_steel.metal` owns fused gate/up/SwiGLU.
-Both use BK32. Each block loads an input tile and dequantizes a weight tile into SMEM.
+Each block loads an input tile and dequantizes a weight tile into SMEM.
+BM8 and BM16 use BK64 when all operands use BF16, the quantization group is at least 64, and `n < 65536`.
+The other configurations use BK32.
+Initialization requires `k % group_size == 0`. Eligible BK64 configurations therefore have no K tail.
+The shader specialization and pipeline-memory validation use the same BK value.
 The fused kernel reuses the input tile across gate and up. The projections reuse one weight staging region.
 Both projection accumulators remain in REGISTER until the fused activation.
 The kernel rounds each projection to its storage dtype before it computes SwiGLU in F32.
-Same-dtype operands retain storage-dtype rounding. Mixed-dtype operands use F32. QMV remains the small-row path.
+Steel same-dtype operands retain storage-dtype weight rounding. Mixed-dtype operands use F32.
+QMV remains the one- and two-row path and serves shapes outside the register-QMM domain.
 Full tiles use unchecked loaders. Partial tiles retain active-row and output-column masks.
 The model and executor provide the complete dense-MLP dimensions and active row count.
 They do not select a kernel or tile.
 
-Large dense MLPs use this base policy when `hidden_dim > 4096` or `intermediate_dim > 4096`:
+After the eligible register-QMM rules above, large dense MLPs use this base policy when
+`hidden_dim > 4096` or `intermediate_dim > 4096`:
 
 | Recorded row capacity | Gate/up/SwiGLU | Down |
 | ---: | --- | --- |
@@ -274,10 +369,20 @@ The affine config must have `n >= 4096` and `k >= 4096`.
 | 17–2047 | QMM BM32/BN32/BK32 | QMM BM32/BN64/BK32 |
 | 2048 or more | QMM BM64/BN32/BK32 | QMM BM64/BN64/BK32 |
 
-The selector exposes the 2048-row topology boundary to replay bucketing.
+An eligible ordinary projection keeps BM16/BN32 for 17–32 rows when
+`ceil(n / 64) < 256`.
+This rule applies when the BM32/BN64 grid has fewer than 256 threadblocks.
+BM16/BN32 launches `2 * ceil(n / 32)` threadblocks and uses BK64 under the existing BK rule.
+Each threadblock accumulates the complete K dimension. This path does not use split-K.
+This base rule applies after the sliced-K MMA rules above.
+
+The selector exposes each selected topology boundary to replay bucketing.
+sliced-K MMA exposes changes at 9, 17, 25, 33, 41, 49, 57, and 65 when they change the selected RT, CT, or family.
+The base low-parallelism ordinary projection transitions to BM32 at 33 rows instead of 17.
+The 2048-row boundary remains unchanged.
 Gate/up and down evaluate eligibility independently.
 
-Smaller dense MLPs keep QMV for a longer range.
+Smaller dense MLPs outside the register-QMM domain keep QMV for a longer range.
 The first QMM row count is 18 when both dimensions are at most 2048.
 The first QMM row count is 12 for the remaining smaller shapes.
 After this crossover, the backend uses BM16 through 16 rows and BM32 for larger row counts.
@@ -285,18 +390,18 @@ The output tile remains BN16 for fused gate/up/SwiGLU and BN32 for down.
 
 Gate/up and down apply the same backend selector independently.
 They can share a family when their dimensions select the same candidate.
-For group size 64, the 8-row BF16 BM8/BN32 kernel uses 64 threads and 5760 bytes of static threadblock memory.
+Ordinary BM8 and BM16 QMM use four SIMDgroups across the output columns.
+Fused BM8 and BM16 QMM use two SIMDgroups.
+BM32 and BM64 use four SIMDgroups in both paths.
+For group size 64, the BF16 BM8/BN32/BK64 kernel uses 128 threads and 5760 bytes of static threadblock memory.
 The memory contains the `8 × 72` input tile and the `32 × 72` weight tile.
-The stride is `BK` plus 16 bytes of padding. BF16 and F16 operands normally use `BK=min(group_size, 64)`.
-For BM8 and BM16 with at least 65,536 weight rows, the backend selects BK32 at initialization.
-F32 operands always use BK32. The same selection sets the shader constant and validates pipeline scratch.
-The 27B dense MLP retains BK64 for group size 64. Accumulators remain F32 in each case.
-The fused QMM shares one input tile between gate and up in each K iteration.
-Each SIMDgroup keeps one F32 cooperative accumulator live.
-The fused QMM reuses its weight scratch for output-dtype projection values after the K loop.
-A threadgroup barrier separates the last matrix read from the scratch reuse. Another barrier separates projection
-stores from SwiGLU reads. It needs no separate projection allocation.
-The fused BM8/BN16 kernel uses 5760 bytes for the group-size-64 BF16 layout.
+The stride is `BK` plus 16 bytes of padding.
+The fused BM8/BN16/BK64 kernel uses 64 threads and 3456 bytes of static threadblock memory.
+It shares one input tile between gate and up and reuses one weight staging region.
+Each SIMDgroup keeps two F32 projection accumulators live.
+Each BK iteration has two threadgroup barriers in ordinary QMM and four in fused QMM.
+The fused kernel rounds both projections to the output dtype before it computes SwiGLU in F32.
+It needs no separate projection allocation.
 In fused QMV, one SIMDgroup computes all gate columns in the output tile. The other computes the matching up columns.
 Each thread keeps one weight/scales/biases pointer set and one accumulator array.
 Initialization selects an aligned specialization when both output columns and the K dimension contain complete tiles.
@@ -307,6 +412,346 @@ Initialization also validates the kernel/epilogue pairing. Tile width does not i
 
 Benchmark-only QMV/QMM probes select an affine kernel policy for measurement.
 The semantic data flow stays the same.
+
+### Steel and sliced-K
+
+Steel names a compute implementation. Sliced-K names a work partition.
+The current Steel implementation partitions output fragments across SIMDgroups and stages operands in SMEM.
+The current sliced-K MMA implementation partitions K across SIMDgroups and constructs operands in registers.
+Other implementations can combine these choices.
+The terms follow [CUTLASS parallelized reductions](https://docs.nvidia.com/cutlass/latest/media/docs/cpp/efficient_gemm.html#parallelized-reductions).
+
+The following diagram defines the partition and storage terms:
+
+```text
+Metal term       Corresponding term in these diagrams
+SIMDgroup (SG)   warp: 32 lanes
+threadgroup (TG) threadblock: one or more SIMDgroups
+SMEM            threadgroup memory
+GMEM            device memory
+
+BK        sequential K-stage length
+sliced-K  K partitions across SIMDgroups inside one threadgroup
+split-K   K partitions across threadgroups
+
+Current paths:
+  Steel        -> different output coordinates per SG -> each SG covers K [0, K)
+  sliced-K MMA -> same output coordinates per SG      -> each SG covers a K slice
+                                                     -> merge partials in SMEM
+```
+
+### Steel output tiles
+
+This ordinary Steel example uses BM16/BN32, WM1/WN4, and four SIMDgroups:
+
+```text
+X [16, K]       W_Q4 [32, K]       Y [16, 32] = X * W^T
+
+                         BN = 32
+             +--------+--------+--------+--------+
+BM = 16      | SG0    | SG1    | SG2    | SG3    |
+             | 16x8   | 16x8   | 16x8   | 16x8   |
+             +--------+--------+--------+--------+
+columns      [0,8)    [8,16)   [16,24)  [24,32)
+
+SG0: rows [0,16), columns [ 0, 8), K [0,K)
+SG1: rows [0,16), columns [ 8,16), K [0,K)
+SG2: rows [0,16), columns [16,24), K [0,K)
+SG3: rows [0,16), columns [24,32), K [0,K)
+
+threadgroup = WM * WN * 32 = 128 threads
+
+K traversal for every SG:
+  [0, BK) -> [BK, 2*BK) -> ... -> [K-BK, K)
+```
+
+The following forced example uses the same full tensor dimensions as the sliced-K example below.
+The adaptive selector can choose a different implementation.
+
+```text
+M=16 / N=5120 / K=17408, BF16 Q4/group64
+BM=16 / BN=32 / BK=64 / WM=1 / WN=4
+
+X [16, 17408]         W_Q4 [5120, 17408]
+      |                        |
+      +-- 1 M tile             +-- 160 N tiles
+                 \             /
+                  Y [16, 5120]
+        +--------+--------+--------+-----+--------+
+        | TG 0   | TG 1   | TG 2   | ... | TG 159 |
+        | 16x32  | 16x32  | 16x32  |     | 16x32  |
+        +--------+--------+--------+-----+--------+
+
+dispatch:
+    grid        = (160 N-tiles, 1 M-tile, 1)
+    threadgroup = (32 threads, 4, 1) = 128 threads
+
+One TG, one of 272 sequential K stages:
+
+    GMEM X [16x64] ----> SMEM Xs [16x72] BF16 --+
+                                               +--> four SGs' MMA
+    GMEM W_Q4 [32x64] -> dequantize              |
+    scales/biases ----> SMEM Ws [32x72] BF16 ----+
+
+    72 = BK64 + 16-byte padding / 2 bytes
+    SMEM = (16 + 32) * 72 * 2 = 6912 bytes
+
+    SG0 [16x8]    SG1 [16x8]    SG2 [16x8]    SG3 [16x8]
+    columns 0..8  columns 8..16 columns 16..24 columns 24..32
+        |             |             |             |
+        +---- each retains F32 output fragments across all 272 stages
+        +---- each covers the full K range
+        +---- each stores its own output columns
+
+    One SG: two 8x8 output fragments
+    Per lane: 2 * (64 / 32) = 4 persistent F32 output values
+    No K-partial merge. No global partial-output buffer.
+```
+
+Each threadgroup stages one BK interval at a time. It does not load the complete K range at once.
+The ordinary shader uses this loop order:
+
+```text
+for k = 0; k < K; k += BK:
+    threadgroup barrier             // before reusing the previous stage's SMEM
+    load X[BM, BK] into SMEM
+    dequantize W[BN, BK] into SMEM    // storage dtype for same-dtype operands
+    threadgroup barrier             // operands are ready for all SGs
+    each SG updates its own output fragments
+
+after the final stage:
+    each SG stores its output fragments
+    no K-partial merge
+```
+
+The fused Steel shader uses WN2 for all BM values.
+For BM16/BN16, both SIMDgroups compute gate and up for their own output region:
+
+```text
+                   BN = 16
+             +----------+----------+
+BM = 16      | SG0      | SG1      |
+             | gate/up  | gate/up  |
+             | 16x8     | 16x8     |
+             +----------+----------+
+columns      [0,8)      [8,16)
+
+SG0: rows [0,16), columns [0, 8), K [0,K), gate AND up
+SG1: rows [0,16), columns [8,16), K [0,K), gate AND up
+threadgroup = WM1 * WN2 * 32 = 64 threads
+
+for each BK stage:
+    barrier -> load X + dequantize gate -> barrier -> gate MMA
+    barrier -> reuse X + dequantize up -> barrier -> up MMA
+
+after all K stages:
+    round gate and up to storage dtype -> F32 SwiGLU -> store
+```
+
+Larger Steel tiles distribute 8x8 fragments with the `BlockMMA` strides:
+
+```text
+                       BM8 / BM16       BM32 / BM64
+ordinary WM / WN       1 / 4            2 / 2
+fused WM / WN          1 / 2            2 / 2
+
+For SIMDgroup sg:
+  warp_row = sg / WN
+  warp_col = sg % WN
+  row-fragment starts = 8 * (warp_row + i * WM), i = 0..BM/(8*WM)-1
+  col-fragment starts = 8 * (warp_col + j * WN), j = 0..BN/(8*WN)-1
+  every output fragment traverses K [0, K)
+```
+
+### Sliced-K tiles
+
+This forced geometry shows RT2/CT4 and eight SIMDgroups.
+It is a valid kernel geometry. It is not the adaptive default for this shape.
+The default reduces CT to two to preserve at least 256 output threadgroups.
+
+The following example shows the logical tensor partition:
+
+```text
+Example: ordinary projection, M=16 / N=5120 / K=17408
+Geometry: RT=2 / CT=4 / S=8
+S = number of SIMDgroups per threadgroup
+
+X [16, 17408]       W_Q4 [5120, 17408]
+       |                    |
+       |                    +-- N: 160 tiles, 32 output columns per tile
+       |
+       +-- M: 1 tile, 16 rows per tile
+
+Y [16, 5120]
+   +--------+--------+--------+-----+----------+
+   | TG 0   | TG 1   | TG 2   | ... | TG 159   |
+   | 16x32  | 16x32  | 16x32  |     | 16x32    |
+   +--------+--------+--------+-----+----------+
+
+dispatch:
+    grid        = (1 M-tile, 160 N-tiles, 1)
+    threadgroup = (256 threads, 1, 1)
+    total       = 160 threadgroups
+
+One TG covers:
+    X_tile = X[16 rows, entire K]
+    W_tile = W[32 output columns, entire K]
+
+    K=17408
+    +------+------+------+------+------+------+------+------+
+    | K0   | K1   | K2   | K3   | K4   | K5   | K6   | K7   |
+    |2176  |2176  |2176  |2176  |2176  |2176  |2176  |2176  |
+    +------+------+------+------+------+------+------+------+
+       |      |      |      |      |      |      |      |
+      SG0    SG1    SG2    SG3    SG4    SG5    SG6    SG7
+       |      |      |      |      |      |      |      |
+      P0     P1     P2     P3     P4     P5     P6     P7
+    [16x32][16x32][16x32][16x32][16x32][16x32][16x32][16x32]
+       \______\______\______\______\______\______\______/
+                              |
+                         SUM over K
+                              |
+                         Y_tile[16x32]
+
+    SG0: K [    0,  2176)
+    SG1: K [ 2176,  4352)
+    SG2: K [ 4352,  6528)
+    SG3: K [ 6528,  8704)
+    SG4: K [ 8704, 10880)
+    SG5: K [10880, 13056)
+    SG6: K [13056, 15232)
+    SG7: K [15232, 17408)
+
+    Each SG covers the same 16x32 output coordinates.
+    SGs partition K, not output rows or columns.
+
+Actual adaptive selection for these M/N/K values:
+                    forced example       adaptive default
+    RT / CT / S     2 / 4 / 8            2 / 2 / 8
+    output tile     16x32                 16x16
+    grid            (1, 160, 1)          (1, 320, 1)
+    SMEM partials   16 KiB                8 KiB
+```
+
+The K ranges show coverage. Each SIMDgroup streams quantization groups into registers.
+It does not keep its complete K slice in registers.
+The diagrams use `Y = X * W^T`. The shader matrix operands compute the transposed tile, `Y^T = W * X^T`.
+
+The following diagram shows one SIMDgroup's distributed output partial:
+
+```text
+One SG's 16x32 partial:
+
+                    output columns
+                [0,8) [8,16) [16,24) [24,32)
+              +------+------+------+------+
+rows [0,8)    | C00  | C01  | C02  | C03  |
+              +------+------+------+------+
+rows [8,16)   | C10  | C11  | C12  | C13  |
+              +------+------+------+------+
+                 each cell = 8x8 MMA accumulator
+
+    RT * CT = 2 * 4 = 8 accumulator fragments
+    each fragment: 64 F32 values distributed across 32 lanes
+    each lane: 8 * (64 / 32) = 8 * 2 = 16 F32 partial-output values
+               + input, weight, and group-dot temporaries
+
+    8 = number of output fragments, not the MMA K dimension
+    2 = output values per fragment per lane
+
+Lifetimes:
+    acc0 / acc1  -> reset for each quantization group
+    out0 / out1  -> retain corrected group sums for one SG's K slice
+    part         -> SMEM [projection][RT][CT][S][lane], float2 per lane
+    SG0          -> sum the S partials in order -> epilogue -> GMEM output
+```
+
+The per-lane count covers one projection's persistent partial output. It is not the total register count.
+Fused gate/up keeps separate partials for both projections.
+Each encoded weight fragment serves all RT row tiles in its SIMDgroup.
+Each input fragment serves all CT column tiles in that SIMDgroup.
+The final merge uses one threadgroup barrier and no second dispatch.
+
+### Packed operands
+
+The following encoding converts a Q4 code into an exact BF16 or FP16 matrix operand:
+
+```text
+q = Q4 code in [0, 15]
+
+BF16 normal value = 2^(exponent - 127) * (1 + fraction / 128)
+exponent = 134    -> 128 * (1 + fraction / 128) = 128 + fraction
+
+                 sign   exponent   fraction (7 bits)
+BF16(128)          0     10000110   0000000  = 0x4300
+q = 5                             0000101
+0x4300 | q         0     10000110   0000101  = BF16(133)
+
+BF16 operand bits = 0x4300 | q
+FP16 operand bits = 0x5800 | (q << 3)
+FP16 fraction unit at 128 = 1/8, so the shift gives exactly 128 + q
+
+packed Q4 load -> register bit encoding -> MMA with input fragments
+                                          |
+original scale/bias -> F32 correction -----+-> F32 group contribution
+```
+
+The bit encoding does not add 128 numerically to each code.
+The kernel loads the original scale and quantization bias. It computes the offset correction in F32.
+It does not allocate a correction tensor.
+This bias is a quantization parameter, not a linear layer's output bias.
+
+Sliced-K describes the K partition. It does not require a specific weight bit width.
+The `128 + q` encoding can represent unsigned Q1 through Q7 codes exactly.
+The current MMA kernel implements Q4 unpacking only.
+The global affine operator retains its existing Q8 and other supported bit widths.
+The following initialization paths keep these contracts separate:
+
+```text
+Config::validate()
+    supported bits: 2, 3, 4, 6, 8
+           |
+           +--> QMV / Steel
+           |      retain the global bit-width domain
+           |
+           +--> scalar small QMM
+           |      uses_small_qmm(): Q4 or Q8
+           |      three-row sliced-K OR SIMDgroup-column partition
+           |
+           +--> sliced-K MMA
+                  uses_sliced_k(): bits == 4
+                         |
+                         +--> selector candidate
+                         +--> registry initialization
+                         +--> forced Kernel initialization validation
+                                      |
+                                      +--> Q4 shader unpack
+                                           8 codes per uint32
+                                           nibble mask 0x000F000F
+```
+
+The theoretical encoding range does not add Q1, Q5, or Q7 support to `Config`.
+The existing eligibility check owns the Q4 restriction. The shader adds no duplicate bit-width check.
+
+For one input row, output column, and quantization group, the correction is:
+
+```text
+w_i  = s * q_i + bias
+a2   = sum_i(x_i * (128 + q_i))
+xsum = sum_i(x_i)
+
+s * a2 + (bias - 128 * s) * xsum
+  = s * sum_i(x_i * (128 + q_i)) + bias * sum_i(x_i) - 128 * s * sum_i(x_i)
+  = s * sum_i(x_i * q_i) + bias * sum_i(x_i)
+  = sum_i(x_i * (s * q_i + bias))
+  = sum_i(x_i * w_i)
+```
+
+The scale and bias are constant within this group. They can differ across groups and output columns.
+The identity holds in real arithmetic.
+F32 cancellation, accumulation order, and weight rounding can change the result bits.
+Steel rounds each same-dtype dequantized weight before its dot product. sliced-K MMA applies the correction after the group dot product.
+Both fused paths retain storage-dtype projection rounding before F32 SwiGLU.
 
 ## Tests and benchmarks
 
@@ -319,6 +764,17 @@ The test covers the production Q4/Q4 BF16-affine layout and a mixed Q4/Q6 F32-af
 It records capacities on each side of the affine topology boundaries.
 It does not use inactive output or scratch rows as an oracle.
 Affine operator tests own kernel selection and topology-boundary contracts.
+Register-QMM tests cover FP16 and BF16, all supported group sizes, representative row/column geometries, ordinary and fused epilogues,
+and changing active rows on cached replay. Inactive output rows must remain unchanged.
+Steel and register-QMM replay tests use fixed inputs and seeded random inputs, codes, scales, and biases.
+The random generator follows the existing dense-MLP test style. The seed makes failures reproducible.
+Each fixture computes its full CPU reference once. Non-monotonic active counts compare prefixes of that reference.
+The CPU oracle uses scalar F64 accumulation and does not use shader fragments or K partitions.
+For same-dtype Steel, it materializes each dequantized weight at the operand dtype before the dot product.
+For mixed-dtype Steel and register QMM, it uses F32 dequantized weights without low-precision materialization.
+Both fused references round gate and up before F32 SwiGLU and round the final output.
+Absolute and relative error budgets account for operand precision, output rounding, and F32 group correction.
+Host selector tests own topology-boundary coverage. Numerical tests do not repeat that selector sweep.
 
 Current Metal component bench:
 
@@ -333,6 +789,10 @@ cargo bench --bench qwen35_dense_mlp -- \
   --model-dir <27b-model-dir> --tokens 1 --cases full_auto \
   --iters 1 --warmup-iters 0 --runs 1
 ```
+
+The `--dump-output PATH` option writes each case output as raw BF16 after timing.
+It can supply numerical evidence for kernel-policy comparisons.
+Each case initializes its own fixture. Case order does not change the timed input.
 
 The bench covers the 27B dense profile.
 CLI arguments select the model path, token list, case list, iteration count, warmup count, and run count.

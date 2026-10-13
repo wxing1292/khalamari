@@ -31,3 +31,18 @@ The upstream file is licensed under Apache-2.0. A copy of that license is
 included in licenses/omlx-Apache-2.0.txt. The psi implementation adds F32
 normalization and gates, model-derived geometry, ragged request metadata,
 BF16 state arenas, arbitrary state snapshots, and per-token F32 replay logs.
+
+The register-based small affine QMM adapts SG8 from oMLX 0.7.1.dev1,
+omlx/patches/qwen35_verify_qmm.py:
+https://github.com/jundot/omlx
+
+The upstream file is licensed under Apache-2.0. Its SG8 operand encoding and
+input-sum correction are adapted from incoai/Splash (Apache-2.0):
+https://github.com/incoai/splash
+
+The scalar K-partition and SIMDgroup-column designs are adapted upstream from MTPLX,
+Copyright 2026 Youssof Altoukhi (Apache-2.0):
+https://github.com/youssofal/mtplx
+
+See licenses/omlx-Apache-2.0.txt. The PSI adaptation adds stacked gate/up
+bindings, a compile-time SwiGLU epilogue, and submission-time active rows.

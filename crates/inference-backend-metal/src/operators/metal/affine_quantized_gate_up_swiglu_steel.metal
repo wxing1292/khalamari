@@ -15,6 +15,7 @@ template <typename InT, typename ParamT, typename OutT,
   constexpr bool same_dtype = is_same_v<InT, ParamT> && is_same_v<InT, OutT>;
   using T = conditional_t<same_dtype, InT, float>;
   constexpr int LD = BK + 16 / sizeof(T);
+  // Each SIMDgroup owns the same output region for gate and up, and traverses all K for both.
   constexpr int WM = BM >= 32 ? 2 : 1, WN = 2;
   threadgroup T Xs[BM * LD];
   threadgroup T Ws[BN * LD];

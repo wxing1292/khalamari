@@ -11,8 +11,56 @@ use inference_backend_metal::metal::ReplayProgram;
 use inference_backend_metal::metal::Stream;
 use inference_backend_metal::operators::affine_quantized;
 
-const ROWS: [i32; 5] = [1, 6, 8, 16, 32];
-const PROFILES: [Profile; 2] = [
+const ROWS: [i32; 18] = [1, 2, 3, 4, 5, 6, 7, 8, 16, 17, 24, 32, 33, 40, 48, 56, 64, 65];
+const PROFILES: [Profile; 8] = [
+    Profile {
+        name: "bf16-square4k",
+        n: 4_096,
+        k: 4_096,
+        input_dtype: Dtype::Bfloat16,
+        scale_bias_dtype: Dtype::Bfloat16,
+        output_dtype: Dtype::Bfloat16,
+    },
+    Profile {
+        name: "bf16-square8k",
+        n: 8_192,
+        k: 8_192,
+        input_dtype: Dtype::Bfloat16,
+        scale_bias_dtype: Dtype::Bfloat16,
+        output_dtype: Dtype::Bfloat16,
+    },
+    Profile {
+        name: "bf16-wide12k",
+        n: 12_288,
+        k: 5_120,
+        input_dtype: Dtype::Bfloat16,
+        scale_bias_dtype: Dtype::Bfloat16,
+        output_dtype: Dtype::Bfloat16,
+    },
+    Profile {
+        name: "bf16-wide14k",
+        n: 14_336,
+        k: 5_120,
+        input_dtype: Dtype::Bfloat16,
+        scale_bias_dtype: Dtype::Bfloat16,
+        output_dtype: Dtype::Bfloat16,
+    },
+    Profile {
+        name: "bf16-wide16k",
+        n: 16_384,
+        k: 4_096,
+        input_dtype: Dtype::Bfloat16,
+        scale_bias_dtype: Dtype::Bfloat16,
+        output_dtype: Dtype::Bfloat16,
+    },
+    Profile {
+        name: "bf16-wide32k",
+        n: 32_768,
+        k: 4_096,
+        input_dtype: Dtype::Bfloat16,
+        scale_bias_dtype: Dtype::Bfloat16,
+        output_dtype: Dtype::Bfloat16,
+    },
     Profile {
         name: "bf16-bf16-bf16",
         n: 5_120,
@@ -30,12 +78,13 @@ const PROFILES: [Profile; 2] = [
         output_dtype: Dtype::Float32,
     },
 ];
-const KERNELS: [BenchKernel; 5] = [
+const KERNELS: [BenchKernel; 6] = [
     BenchKernel::Auto,
     BenchKernel::Exact(affine_quantized::KernelKind::QmvBn8Bk32),
     BenchKernel::Exact(affine_quantized::KernelKind::QmmBm8Bn32),
     BenchKernel::Exact(affine_quantized::KernelKind::QmmBm16Bn32),
     BenchKernel::Exact(affine_quantized::KernelKind::QmmBm32Bn32),
+    BenchKernel::Exact(affine_quantized::KernelKind::QmmBm32Bn64),
 ];
 
 fn bench_affine_quantized_matmul(c: &mut Criterion) {
@@ -100,6 +149,9 @@ impl BenchKernel {
             Self::Exact(affine_quantized::KernelKind::QmmBm32Bn16) => "qmm-bm32-bn16",
             Self::Exact(affine_quantized::KernelKind::QmvBn8Bk32) => "qmv-bn8-bk32",
             Self::Exact(affine_quantized::KernelKind::QmvQuadBn64) => "qmv-quad-bn64",
+            Self::Exact(affine_quantized::KernelKind::QmmSlicedK { .. }) => "qmm-sliced-k",
+            Self::Exact(affine_quantized::KernelKind::QmmSlicedKBm3Bn4) => "qmm-sliced-k-bm3-bn4",
+            Self::Exact(affine_quantized::KernelKind::QmmSimdgroupsBm4Bn32) => "qmm-simdgroups-bm4-bn32",
             Self::Exact(affine_quantized::KernelKind::QmmBm8Bn32) => "qmm-bm8-bn32",
             Self::Exact(affine_quantized::KernelKind::QmmBm16Bn32) => "qmm-bm16-bn32",
             Self::Exact(affine_quantized::KernelKind::QmmBm32Bn32) => "qmm-bm32-bn32",

@@ -37,16 +37,42 @@ const BITS: u32 = 4;
 
 fn main() {
     let args = Args::parse();
+    if let Some(directory) = &args.dump_output {
+        std::fs::create_dir_all(directory).expect("cannot create dense MLP output directory");
+    }
 
     let device = Device::system_default();
     let weights = RealDenseMLPWeights::load(&device, &args.model_dir);
     for num_tokens in args.tokens {
-        let fixture = RealDenseMLPFixture::new(&device, num_tokens, &weights);
         for case in &args.cases {
+            let fixture = RealDenseMLPFixture::new(&device, num_tokens, &weights);
             let replay = fixture.replay(*case);
             let samples = measure_runs(args.runs, args.warmup_iters, args.iters, || {
                 fixture.submit_replay(&replay)
             });
+            if let Some(directory) = &args.dump_output {
+                let buffer = match case {
+                    DenseMLPBenchCase::GateUpSwiGLUAuto
+                    | DenseMLPBenchCase::GateUpSwiGLUQmmBm8Bn16
+                    | DenseMLPBenchCase::GateUpSwiGLUQmmBm16Bn16
+                    | DenseMLPBenchCase::GateUpSwiGLUQmvBn8Bk32
+                    | DenseMLPBenchCase::GateUpSwiGLUQmmBm32Bn16 => &fixture.swiglu,
+                    DenseMLPBenchCase::FullAuto
+                    | DenseMLPBenchCase::FullQmmBm8
+                    | DenseMLPBenchCase::FullQmmBm16
+                    | DenseMLPBenchCase::FullQmvBn8Bk32
+                    | DenseMLPBenchCase::FullQmmBm32
+                    | DenseMLPBenchCase::DownAuto
+                    | DenseMLPBenchCase::DownQmmBm8Bn32
+                    | DenseMLPBenchCase::DownQmmBm16Bn32
+                    | DenseMLPBenchCase::DownQmvBn8Bk32
+                    | DenseMLPBenchCase::DownQmmBm32Bn32 => &fixture.output,
+                };
+                let mut bytes = vec![0; buffer.len_bytes()];
+                buffer.read_bytes(0, &mut bytes);
+                let path = directory.join(format!("{}-rows{num_tokens}.bf16", case.key()));
+                std::fs::write(path, bytes).expect("cannot write dense MLP output");
+            }
             print_perf(
                 fixture.stream.backend_name(),
                 case.key(),
@@ -66,6 +92,7 @@ struct Args {
     iters: usize,
     warmup_iters: usize,
     runs: usize,
+    dump_output: Option<PathBuf>,
 }
 
 impl Args {
@@ -77,11 +104,13 @@ impl Args {
             iters: 50,
             warmup_iters: 20,
             runs: 3,
+            dump_output: None,
         };
         let mut iter = std::env::args().skip(1);
         while let Some(arg) = iter.next() {
             match arg.as_str() {
                 "--model-dir" => args.model_dir = PathBuf::from(next_arg(&mut iter, &arg)),
+                "--dump-output" => args.dump_output = Some(PathBuf::from(next_arg(&mut iter, &arg))),
                 "--tokens" => args.tokens = parse_u32_list(&next_arg(&mut iter, &arg), &arg),
                 "--cases" => args.cases = parse_cases(&next_arg(&mut iter, &arg)),
                 "--iters" => args.iters = parse_usize(&next_arg(&mut iter, &arg), &arg),
@@ -662,6 +691,7 @@ dense_mlp real-weight replay bench
 
 Options:
   --model-dir PATH
+  --dump-output PATH  write each case output as raw BF16 after timing
   --tokens 1,2,4,8,10,16,32,64
   --cases full_auto,full_qmv_bn8_bk32,full_qmm_bm8,full_qmm_bm16,full_qmm_bm32,gate_up_swiglu_auto,\
          gate_up_swiglu_qmv_bn8_bk32,gate_up_swiglu_qmm_bm8_bn16,gate_up_swiglu_qmm_bm16_bn16,\

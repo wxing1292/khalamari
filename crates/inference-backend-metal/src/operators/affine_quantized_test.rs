@@ -14,93 +14,122 @@ fn adaptive_config(n: i32, k: i32, dtype: Dtype) -> Config {
 }
 
 #[test]
-fn test_adaptive_large_vocabulary_qmm_crossover() {
+fn test_adaptive_small_qmm_routes() {
+    for dtype in [Dtype::Float16, Dtype::Bfloat16] {
+        for (n, k, third_row) in [
+            (151_936, 2048, KernelKind::QmmSimdgroupsBm4Bn32),
+            (248_320, 5120, KernelKind::QmmSimdgroupsBm4Bn32),
+            (17_408, 5120, KernelKind::QmmSlicedKBm3Bn4),
+            (5120, 17_408, KernelKind::QmmSlicedKBm3Bn4),
+            (4096, 4096, KernelKind::QmmSlicedKBm3Bn4),
+            (1024, 2048, KernelKind::QmvBn8Bk32),
+        ] {
+            let config = adaptive_config(n, k, dtype);
+            for rows in [1, 2] {
+                assert_eq!(Selector::key(config, rows, Epilogue::Identity), KernelKind::QmvBn8Bk32);
+            }
+            assert_eq!(Selector::key(config, 3, Epilogue::Identity), third_row);
+            let column_tiles = if n >= 65_536 {
+                4
+            } else if k >= 16_384 {
+                2
+            } else {
+                1
+            };
+            for rows in 4..=8 {
+                assert_eq!(
+                    Selector::key(config, rows, Epilogue::Identity),
+                    KernelKind::QmmSlicedK {
+                        row_tiles: 1,
+                        column_tiles
+                    }
+                );
+            }
+            if dtype == Dtype::Float16 || k < 4096 {
+                assert!(Selector::key(config, 9, Epilogue::Identity).sliced_k_shape().is_none());
+            } else {
+                assert!(Selector::key(config, 9, Epilogue::Identity).sliced_k_shape().is_some());
+            }
+        }
+    }
+    let base = adaptive_config(4096, 4096, Dtype::Bfloat16);
     assert_eq!(
-        Selector::key(adaptive_config(151_936, 2048, Dtype::Bfloat16), 4, Epilogue::Identity),
-        KernelKind::QmvBn8Bk32
+        Selector::key(Config { k: 64, ..base }, 4, Epilogue::Identity),
+        KernelKind::QmvQuadBn64
     );
-    assert_eq!(
-        Selector::key(adaptive_config(151_936, 2048, Dtype::Bfloat16), 5, Epilogue::Identity),
-        KernelKind::QmmBm8Bn32
-    );
-    assert_eq!(
-        Selector::key(adaptive_config(151_936, 5120, Dtype::Bfloat16), 5, Epilogue::Identity),
-        KernelKind::QmvBn8Bk32
-    );
-    assert_eq!(
-        Selector::key(adaptive_config(151_936, 5120, Dtype::Bfloat16), 6, Epilogue::Identity),
-        KernelKind::QmmBm8Bn32
-    );
+    for config in [
+        Config { bits: 8, ..base },
+        Config { n: 4095, ..base },
+        Config { n: 512, ..base },
+        Config {
+            input_dtype: Dtype::Float32,
+            ..base
+        },
+        Config {
+            output_dtype: Dtype::Float32,
+            ..base
+        },
+        Config {
+            scale_bias_dtype: Dtype::Float32,
+            ..base
+        },
+    ] {
+        assert_eq!(Selector::key(config, 4, Epilogue::Identity), KernelKind::QmvBn8Bk32);
+    }
 }
 
 #[test]
-fn test_adaptive_qmm_tile_crossover() {
+fn test_base_qmm_tile_crossover() {
+    let narrow_projection = adaptive_config(5120, 17_408, Dtype::Bfloat16);
+    for rows in [16, 17, 32] {
+        assert_eq!(
+            Selector::base_key(narrow_projection, rows, Epilogue::Identity),
+            KernelKind::QmmBm16Bn32
+        );
+    }
     assert_eq!(
-        Selector::key(adaptive_config(151_936, 5120, Dtype::Bfloat16), 16, Epilogue::Identity),
-        KernelKind::QmmBm16Bn32
-    );
-    assert_eq!(
-        Selector::key(adaptive_config(151_936, 5120, Dtype::Bfloat16), 17, Epilogue::Identity),
+        Selector::base_key(narrow_projection, 33, Epilogue::Identity),
         KernelKind::QmmBm32Bn64
     );
-}
-
-#[test]
-fn test_adaptive_dense_projection_crossover() {
-    let large_projection = adaptive_config(34_816, 5120, Dtype::Bfloat16);
     assert_eq!(
-        Selector::key(large_projection, 5, Epilogue::Identity),
-        KernelKind::QmvBn8Bk32
+        Selector::base_key(narrow_projection, 32, Epilogue::SwiGLU),
+        KernelKind::QmmBm32Bn32
     );
     assert_eq!(
-        Selector::key(large_projection, 6, Epilogue::Identity),
-        KernelKind::QmmBm8Bn32
-    );
-    assert_eq!(
-        Selector::key(large_projection, 8, Epilogue::Identity),
-        KernelKind::QmmBm8Bn32
-    );
-    assert_eq!(
-        Selector::key(large_projection, 9, Epilogue::Identity),
+        Selector::base_key(adaptive_config(16_320, 5120, Dtype::Bfloat16), 32, Epilogue::Identity),
         KernelKind::QmmBm16Bn32
     );
-
-    let common_projection = adaptive_config(1024, 2048, Dtype::Bfloat16);
+    for n in [16_321, 16_384, 32_768, 151_936] {
+        assert_eq!(
+            Selector::base_key(adaptive_config(n, 5120, Dtype::Bfloat16), 32, Epilogue::Identity),
+            KernelKind::QmmBm32Bn64
+        );
+    }
     assert_eq!(
-        Selector::key(common_projection, 8, Epilogue::Identity),
-        KernelKind::QmvBn8Bk32
+        Selector::base_key(adaptive_config(151_936, 5120, Dtype::Bfloat16), 16, Epilogue::Identity),
+        KernelKind::QmmBm16Bn32
     );
     assert_eq!(
-        Selector::key(common_projection, 18, Epilogue::Identity),
-        KernelKind::QmmBm32Bn32
+        Selector::base_key(adaptive_config(151_936, 5120, Dtype::Bfloat16), 17, Epilogue::Identity),
+        KernelKind::QmmBm32Bn64
     );
 }
 
 #[test]
 fn test_adaptive_topology_boundaries_follow_selector() {
     let cases = [
-        (adaptive_config(151_936, 2048, Dtype::Bfloat16), &[5, 9, 17][..], false),
-        (adaptive_config(151_936, 5120, Dtype::Bfloat16), &[6, 9, 17][..], true),
-        (adaptive_config(248_320, 2048, Dtype::Bfloat16), &[5, 9, 17][..], false),
-        (adaptive_config(248_320, 5120, Dtype::Bfloat16), &[6, 9, 17][..], true),
-        (adaptive_config(34_816, 5120, Dtype::Bfloat16), &[6, 9, 17][..], true),
-        (adaptive_config(4096, 4096, Dtype::Bfloat16), &[12, 17][..], true),
-        (adaptive_config(1024, 2048, Dtype::Bfloat16), &[18][..], false),
+        adaptive_config(151_936, 2048, Dtype::Bfloat16),
+        adaptive_config(151_936, 5120, Dtype::Bfloat16),
+        adaptive_config(248_320, 5120, Dtype::Bfloat16),
+        adaptive_config(34_816, 5120, Dtype::Bfloat16),
+        adaptive_config(4096, 4096, Dtype::Bfloat16),
+        adaptive_config(5120, 17_408, Dtype::Bfloat16),
+        adaptive_config(1024, 2048, Dtype::Bfloat16),
+        adaptive_config(4096, 4096, Dtype::Float16),
     ];
-
-    for epilogue in [Epilogue::Identity, Epilogue::SwiGLU] {
-        for (config, expected, large_projection) in cases {
-            let mut expected = expected.to_vec();
-            if large_projection {
-                expected.push(2048);
-            }
-            assert_eq!(
-                &*adaptive_topology_boundaries(config, epilogue),
-                expected,
-                "config={config:?}"
-            );
-
-            let boundaries = adaptive_topology_boundaries(config, epilogue);
+    for config in cases {
+        for epilogue in [Epilogue::Identity, Epilogue::SwiGLU] {
+            let boundaries = adaptive_topology_boundaries(config, |rows| Selector::key(config, rows, epilogue));
             let policy = ReplayBucketPolicy::with_topology_boundaries(4096, &boundaries);
             for num_active_rows in 1..=4096 {
                 let num_total_rows = policy.capacity(num_active_rows);
@@ -124,8 +153,9 @@ fn test_large_projection_selection_preserves_other_contracts() {
         assert_eq!(Selector::key(config, rows, Epilogue::Identity), KernelKind::QmmBm64Bn64);
         assert_eq!(Selector::key(config, rows, Epilogue::SwiGLU), KernelKind::QmmBm64Bn32);
     }
+    let config = adaptive_config(8192, 5120, Dtype::Bfloat16);
     for other in [
-        Config::same_dtype(16_480, 5120, 64, 4, Dtype::Float16),
+        Config::same_dtype(8192, 5120, 64, 4, Dtype::Float16),
         Config { bits: 8, ..config },
         Config {
             group_size: 128,
@@ -146,7 +176,9 @@ fn test_large_projection_selection_preserves_other_contracts() {
         Config { n: 48, ..config },
         Config { k: 2048, ..config },
     ] {
-        assert_eq!(Selector::key(other, 4096, Epilogue::Identity), KernelKind::QmmBm32Bn32);
+        for rows in [32, 4096] {
+            assert_eq!(Selector::key(other, rows, Epilogue::Identity), KernelKind::QmmBm32Bn32);
+        }
     }
 }
 
@@ -225,6 +257,22 @@ fn test_bucketed_qmm_variants_match_reference_across_active_counts() {
         (same, KernelKind::QmmBm8Bn32, 16),
         (same, KernelKind::QmmBm16Bn32, 32),
         (same, KernelKind::QmmBm32Bn32, 64),
+        (same_q4_bf16, KernelKind::QmmBm8Bn32, 16),
+        (
+            Config::same_dtype(33, 64, 32, 4, Dtype::Bfloat16),
+            KernelKind::QmmBm8Bn32,
+            16,
+        ),
+        (
+            Config::same_dtype(33, 128, 128, 8, Dtype::Bfloat16),
+            KernelKind::QmmBm8Bn32,
+            16,
+        ),
+        (
+            Config::same_dtype(33, 64, 64, 4, Dtype::Float16),
+            KernelKind::QmmBm8Bn32,
+            16,
+        ),
         (same_q4_bf16, KernelKind::QmmBm16Bn32, 32),
         (same_q4_bf16, KernelKind::QmmBm32Bn32, 64),
         (same_unaligned, KernelKind::QmmBm32Bn32, 64),
@@ -236,8 +284,111 @@ fn test_bucketed_qmm_variants_match_reference_across_active_counts() {
     }
 }
 
+#[test]
+fn test_register_qmm_replay_matches_reference() {
+    for dtype in [Dtype::Float16, Dtype::Bfloat16] {
+        for (group_size, k) in [(32, 512), (64, 1024), (128, 2048)] {
+            let config = Config::same_dtype(1024, k, group_size, 4, dtype);
+            assert_epilogue_replay_matches_reference(
+                config,
+                KernelKind::QmmSlicedK {
+                    row_tiles: 1,
+                    column_tiles: 1,
+                },
+                8,
+                Epilogue::Identity,
+            );
+            assert_epilogue_replay_matches_reference(
+                Config { n: 2048, ..config },
+                KernelKind::QmmSlicedK {
+                    row_tiles: 1,
+                    column_tiles: 1,
+                },
+                8,
+                Epilogue::SwiGLU,
+            );
+        }
+        for (row_tiles, column_tiles) in [(2, 2), (3, 4), (4, 1)] {
+            let config = Config::same_dtype(1024, 1024, 64, 4, dtype);
+            for epilogue in [Epilogue::Identity, Epilogue::SwiGLU] {
+                let kind = KernelKind::QmmSlicedK {
+                    row_tiles,
+                    column_tiles: if epilogue == Epilogue::SwiGLU { 1 } else { column_tiles },
+                };
+                assert_epilogue_replay_matches_reference(
+                    Config {
+                        n: config.n * epilogue.output_divisor(),
+                        ..config
+                    },
+                    kind,
+                    8 * row_tiles as i32 + 1,
+                    epilogue,
+                );
+            }
+        }
+        for bits in [4, 8] {
+            let config = Config::same_dtype(4096, 64, 32, bits, dtype);
+            assert_epilogue_replay_matches_reference(config, KernelKind::QmmSlicedKBm3Bn4, 3, Epilogue::Identity);
+            assert_epilogue_replay_matches_reference(
+                Config { n: 8192, ..config },
+                KernelKind::QmmSlicedKBm3Bn4,
+                3,
+                Epilogue::SwiGLU,
+            );
+        }
+    }
+    for (config, kind) in [
+        (
+            Config::same_dtype(1024, 16_384, 64, 4, Dtype::Bfloat16),
+            KernelKind::QmmSlicedK {
+                row_tiles: 1,
+                column_tiles: 2,
+            },
+        ),
+        (
+            Config::same_dtype(65_536, 128, 32, 4, Dtype::Bfloat16),
+            KernelKind::QmmSlicedK {
+                row_tiles: 1,
+                column_tiles: 4,
+            },
+        ),
+        (
+            Config::same_dtype(100_032, 64, 32, 4, Dtype::Bfloat16),
+            KernelKind::QmmSimdgroupsBm4Bn32,
+        ),
+    ] {
+        assert_epilogue_replay_matches_reference(config, kind, 2, Epilogue::Identity);
+        assert_epilogue_replay_matches_reference(
+            Config {
+                n: 2 * config.n,
+                ..config
+            },
+            kind,
+            2,
+            Epilogue::SwiGLU,
+        );
+    }
+}
+
 fn assert_bucketed_replay_matches_reference(config: Config, kind: KernelKind, num_total_rows: i32) {
     assert_epilogue_replay_matches_reference(config, kind, num_total_rows, Epilogue::Identity);
+}
+
+#[test]
+fn test_small_qmm_replay_preserves_swiglu_rounding_and_inactive_rows() {
+    for config in [
+        Config::same_dtype(66, 192, 64, 4, Dtype::Bfloat16),
+        Config::same_dtype(66, 256, 128, 8, Dtype::Bfloat16),
+        Config::same_dtype(66, 96, 32, 4, Dtype::Bfloat16),
+        Config {
+            scale_bias_dtype: Dtype::Float32,
+            ..Config::same_dtype(66, 192, 64, 4, Dtype::Bfloat16)
+        },
+    ] {
+        for kind in [KernelKind::QmmBm8Bn16, KernelKind::QmmBm16Bn16] {
+            assert_epilogue_replay_matches_reference(config, kind, 32, Epilogue::SwiGLU);
+        }
+    }
 }
 
 #[test]
@@ -262,85 +413,88 @@ fn assert_epilogue_replay_matches_reference(config: Config, kind: KernelKind, nu
     assert!(matches!(config.bits, 4 | 8));
     let device = Device::system_default();
     let stream = Stream::new(&device);
-    let input_source = fixture_values(num_total_rows as usize * config.k as usize, 0.00390625);
-    let input_values = round_values_to_dtype(&input_source, config.input_dtype);
-    let num_weight_values = config.n as usize * config.k as usize;
-    let weight_values = if config.bits == 4 {
-        fixture_q4_values(num_weight_values)
-    } else {
-        fixture_weight_bytes(num_weight_values)
-    };
-    let num_affine_values = config.n as usize * (config.k / config.group_size) as usize;
-    let scales = round_values_to_dtype(&fixture_values(num_affine_values, 0.001953125), config.scale_bias_dtype);
-    let biases = round_values_to_dtype(
-        &fixture_values(num_affine_values, -0.0009765625),
-        config.scale_bias_dtype,
-    );
-    let input = buffer_from_f32(&device, &input_values, config.input_dtype);
-    let weight = if config.bits == 4 {
-        Buffer::from_slice(&device, &pack_q4(&weight_values))
-    } else {
-        Buffer::from_slice(&device, &weight_values)
-    };
-    let scales_buffer = buffer_from_f32(&device, &scales, config.scale_bias_dtype);
-    let biases_buffer = buffer_from_f32(&device, &biases, config.scale_bias_dtype);
-    let output_bytes = |rows| config.output_bytes(rows) / epilogue.output_divisor() as usize;
-    let output = Buffer::new_zeroed(&device, output_bytes(num_total_rows));
-    let kernel = Kernel::new_with_epilogue(&device, config, kind, epilogue);
-    let mut cache = ReplayTestCache::new();
-    let (replay, cache_hit) = cache.record(num_total_rows, || {
-        let mut recorder = stream.create_replay_program();
-        recorder.record(kernel.invoke(
-            num_total_rows as u32,
-            ReplayU32::Parameter(NUM_ACTIVE_ROWS),
-            &output,
-            0,
-            &input,
-            0,
-            &weight,
-            0,
-            &scales_buffer,
-            0,
-            &biases_buffer,
-            0,
-        ));
-        recorder.build()
-    });
-    assert!(!cache_hit);
+    let kernel = Kernel::new_with_epilogue(&device, config, kind, epilogue).unwrap();
+    for random_seed in [None, Some(0x1000_0001_u32)] {
+        let input_count = num_total_rows as usize * config.k as usize;
+        let input_source = match random_seed {
+            None => fixture_values(input_count, 0.125),
+            Some(seed) => generated_values(input_count, seed),
+        };
+        let input_values = round_values_to_dtype(&input_source, config.input_dtype);
+        let num_weight_values = config.n as usize * config.k as usize;
+        let weight_values = match random_seed {
+            Some(seed) => {
+                generated_values(num_weight_values, seed + 1)
+                    .into_iter()
+                    .map(|value| ((value + 1.0) * (1 << (config.bits - 1)) as f32) as u8)
+                    .collect()
+            },
+            None if config.bits == 4 => fixture_q4_values(num_weight_values),
+            None => fixture_weight_bytes(num_weight_values),
+        };
+        let num_affine_values = config.n as usize * (config.k / config.group_size) as usize;
+        let scales_source = match random_seed {
+            None => fixture_values(num_affine_values, 0.001953125),
+            Some(seed) => {
+                generated_values(num_affine_values, seed + 2)
+                    .into_iter()
+                    .map(|value| 0.002 + value.abs() * 0.01)
+                    .collect()
+            },
+        };
+        let biases_source = match random_seed {
+            None => fixture_values(num_affine_values, -0.0009765625),
+            Some(seed) => {
+                generated_values(num_affine_values, seed + 3)
+                    .into_iter()
+                    .map(|value| value * 0.002)
+                    .collect()
+            },
+        };
+        let scales = round_values_to_dtype(&scales_source, config.scale_bias_dtype);
+        let biases = round_values_to_dtype(&biases_source, config.scale_bias_dtype);
+        let input = buffer_from_f32(&device, &input_values, config.input_dtype);
+        let weight = if config.bits == 4 {
+            Buffer::from_slice(&device, &pack_q4(&weight_values))
+        } else {
+            Buffer::from_slice(&device, &weight_values)
+        };
+        let scales_buffer = buffer_from_f32(&device, &scales, config.scale_bias_dtype);
+        let biases_buffer = buffer_from_f32(&device, &biases, config.scale_bias_dtype);
+        let output_bytes = |rows| config.output_bytes(rows) / epilogue.output_divisor() as usize;
+        let output = Buffer::new_zeroed(&device, output_bytes(num_total_rows));
+        let mut cache = ReplayTestCache::new();
+        let (replay, cache_hit) = cache.record(num_total_rows, || {
+            let mut recorder = stream.create_replay_program();
+            recorder.record(kernel.invoke(
+                num_total_rows as u32,
+                ReplayU32::Parameter(NUM_ACTIVE_ROWS),
+                &output,
+                0,
+                &input,
+                0,
+                &weight,
+                0,
+                &scales_buffer,
+                0,
+                &biases_buffer,
+                0,
+            ));
+            recorder.build()
+        });
+        assert!(!cache_hit);
 
-    let mut active_counts = vec![
-        1,
-        num_total_rows,
-        3,
-        num_total_rows - 1,
-        2,
-        num_total_rows / 2,
-        num_total_rows / 2 + 1,
-    ];
-    active_counts.retain(|&active| active > 0 && active <= num_total_rows);
-    active_counts.dedup();
-    for num_active_rows in active_counts {
-        let (replay, cache_hit) = cache.record(num_total_rows, || unreachable!());
-        assert!(cache_hit);
-        let before = output.read_typed::<u8>(0, output_bytes(num_total_rows)).to_vec();
-        stream
-            .submit_replay_with_arguments(
-                replay,
-                &ReplayArguments::new().with_u32(NUM_ACTIVE_ROWS, num_active_rows as u32),
-            )
-            .wait();
-        let after = output.read_typed::<u8>(0, output_bytes(num_total_rows));
-        let active_bytes = output_bytes(num_active_rows);
-        assert_eq!(
-            &after[active_bytes..],
-            &before[active_bytes..],
-            "inactive output rows changed"
-        );
+        let weight_dtype = if kind.qmm_shape().is_some() && config.uses_same_dtype() {
+            config.input_dtype
+        } else {
+            Dtype::Float32
+        };
         let expected = round_values_to_dtype(
             &cpu_affine_reference(
                 config,
-                num_active_rows,
-                &input_values[..num_active_rows as usize * config.k as usize],
+                weight_dtype,
+                num_total_rows,
+                &input_values,
                 &weight_values,
                 &scales,
                 &biases,
@@ -357,20 +511,56 @@ fn assert_epilogue_replay_matches_reference(config: Config, kind: KernelKind, nu
         } else {
             expected
         };
-        let actual = read_f32(
-            &output,
-            num_active_rows as usize * config.n as usize / epilogue.output_divisor() as usize,
-            config.output_dtype,
-        );
-        assert_close_case(&actual, &expected, output_tolerance(config.output_dtype), config, kind);
+
+        let mut active_counts = vec![
+            1,
+            num_total_rows,
+            3,
+            num_total_rows - 1,
+            2,
+            num_total_rows / 2,
+            num_total_rows / 2 + 1,
+        ];
+        active_counts.retain(|&active| active > 0 && active <= num_total_rows);
+        active_counts.dedup();
+        for num_active_rows in active_counts {
+            let (replay, cache_hit) = cache.record(num_total_rows, || unreachable!());
+            assert!(cache_hit);
+            let before = output.read_typed::<u8>(0, output_bytes(num_total_rows)).to_vec();
+            stream
+                .submit_replay_with_arguments(
+                    replay,
+                    &ReplayArguments::new().with_u32(NUM_ACTIVE_ROWS, num_active_rows as u32),
+                )
+                .wait();
+            let after = output.read_typed::<u8>(0, output_bytes(num_total_rows));
+            let active_bytes = output_bytes(num_active_rows);
+            assert_eq!(
+                &after[active_bytes..],
+                &before[active_bytes..],
+                "inactive output rows changed"
+            );
+            let actual = read_f32(
+                &output,
+                num_active_rows as usize * config.n as usize / epilogue.output_divisor() as usize,
+                config.output_dtype,
+            );
+            assert_close_case(
+                &actual,
+                &expected[..actual.len()],
+                output_tolerance(config.output_dtype),
+                config,
+                kind,
+            );
+        }
     }
 }
 
 fn output_tolerance(dtype: Dtype) -> f32 {
     match dtype {
-        Dtype::Float32 => 1.0e-3,
-        Dtype::Float16 => 0.02,
-        Dtype::Bfloat16 => 0.125,
+        Dtype::Float32 => 1.0e-5,
+        Dtype::Float16 => 1.0e-3,
+        Dtype::Bfloat16 => 0.01,
         _ => unreachable!(),
     }
 }
@@ -422,6 +612,7 @@ fn test_adaptive_matmul_supports_all_float_dtype_combinations() {
                     (matmul.registry.get(KernelKind::QmmBm32Bn32), 31),
                 ];
                 for (kernel, m) in cases {
+                    let kernel = kernel.unwrap();
                     let output = Buffer::new_zeroed(&device, config.output_bytes(m));
                     execute_matmul(
                         &stream,
@@ -443,7 +634,7 @@ fn test_adaptive_matmul_supports_all_float_dtype_combinations() {
 
                     let actual = read_f32(&output, m as usize * config.n as usize, output_dtype);
                     let expected = round_values_to_dtype(
-                        &cpu_affine_reference(config, m, &input_values, &weight, &scales, &biases),
+                        &cpu_affine_reference(config, Dtype::Float32, m, &input_values, &weight, &scales, &biases),
                         output_dtype,
                     );
                     let tolerance = match output_dtype {
@@ -512,7 +703,7 @@ fn test_qmv_fast_supports_all_float_dtype_combinations() {
 
                 let actual = read_f32(&output, m as usize * config.n as usize, output_dtype);
                 let expected = round_values_to_dtype(
-                    &cpu_affine_reference(config, m, &input_values, &weight, &scales, &biases),
+                    &cpu_affine_reference(config, Dtype::Float32, m, &input_values, &weight, &scales, &biases),
                     output_dtype,
                 );
                 let tolerance = match output_dtype {
@@ -576,6 +767,7 @@ fn test_qmv_reference() {
     let actual = output.read_typed::<f32>(0, m as usize * config.n as usize);
     let expected = cpu_affine_reference(
         config,
+        Dtype::Float32,
         m,
         &input_bf16
             .iter()
@@ -640,6 +832,7 @@ fn test_qmv_fast_reference() {
     let actual = output.read_typed::<f32>(0, m as usize * config.n as usize);
     let expected = cpu_affine_reference(
         config,
+        Dtype::Float32,
         m,
         &input_bf16
             .iter()
@@ -701,6 +894,7 @@ fn test_qmm_reference() {
     let actual = output.read_typed::<f32>(0, m as usize * config.n as usize);
     let expected = cpu_affine_reference(
         config,
+        Dtype::Float32,
         m,
         &input_bf16
             .iter()
@@ -793,6 +987,7 @@ fn assert_qmm_bm8_bm16_bn32_q4_bf16_reference(bm: usize, n: i32) {
         .collect::<Vec<_>>();
     let expected = cpu_affine_reference(
         config,
+        Dtype::Float32,
         m,
         &input_bf16
             .iter()
@@ -871,6 +1066,7 @@ fn test_qmv_bf16() {
         .collect::<Vec<_>>();
     let expected = cpu_affine_reference(
         config,
+        Dtype::Float32,
         m,
         &input,
         &weight,
@@ -949,6 +1145,7 @@ fn test_qmv_fast_bf16() {
         .collect::<Vec<_>>();
     let expected = cpu_affine_reference(
         config,
+        Dtype::Float32,
         m,
         &input,
         &weight,
@@ -1024,6 +1221,7 @@ fn test_qmm_bf16() {
         .collect::<Vec<_>>();
     let expected = cpu_affine_reference(
         config,
+        Dtype::Float32,
         m,
         &input,
         &weight,
@@ -1042,8 +1240,10 @@ fn test_qmm_bf16() {
     assert_close(&actual, &expected, 1.0e-4);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn cpu_affine_reference(
     config: Config,
+    weight_dtype: Dtype,
     m: i32,
     input: &[f32],
     weight: &[u8],
@@ -1055,28 +1255,33 @@ fn cpu_affine_reference(
     let k = config.k as usize;
     let mut output = vec![0.0_f32; m * n];
     for row in 0..m {
-        let input_row = &input[row * k..(row + 1) * k];
         for col in 0..n {
-            let weight_row = &weight[col * k..(col + 1) * k];
-            let mut value = 0.0_f32;
-            for group in 0..(k / config.group_size as usize) {
-                let group_start = group * config.group_size as usize;
-                let group_end = group_start + config.group_size as usize;
-                let input_group = &input_row[group_start..group_end];
-                let weight_group = &weight_row[group_start..group_end];
-                let input_sum = input_group.iter().copied().sum::<f32>();
-                let dot = input_group
-                    .iter()
-                    .zip(weight_group)
-                    .map(|(x, w)| *x * f32::from(*w))
-                    .sum::<f32>();
-                let affine_index = col * (k / config.group_size as usize) + group;
-                value += scales[affine_index] * dot + input_sum * biases[affine_index];
+            let mut value = 0.0_f64;
+            for index in 0..k {
+                let affine_index = col * (k / config.group_size as usize) + index / config.group_size as usize;
+                let w = f64::from(scales[affine_index]) * f64::from(weight[col * k + index])
+                    + f64::from(biases[affine_index]);
+                let w = match weight_dtype {
+                    Dtype::Float32 => f64::from(w as f32),
+                    Dtype::Float16 => f64::from(f16::from_f32(w as f32).to_f32()),
+                    Dtype::Bfloat16 => f64::from(bf16::from_f32(w as f32).to_f32()),
+                    _ => unreachable!(),
+                };
+                value += f64::from(input[row * k + index]) * w;
             }
-            output[row * n + col] = value;
+            output[row * n + col] = value as f32;
         }
     }
     output
+}
+
+fn generated_values(count: usize, mut state: u32) -> Vec<f32> {
+    (0..count)
+        .map(|_| {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            ((state >> 8) as f32 / 16_777_216.0) * 2.0 - 1.0
+        })
+        .collect()
 }
 
 fn fixture_values(len: usize, scale: f32) -> Vec<f32> {
@@ -1174,8 +1379,15 @@ fn assert_close(actual: &[f32], expected: &[f32], tolerance: f32) {
 
 fn assert_close_case(actual: &[f32], expected: &[f32], tolerance: f32, config: Config, kind: KernelKind) {
     assert_eq!(actual.len(), expected.len());
+    let relative_tolerance = match config.output_dtype {
+        Dtype::Float32 => 1.0e-5,
+        Dtype::Float16 => 0.004,
+        Dtype::Bfloat16 => 0.02,
+        _ => unreachable!(),
+    };
     for (index, (actual, expected)) in actual.iter().zip(expected).enumerate() {
         let diff = (actual - expected).abs();
+        let tolerance = tolerance.max(expected.abs() * relative_tolerance);
         assert!(
             diff <= tolerance,
             "affine dtype combination mismatch: config={config:?} kind={kind:?} index={index} actual={actual} \

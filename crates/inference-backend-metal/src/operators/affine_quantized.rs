@@ -495,7 +495,7 @@ impl ExpertMajorKernels {
             "{MIXED_AFFINE_SOURCE}\n{STEEL_SOURCE}\n{EXPERT_MAJOR_STEEL_SOURCE}\n{template}"
         ));
         let qmm = CompiledKernel::new(device, &source, &qmm_name);
-        validate_qmm_pipeline(device, Dtype::Float32, KernelKind::QmmBm8Bn32, &qmm);
+        validate_qmm_pipeline(device, Dtype::Float32, KernelKind::QmmBm8Bn32, QMM_BK, 2, &qmm);
         let qmv_name = format!("{entry}_qmv");
         let template = template_definition(&qmv_name, &qmv_name, &args);
         let source = affine_quantized_source(&format!(
@@ -1122,6 +1122,9 @@ pub enum KernelKind {
     QmvBn4Bk32,
     QmvBn8Bk32,
     QmvQuadBn64,
+    QmmSlicedK { row_tiles: u32, column_tiles: u32 },
+    QmmSlicedKBm3Bn4,
+    QmmSimdgroupsBm4Bn32,
     QmmBm8Bn16,
     QmmBm16Bn16,
     QmmBm32Bn16,
@@ -1134,6 +1137,24 @@ pub enum KernelKind {
 }
 
 impl KernelKind {
+    fn sliced_k_shape(self) -> Option<(u32, u32)> {
+        match self {
+            Self::QmmSlicedK {
+                row_tiles,
+                column_tiles,
+            } => Some((row_tiles, column_tiles)),
+            _ => None,
+        }
+    }
+
+    fn small_qmm_shape(self) -> Option<(u32, usize)> {
+        match self {
+            Self::QmmSlicedKBm3Bn4 => Some((3, 2)),
+            Self::QmmSimdgroupsBm4Bn32 => Some((4, 8)),
+            _ => None,
+        }
+    }
+
     fn qmm_shape(self) -> Option<(i32, i32)> {
         match self {
             Self::QmmBm8Bn16 => Some((8, 16)),
@@ -1145,7 +1166,12 @@ impl KernelKind {
             Self::QmmBm64Bn32 => Some((64, 32)),
             Self::QmmBm32Bn64 => Some((32, 64)),
             Self::QmmBm64Bn64 => Some((64, 64)),
-            Self::QmvBn4Bk32 | Self::QmvBn8Bk32 | Self::QmvQuadBn64 => None,
+            Self::QmvBn4Bk32
+            | Self::QmvBn8Bk32
+            | Self::QmvQuadBn64
+            | Self::QmmSlicedK { .. }
+            | Self::QmmSlicedKBm3Bn4
+            | Self::QmmSimdgroupsBm4Bn32 => None,
         }
     }
 }
@@ -1153,36 +1179,83 @@ impl KernelKind {
 impl Kernel {
     pub fn new(device: &Device, config: Config, kind: KernelKind) -> Self {
         Self::new_with_epilogue(device, config, kind, Epilogue::Identity)
+            .expect("affine kernel exceeds device resources")
     }
 
     /// Fuses stacked gate/up projection and SwiGLU. `config.n` is twice the output width.
     pub fn new_gate_up_swiglu(device: &Device, config: Config, kind: KernelKind) -> Self {
-        Self::new_with_epilogue(device, config, kind, Epilogue::SwiGLU)
+        Self::new_with_epilogue(device, config, kind, Epilogue::SwiGLU).expect("affine kernel exceeds device resources")
     }
 
-    fn new_with_epilogue(device: &Device, config: Config, kind: KernelKind, epilogue: Epilogue) -> Self {
+    fn new_with_epilogue(device: &Device, config: Config, kind: KernelKind, epilogue: Epilogue) -> Option<Self> {
         config.validate();
         assert_eq!(config.n % epilogue.output_divisor(), 0);
         validate_kernel_kind(config, kind, epilogue);
-        let (kernel_name, source) = match epilogue {
-            Epilogue::Identity => affine_kernel_source(config, kind),
-            Epilogue::SwiGLU => gate_up_swiglu_source(config, kind),
+        let sliced_k_threadblock_memory = kind.sliced_k_shape().map(|(row_tiles, column_tiles)| {
+            let (num_simdgroups, _) = sliced_k_geometry(config, epilogue);
+            epilogue.output_divisor() as usize
+                * row_tiles as usize
+                * num_simdgroups
+                * column_tiles as usize
+                * 32
+                * size_of::<[f32; 2]>()
+        });
+        if sliced_k_threadblock_memory.is_some_and(|bytes| bytes > device.max_threadblock_memory_length()) {
+            return None;
+        }
+        let (kernel_name, source) = if matches!(
+            kind,
+            KernelKind::QmmSlicedK { .. } | KernelKind::QmmSlicedKBm3Bn4 | KernelKind::QmmSimdgroupsBm4Bn32
+        ) {
+            small_qmm_source(config, kind, epilogue)
+        } else {
+            match epilogue {
+                Epilogue::Identity => affine_kernel_source(config, kind),
+                Epilogue::SwiGLU => gate_up_swiglu_source(config, kind),
+            }
         };
         let kernel = CompiledKernel::new(device, &source, &kernel_name);
-        if kind.qmm_shape().is_some() {
+        if let Some(threadblock_memory) = sliced_k_threadblock_memory {
+            let (num_simdgroups, _) = sliced_k_geometry(config, epilogue);
+            assert_eq!(kernel.thread_execution_width(), 32);
+            if 32 * num_simdgroups > kernel.max_total_threads_per_threadblock() {
+                return None;
+            }
+            assert_eq!(kernel.static_threadblock_memory_length(), threadblock_memory);
+        } else if let Some((bm, num_simdgroups)) = kind.small_qmm_shape() {
+            let sliced_k = kind == KernelKind::QmmSlicedKBm3Bn4;
+            assert_eq!(kernel.thread_execution_width(), 32);
+            assert!(
+                32 * num_simdgroups * epilogue.output_divisor() as usize <= kernel.max_total_threads_per_threadblock()
+            );
+            let threadblock_memory = if sliced_k || epilogue == Epilogue::SwiGLU {
+                epilogue.output_divisor() as usize * num_simdgroups * 4 * bm as usize * size_of::<f32>()
+            } else {
+                0
+            };
+            assert!(threadblock_memory <= device.max_threadblock_memory_length());
+            assert_eq!(kernel.static_threadblock_memory_length(), threadblock_memory);
+        } else if let Some((bm, _)) = kind.qmm_shape() {
             let operand_dtype = if config.uses_same_dtype() {
                 config.input_dtype
             } else {
                 Dtype::Float32
             };
-            validate_qmm_pipeline(device, operand_dtype, kind, &kernel);
+            validate_qmm_pipeline(
+                device,
+                operand_dtype,
+                kind,
+                qmm_bk(config, bm),
+                qmm_num_simdgroups(bm, epilogue),
+                &kernel,
+            );
         }
-        Self {
+        Some(Self {
             config,
             epilogue,
             kind,
             kernel,
-        }
+        })
     }
 
     pub fn kind(&self) -> KernelKind {
@@ -1298,7 +1371,9 @@ impl Matmul {
 
     /// Returns the first row count for each change in recorded kernel topology.
     pub fn topology_boundaries(&self) -> Box<[u32]> {
-        adaptive_topology_boundaries(self.config, self.registry.epilogue)
+        adaptive_topology_boundaries(self.config, |rows| {
+            Selector::select(&self.registry, self.config, rows).0
+        })
     }
 
     pub fn selected_kernel(&self, m: i32) -> &Kernel {
@@ -1317,40 +1392,77 @@ impl Registry {
             Epilogue::Identity => [KernelKind::QmmBm8Bn32, KernelKind::QmmBm16Bn32, KernelKind::QmmBm32Bn32],
             Epilogue::SwiGLU => [KernelKind::QmmBm8Bn16, KernelKind::QmmBm16Bn16, KernelKind::QmmBm32Bn16],
         };
-        Self {
-            epilogue,
-            entries: [qmv_key, qmm[0], qmm[1], qmm[2]]
-                .into_iter()
-                .chain(
-                    uses_large_qmm(config)
-                        .then_some(match epilogue {
-                            Epilogue::Identity => [KernelKind::QmmBm32Bn64, KernelKind::QmmBm64Bn64],
-                            Epilogue::SwiGLU => [KernelKind::QmmBm32Bn32, KernelKind::QmmBm64Bn32],
-                        })
-                        .into_iter()
-                        .flatten(),
-                )
-                .map(|kind| (kind, Kernel::new_with_epilogue(device, config, kind, epilogue)))
-                .collect(),
+        let kinds = [qmv_key, qmm[0], qmm[1], qmm[2]]
+            .into_iter()
+            .chain(
+                uses_large_qmm(config)
+                    .then_some(match epilogue {
+                        Epilogue::Identity => [KernelKind::QmmBm32Bn64, KernelKind::QmmBm64Bn64],
+                        Epilogue::SwiGLU => [KernelKind::QmmBm32Bn32, KernelKind::QmmBm64Bn32],
+                    })
+                    .into_iter()
+                    .flatten(),
+            )
+            .chain(uses_small_qmm(config, epilogue).then_some(small_qmm_kind(config, epilogue)))
+            .chain(
+                (8..=64)
+                    .step_by(8)
+                    .filter_map(|rows| sliced_k_kind(config, rows, epilogue)),
+            );
+        let mut entries = Vec::new();
+        for kind in kinds {
+            if entries.iter().any(|(key, _)| *key == kind) {
+                continue;
+            }
+            if let Some(kernel) = Kernel::new_with_epilogue(device, config, kind, epilogue) {
+                entries.push((kind, kernel));
+            }
         }
+        Self { epilogue, entries }
     }
 
-    fn get(&self, key: KernelKind) -> &Kernel {
+    fn get(&self, key: KernelKind) -> Option<&Kernel> {
         self.entries
             .iter()
             .find_map(|(candidate_key, kernel)| (*candidate_key == key).then_some(kernel))
-            .unwrap_or_else(|| panic!("missing affine quantized matmul execution variant {key:?}"))
     }
 }
 
 impl Selector {
     fn select(registry: &Registry, config: Config, num_rows: i32) -> (KernelKind, &Kernel) {
         let key = Self::key(config, num_rows, registry.epilogue);
-        (key, registry.get(key))
+        if let Some(kernel) = registry.get(key) {
+            return (key, kernel);
+        }
+        if key.sliced_k_shape().is_none() {
+            panic!("missing affine quantized matmul execution variant {key:?}");
+        }
+        let key = Self::base_key(config, num_rows, registry.epilogue);
+        (
+            key,
+            registry
+                .get(key)
+                .expect("missing base affine quantized matmul execution variant"),
+        )
     }
 
     fn key(config: Config, num_rows: i32, epilogue: Epilogue) -> KernelKind {
+        sliced_k_kind(config, num_rows, epilogue).unwrap_or_else(|| Self::base_key(config, num_rows, epilogue))
+    }
+
+    fn base_key(config: Config, num_rows: i32, epilogue: Epilogue) -> KernelKind {
+        if num_rows == 3 && uses_small_qmm(config, epilogue) {
+            return small_qmm_kind(config, epilogue);
+        }
         if uses_large_qmm(config) && num_rows > QMM_BM16_MAX_ROWS {
+            // A single BM32/BN64 row tile can leave too few independent threadblocks.
+            // BM16/BN32 splits both output axes for more parallel work without partial sums.
+            if epilogue == Epilogue::Identity
+                && num_rows <= 2 * QMM_BM16_MAX_ROWS
+                && ceil_div_i32(config.n, 64) < QMM_MIN_THREADBLOCKS
+            {
+                return KernelKind::QmmBm16Bn32;
+            }
             match (epilogue, num_rows >= QMM_LARGE_MIN_ROWS) {
                 (Epilogue::Identity, false) => KernelKind::QmmBm32Bn64,
                 (Epilogue::Identity, true) => KernelKind::QmmBm64Bn64,
@@ -1448,14 +1560,32 @@ impl Operator for Invocation<'_> {
         recorder.set_i32(6, output_cols);
         record_num_active_rows(recorder, 7, num_total_rows, self.num_active_rows_key);
 
-        if let Some((bm, bn)) = kernel.kind.qmm_shape() {
+        if let Some((row_tiles, column_tiles)) = kernel.kind.sliced_k_shape() {
+            let (num_simdgroups, _) = sliced_k_geometry(config, kernel.epilogue);
+            recorder.dispatch_threadblocks(
+                (
+                    ceil_div_i32(num_total_rows_i32, 8 * row_tiles as i32) as usize,
+                    output_cols as usize / (8 * column_tiles as usize),
+                    1,
+                ),
+                (32 * num_simdgroups, 1, 1),
+            );
+        } else if let Some((bm, num_simdgroups)) = kernel.kind.small_qmm_shape() {
+            let sliced_k = kernel.kind == KernelKind::QmmSlicedKBm3Bn4;
+            assert!(num_total_rows <= bm, "small QMM recorded rows must fit its tile");
+            let columns = if sliced_k { 4 } else { 32 };
+            recorder.dispatch_threadblocks(
+                (1, output_cols as usize / columns, 1),
+                (32 * num_simdgroups * kernel.epilogue.output_divisor() as usize, 1, 1),
+            );
+        } else if let Some((bm, bn)) = kernel.kind.qmm_shape() {
             recorder.dispatch_threadblocks(
                 (
                     ceil_div_i32(output_cols, bn) as usize,
                     ceil_div_i32(num_total_rows_i32, bm) as usize,
                     1,
                 ),
-                (32, 2, if bm >= 32 { 2 } else { 1 }),
+                (32, qmm_num_simdgroups(bm, kernel.epilogue), 1),
             );
         } else {
             let (bn, num_simdgroups) = match kernel.kind {
@@ -1563,8 +1693,7 @@ fn gate_up_swiglu_source(config: Config, kind: KernelKind) -> (String, String) {
     let output_type = metal_type_string(config.output_dtype);
     let param_type = metal_type_string(config.scale_bias_dtype);
     let shape = kind.qmm_shape();
-    let bm = shape.map(|(bm, _)| bm);
-    let (function, source) = if bm.is_some() {
+    let (function, source) = if shape.is_some() {
         ("affine_qmm_gate_up_swiglu", DENSE_GATE_UP_SWIGLU_STEEL_SOURCE)
     } else {
         ("affine_qmv_gate_up_swiglu", DENSE_GATE_UP_SWIGLU_SOURCE)
@@ -1576,10 +1705,10 @@ fn gate_up_swiglu_source(config: Config, kind: KernelKind) -> (String, String) {
         config.group_size.to_string(),
         config.bits.to_string(),
     ];
-    if let Some(bm) = bm {
+    if let Some((bm, bn)) = shape {
         args.push(bm.to_string());
-        args.push(shape.unwrap().1.to_string());
-        args.push(QMM_BK.to_string());
+        args.push(bn.to_string());
+        args.push(qmm_bk(config, bm).to_string());
     } else {
         let bn = if kind == KernelKind::QmvBn4Bk32 { 4 } else { 8 };
         args.push(bn.to_string());
@@ -1593,7 +1722,7 @@ fn gate_up_swiglu_source(config: Config, kind: KernelKind) -> (String, String) {
     }
     let kernel_name = format!("{function}_{}", args.join("_"));
     let definition = template_definition(&kernel_name, function, &args);
-    let dependencies = if bm.is_some() {
+    let dependencies = if shape.is_some() {
         MIXED_AFFINE_SOURCE.to_owned()
     } else {
         String::new()
@@ -1616,11 +1745,228 @@ fn affine_kernel_source(config: Config, kind: KernelKind) -> (String, String) {
     }
 }
 
+fn sliced_k_geometry(config: Config, epilogue: Epilogue) -> (usize, usize) {
+    let output_cols = config.n / epilogue.output_divisor();
+    if output_cols >= 65_536 {
+        (4, 4)
+    } else {
+        (8, if config.k >= 16_384 { 2 } else { 1 })
+    }
+}
+
+fn uses_sliced_k(config: Config, epilogue: Epilogue, column_tiles: u32) -> bool {
+    let (num_simdgroups, _) = sliced_k_geometry(config, epilogue);
+    let output_cols = config.n / epilogue.output_divisor();
+    config.uses_same_dtype()
+        && matches!(config.input_dtype, Dtype::Bfloat16 | Dtype::Float16)
+        && config.bits == 4
+        && output_cols >= 1024
+        && output_cols % (8 * column_tiles as i32) == 0
+        && config.k % (config.group_size * num_simdgroups as i32) == 0
+}
+
+// Row tiles reuse packed weights without changing each row's K reduction.
+// Keep the unmeasured dtype/group-size domain on the existing Steel policy.
+fn sliced_k_kind(config: Config, num_rows: i32, epilogue: Epilogue) -> Option<KernelKind> {
+    if !(4..=64).contains(&num_rows) {
+        return None;
+    }
+    let (_, default_column_tiles) = sliced_k_geometry(config, epilogue);
+    let output_cols = config.n / epilogue.output_divisor();
+    let (row_tiles, mut column_tiles) = if num_rows <= 8 {
+        (1, default_column_tiles as u32)
+    } else {
+        if !uses_large_qmm(config) || output_cols < 4096 {
+            return None;
+        }
+        let tiles = ceil_div_i32(num_rows, 8);
+        // Wide projections already expose enough Steel threadblocks at these capacities.
+        if (output_cols >= 65_536 && matches!(tiles, 4 | 7 | 8)) || (epilogue == Epilogue::SwiGLU && tiles == 8) {
+            return None;
+        }
+        let row_tiles = match tiles {
+            2 => 2,
+            3 | 6 => 3,
+            4 if epilogue == Epilogue::SwiGLU => 4,
+            4 | 8 => 2,
+            5 | 7 => 1,
+            _ => unreachable!(),
+        };
+        let column_tiles = if row_tiles == 1 {
+            2
+        } else if epilogue == Epilogue::SwiGLU {
+            1
+        } else {
+            4
+        };
+        (row_tiles, column_tiles)
+    };
+    if num_rows > 8 {
+        // Narrow CT until complete column tiles preserve enough independent work.
+        while column_tiles > 1
+            && (output_cols % (8 * column_tiles as i32) != 0
+                || (epilogue == Epilogue::Identity
+                    && row_tiles > 1
+                    && ceil_div_i32(num_rows, 8 * row_tiles as i32) * (output_cols / (8 * column_tiles as i32))
+                        < QMM_MIN_THREADBLOCKS))
+        {
+            column_tiles /= 2;
+        }
+    }
+    uses_sliced_k(config, epilogue, column_tiles).then_some(KernelKind::QmmSlicedK {
+        row_tiles,
+        column_tiles,
+    })
+}
+
+fn uses_small_qmm(config: Config, epilogue: Epilogue) -> bool {
+    let output_cols = config.n / epilogue.output_divisor();
+    config.uses_same_dtype()
+        && matches!(config.input_dtype, Dtype::Bfloat16 | Dtype::Float16)
+        && matches!(config.bits, 4 | 8)
+        && config.k % 64 == 0
+        && output_cols >= 4096
+        && output_cols % 4 == 0
+}
+
+fn small_qmm_kind(config: Config, epilogue: Epilogue) -> KernelKind {
+    let output_cols = config.n / epilogue.output_divisor();
+    if output_cols >= 100_000 && output_cols % 32 == 0 {
+        KernelKind::QmmSimdgroupsBm4Bn32
+    } else {
+        KernelKind::QmmSlicedKBm3Bn4
+    }
+}
+
+fn small_qmm_source(config: Config, kind: KernelKind, epilogue: Epilogue) -> (String, String) {
+    let (function, args) = if let Some((row_tiles, column_tiles)) = kind.sliced_k_shape() {
+        let (num_simdgroups, _) = sliced_k_geometry(config, epilogue);
+        (
+            "affine_qmm_sliced_k",
+            vec![
+                metal_type_string(config.input_dtype).to_string(),
+                config.k.to_string(),
+                (config.n / epilogue.output_divisor()).to_string(),
+                config.group_size.to_string(),
+                num_simdgroups.to_string(),
+                column_tiles.to_string(),
+                (epilogue == Epilogue::SwiGLU).to_string(),
+                row_tiles.to_string(),
+            ],
+        )
+    } else {
+        let (bm, num_simdgroups) = kind.small_qmm_shape().unwrap();
+        let sliced_k = kind == KernelKind::QmmSlicedKBm3Bn4;
+        (
+            "affine_qmm_small",
+            vec![
+                metal_type_string(config.input_dtype).to_string(),
+                config.group_size.to_string(),
+                config.bits.to_string(),
+                bm.to_string(),
+                num_simdgroups.to_string(),
+                sliced_k.to_string(),
+                (epilogue == Epilogue::SwiGLU).to_string(),
+            ],
+        )
+    };
+    let kernel_name = format!("{function}_{}", args.join("_"));
+    let definition = template_definition(&kernel_name, function, &args);
+    let source = if let Some((bm, _)) = kind.small_qmm_shape() {
+        let (pointers, dot) = small_qmm_dot_source(config.bits, bm, kind == KernelKind::QmmSlicedKBm3Bn4);
+        SMALL_QMM_SOURCE
+            .replace("/* SMALL_QMM_COLUMN_POINTERS */", &pointers)
+            .replace("/* SMALL_QMM_PACKED_DOT */", &dot)
+    } else {
+        SMALL_QMM_SOURCE.to_string()
+    };
+    (kernel_name, affine_quantized_source(&format!("{source}\n{definition}")))
+}
+
+// Preserve the upstream's literal accumulator indices and column-load order.
+// SIMDgroup-column kernels unroll the nibble loop across all four columns.
+fn small_qmm_dot_source(bits: i32, bm: u32, sliced_k: bool) -> (String, String) {
+    let packed_stride = if bits == 4 { "packs" } else { "K / 4" };
+    let mut pointers = vec![
+        format!("const device uint* wp0 = w + ulong(n0) * ({packed_stride});"),
+        "const device T* sp0 = scales + ulong(n0) * groups;".to_string(),
+        "const device T* bp0 = biases + ulong(n0) * groups;".to_string(),
+    ];
+    for column in 1..4 {
+        pointers.push(format!(
+            "const device uint* wp{column} = wp0 + {column} * ({packed_stride});"
+        ));
+        pointers.push(format!("const device T* sp{column} = sp0 + {column} * groups;"));
+        pointers.push(format!("const device T* bp{column} = bp0 + {column} * groups;"));
+    }
+    let mut lines = Vec::new();
+    let mut row_loads: Vec<_> = (0..bm).map(|row| format!("Vec8 v{row} = x{row}[pack];")).collect();
+    if sliced_k {
+        lines.append(&mut row_loads);
+    }
+    for column in 0..4 {
+        if bits == 4 {
+            lines.push(format!("uint p{column} = wp{column}[pack];"));
+        } else {
+            lines.push(format!("uint pa{column} = wp{column}[pack * 2];"));
+            lines.push(format!("uint pb{column} = wp{column}[pack * 2 + 1];"));
+        }
+    }
+    if !sliced_k {
+        lines.extend(row_loads);
+    }
+    for column in 0..4 {
+        lines.push(format!("float s{column} = float(sp{column}[gi]);"));
+        lines.push(format!("float b{column} = float(bp{column}[gi]);"));
+    }
+    let append_dot = |lines: &mut Vec<String>, column: u32, high: bool| {
+        let index = if high { "ki + 4" } else { "ki" };
+        let word = if bits == 4 {
+            format!("p{column}")
+        } else {
+            format!("p{}{column}", if high { "b" } else { "a" })
+        };
+        let shift = bits;
+        let mask = if bits == 4 { "0xFu" } else { "0xFFu" };
+        lines.push(format!(
+            "float w{column} = float(({word} >> (ki * {shift})) & {mask}) * s{column} + b{column};"
+        ));
+        for row in 0..bm {
+            lines.push(format!(
+                "acc[{}] += float(v{row}[{index}]) * w{column};",
+                column * bm + row
+            ));
+        }
+    };
+    let values = 32 / bits;
+    if sliced_k {
+        for column in 0..4 {
+            lines.push(format!("for (int ki = 0; ki < {values}; ++ki) {{"));
+            append_dot(&mut lines, column, false);
+            if bits == 8 {
+                lines.push("{".to_string());
+                append_dot(&mut lines, column, true);
+                lines.push("}".to_string());
+            }
+            lines.push("}".to_string());
+        }
+    } else {
+        for high in [false, true].into_iter().take(if bits == 4 { 1 } else { 2 }) {
+            lines.push(format!("#pragma unroll\nfor (int ki = 0; ki < {values}; ++ki) {{"));
+            for column in 0..4 {
+                append_dot(&mut lines, column, high);
+            }
+            lines.push("}".to_string());
+        }
+    }
+    (pointers.join("\n"), lines.join("\n"))
+}
+
 fn affine_qmm_source(config: Config, bm: i32, bn: i32) -> (String, String) {
     let input_type = metal_type_string(config.input_dtype);
     let output_type = metal_type_string(config.output_dtype);
     let scale_bias_type = metal_type_string(config.scale_bias_dtype);
-    let bk = QMM_BK;
+    let bk = qmm_bk(config, bm);
     let kernel_name = format!(
         "affine_qmm_steel_bm{bm}_bn{bn}_bk{bk}_{input_type}_{scale_bias_type}_{output_type}_gs_{}_b_{}",
         config.group_size, config.bits
@@ -1754,9 +2100,31 @@ const EXPERT_QMV_THREADBLOCKS: i32 = 1024;
 const EXPERT_QMM_MIN_ROWS: i32 = 4;
 const QMM_BM8_MAX_ROWS: i32 = 8;
 const QMM_BM16_MAX_ROWS: i32 = 16;
+const QMM_MIN_THREADBLOCKS: i32 = 256;
 const QMM_LARGE_MIN_ROWS: i32 = 2048;
-// Steel consumes 8x8 fragments. BK32 bounds SMEM and works for every group size.
+// BK32 is the default for Steel 8x8 fragments and supports every group size.
 const QMM_BK: usize = 32;
+
+fn qmm_bk(config: Config, bm: i32) -> usize {
+    if bm <= 16
+        && config.uses_same_dtype()
+        && config.input_dtype == Dtype::Bfloat16
+        && config.group_size >= 64
+        && config.n < 65_536
+    {
+        64
+    } else {
+        QMM_BK
+    }
+}
+
+fn qmm_num_simdgroups(bm: i32, epilogue: Epilogue) -> usize {
+    if bm >= 32 || matches!(epilogue, Epilogue::Identity) {
+        4
+    } else {
+        2
+    }
+}
 
 fn uses_large_qmm(config: Config) -> bool {
     config.uses_same_dtype()
@@ -1767,17 +2135,25 @@ fn uses_large_qmm(config: Config) -> bool {
         && config.k >= 4096
 }
 
-fn adaptive_topology_boundaries(config: Config, epilogue: Epilogue) -> Box<[u32]> {
+fn adaptive_topology_boundaries(config: Config, key: impl Fn(i32) -> KernelKind) -> Box<[u32]> {
     let mut candidates = [
+        3,
+        4,
         adaptive_qmv_batch_limit(config),
         QMM_BM8_MAX_ROWS + 1,
         QMM_BM16_MAX_ROWS + 1,
+        25,
+        33,
+        41,
+        49,
+        57,
+        65,
         QMM_LARGE_MIN_ROWS,
     ];
     candidates.sort_unstable();
     let mut boundaries = Vec::with_capacity(candidates.len());
     for boundary in candidates {
-        if boundary > 1 && Selector::key(config, boundary - 1, epilogue) != Selector::key(config, boundary, epilogue) {
+        if boundary > 1 && key(boundary - 1) != key(boundary) {
             let boundary = boundary as u32;
             if boundaries.last() != Some(&boundary) {
                 boundaries.push(boundary);
@@ -1794,6 +2170,9 @@ fn validate_kernel_kind(config: Config, kind: KernelKind, epilogue: Epilogue) {
                 kind,
                 KernelKind::QmvBn8Bk32
                     | KernelKind::QmvQuadBn64
+                    | KernelKind::QmmSlicedK { .. }
+                    | KernelKind::QmmSlicedKBm3Bn4
+                    | KernelKind::QmmSimdgroupsBm4Bn32
                     | KernelKind::QmmBm8Bn32
                     | KernelKind::QmmBm16Bn32
                     | KernelKind::QmmBm32Bn32
@@ -1807,6 +2186,9 @@ fn validate_kernel_kind(config: Config, kind: KernelKind, epilogue: Epilogue) {
                 kind,
                 KernelKind::QmvBn4Bk32
                     | KernelKind::QmvBn8Bk32
+                    | KernelKind::QmmSlicedK { .. }
+                    | KernelKind::QmmSlicedKBm3Bn4
+                    | KernelKind::QmmSimdgroupsBm4Bn32
                     | KernelKind::QmmBm8Bn16
                     | KernelKind::QmmBm16Bn16
                     | KernelKind::QmmBm32Bn16
@@ -1828,6 +2210,21 @@ fn validate_kernel_kind(config: Config, kind: KernelKind, epilogue: Epilogue) {
         | KernelKind::QmmBm64Bn32
         | KernelKind::QmmBm32Bn64
         | KernelKind::QmmBm64Bn64 => {},
+        KernelKind::QmmSlicedKBm3Bn4 | KernelKind::QmmSimdgroupsBm4Bn32 => {
+            assert!(uses_small_qmm(config, epilogue));
+            assert_eq!(kind, small_qmm_kind(config, epilogue));
+        },
+        KernelKind::QmmSlicedK {
+            row_tiles,
+            column_tiles,
+        } => {
+            assert!((1..=4).contains(&row_tiles));
+            assert!(matches!(column_tiles, 1 | 2 | 4));
+            assert!(
+                uses_sliced_k(config, epilogue, column_tiles),
+                "sliced-K MMA requires aligned Q4 FP16 or BF16 affine operands"
+            );
+        },
         KernelKind::QmvQuadBn64 => {
             assert!(
                 config.uses_same_dtype(),
@@ -1841,9 +2238,15 @@ fn validate_kernel_kind(config: Config, kind: KernelKind, epilogue: Epilogue) {
     }
 }
 
-fn validate_qmm_pipeline(device: &Device, operand_dtype: Dtype, kind: KernelKind, kernel: &CompiledKernel) {
+fn validate_qmm_pipeline(
+    device: &Device,
+    operand_dtype: Dtype,
+    kind: KernelKind,
+    bk: usize,
+    num_simdgroups: usize,
+    kernel: &CompiledKernel,
+) {
     let (bm, bn) = kind.qmm_shape().unwrap();
-    let num_simdgroups = if bm >= 32 { 4 } else { 2 };
     let num_threads = num_simdgroups * kernel.thread_execution_width();
     assert_eq!(
         kernel.thread_execution_width(),
@@ -1856,7 +2259,7 @@ fn validate_qmm_pipeline(device: &Device, operand_dtype: Dtype, kind: KernelKind
         kernel.max_total_threads_per_threadblock()
     );
     let item_size = operand_dtype.item_size();
-    let bk_padded = QMM_BK + 16 / item_size;
+    let bk_padded = bk + 16 / item_size;
     // Dimensions come from the bounded tile family and validated quantization group.
     let expected_threadblock_memory = (bm as usize + bn as usize) * bk_padded * item_size;
     assert!(
@@ -1918,6 +2321,7 @@ const EXPERT_MAJOR_STEEL_SOURCE: &str = include_str!("metal/affine_quantized_exp
 const STEEL_SOURCE: &str = include_str!("metal/affine_quantized_steel.metal");
 
 const QMM_STEEL_SOURCE: &str = include_str!("metal/affine_quantized_qmm_steel.metal");
+const SMALL_QMM_SOURCE: &str = include_str!("metal/affine_quantized_small_qmm.metal");
 
 const MIXED_AFFINE_SOURCE: &str = include_str!("metal/affine_quantized_mixed.metal");
 

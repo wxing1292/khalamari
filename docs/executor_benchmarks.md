@@ -96,6 +96,9 @@ Treat a concurrent compute dispatch and a multi-queue overlap as separate measur
 - `norm` measures standalone RMSNorm and residual-add RMSNorm variants.
   The `rms-only/replay64` cases record 64 standalone BF16 RMSNorm commands in one replay.
   This method amortizes command submission and wait overhead for kernel-level comparisons.
+- `affine_quantized_matmul` compares automatic and forced QMV/QMM routes.
+  Its BF16 profiles cover square 4K/8K and wide 12K/14K/16K/32K outputs, plus a 5120 projection and a mixed-dtype projection.
+  Row counts cover 1–8 and include 16, 17, 24, 32, 33, 40, 48, 56, 64, and 65 to expose QMV and QMM routing boundaries.
 - `matmul_bf16` measures the production adaptive BF16 matmul owner. It covers the `M = 1` GEMV path and the Steel
   GEMM path with Qwen3-ASR hidden, FFN-up, and convolution-output matrix shapes.
 - `buffer_io` measures the production Metal `BufferIO` API at `4`, `64`, and `128 MiB`.
