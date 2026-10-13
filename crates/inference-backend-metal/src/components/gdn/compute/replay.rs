@@ -152,13 +152,6 @@ impl Operator for ReplayInvocation<'_> {
             self.shape.num_total_reqs,
         );
         compute.dispatch_short_conv(recorder, self.shape);
-        compute.record_candidate_conv_state(
-            recorder,
-            self.shape,
-            &self.buffers,
-            self.num_active_reqs,
-            self.num_active_tokens,
-        );
         // Recurrent and replay requests have disjoint state slots and output rows.
         recorder.record_disjoint_buffers(
             &[self.buffers.recurrent_output, self.buffers.recurrent_state_arena],

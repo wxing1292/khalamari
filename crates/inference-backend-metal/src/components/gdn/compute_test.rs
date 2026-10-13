@@ -839,15 +839,6 @@ impl Operator for SerialMixedInvocation<'_> {
             invocation.num_active_tokens,
             !invocation.write_candidate_states,
         );
-        if invocation.write_candidate_states {
-            compute.record_candidate_conv_state(
-                recorder,
-                invocation.shape,
-                &invocation.buffers,
-                invocation.num_active_reqs,
-                invocation.num_active_tokens,
-            );
-        }
         recurrent::record_recurrent_state(
             compute,
             recorder,

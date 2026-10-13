@@ -109,7 +109,6 @@ struct ModelGeometry {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct KernelSetConstants {
     short_conv: KernelConstants<ThreadBlockConstants>,
-    candidate_conv_state: KernelConstants<ThreadBlockConstants>,
     final_recurrent_state: KernelConstants<FinalRecurrentStateThreadBlockConstants>,
     recurrent_state: KernelConstants<RecurrentStateThreadBlockConstants>,
     candidate_recurrent_state: KernelConstants<CandidateRecurrentStateThreadBlockConstants>,
@@ -285,11 +284,6 @@ impl ComputeConstants {
                         required_threads: SHORT_CONV_REQUIRED_THREADS,
                     },
                 },
-                candidate_conv_state: KernelConstants {
-                    thread_block: ThreadBlockConstants {
-                        required_threads: SHORT_CONV_REQUIRED_THREADS,
-                    },
-                },
                 final_recurrent_state: KernelConstants {
                     thread_block: FinalRecurrentStateThreadBlockConstants {
                         num_qk_dim_threads: FINAL_RECURRENT_STATE_NUM_QK_DIM_THREADS,
@@ -336,7 +330,6 @@ impl ComputeConstants {
 
     fn validate(self) {
         assert!(self.kernels.short_conv.thread_block.required_threads > 0);
-        assert!(self.kernels.candidate_conv_state.thread_block.required_threads > 0);
         let final_recurrent_state = self.kernels.final_recurrent_state.thread_block;
         assert_eq!(
             final_recurrent_state.required_threads,
@@ -410,17 +403,6 @@ impl ModelGeometry {
             "GDN convolution state element count",
             &[
                 shape.num_total_reqs as usize,
-                self.qkv_dim() as usize,
-                self.conv_state_len() as usize,
-            ],
-        )
-    }
-
-    fn num_candidate_conv_state_values(self, shape: Shape) -> usize {
-        checked_product(
-            "GDN candidate convolution state element count",
-            &[
-                shape.num_total_tokens as usize,
                 self.qkv_dim() as usize,
                 self.conv_state_len() as usize,
             ],
@@ -555,7 +537,6 @@ pub struct Compute {
     short_conv: CompiledKernel,
     short_conv_replay: CompiledKernel,
     replay: CompiledKernel,
-    candidate_conv_state: CompiledKernel,
     final_recurrent_state: CompiledKernel,
     recurrent_state: CompiledKernel,
     candidate_recurrent_state: CompiledKernel,
@@ -590,7 +571,6 @@ impl Compute {
             short_conv: CompiledKernel::new(device, &source, "gdn_compute_short_conv_bf16"),
             short_conv_replay: CompiledKernel::new(device, &source, "gdn_compute_short_conv_replay_bf16"),
             replay,
-            candidate_conv_state: CompiledKernel::new(device, &source, "gdn_compute_candidate_conv_state_bf16"),
             final_recurrent_state: CompiledKernel::new(device, &source, "gdn_compute_final_recurrent_state_bf16"),
             recurrent_state,
             candidate_recurrent_state: CompiledKernel::new(
@@ -710,43 +690,9 @@ impl Compute {
     }
 
     fn dispatch_short_conv(&self, recorder: &CommandRecorder, shape: Shape) {
-        let total_short_conv_threads = self
-            .constants
-            .model
-            .num_qkv_values(shape)
-            .max(self.constants.model.num_conv_state_values(shape));
         recorder.dispatch_1d(
-            total_short_conv_threads,
+            self.constants.model.num_qkv_values(shape),
             self.constants.kernels.short_conv.thread_block.required_threads as usize,
-        );
-    }
-
-    fn record_candidate_conv_state(
-        &self,
-        recorder: &CommandRecorder,
-        shape: Shape,
-        buffers: &Buffers<'_>,
-        num_active_reqs: ReplayU32,
-        num_active_tokens: ReplayU32,
-    ) {
-        recorder.set_kernel(&self.candidate_conv_state);
-        recorder.set_barrier_before();
-        recorder.set_buffer_write(0, buffers.next_conv_state, 0);
-        recorder.set_buffer_read(1, buffers.qkv, 0);
-        recorder.set_buffer_read(2, buffers.conv_state, 0);
-        recorder.set_buffer_read(3, buffers.src_conv_state_slots, 0);
-        recorder.set_buffer_read(4, buffers.flat_conv_state_write_slots, 0);
-        recorder.set_buffer_read(5, buffers.cu_tokens, 0);
-        set_batch_args(recorder, shape, 6, num_active_reqs, num_active_tokens);
-        recorder.set_u64(8, buffers.conv_state_offset_bytes);
-        recorder.set_u64(9, buffers.next_conv_state_offset_bytes);
-        recorder.dispatch_1d(
-            self.constants.model.num_candidate_conv_state_values(shape),
-            self.constants
-                .kernels
-                .candidate_conv_state
-                .thread_block
-                .required_threads as usize,
         );
     }
 
@@ -836,10 +782,6 @@ impl Operator for CandidateStateUpdateInvocation<'_> {
     fn record(self, recorder: &CommandRecorder<'_>) {
         let compute = self.compute;
         compute.constants.validate_shape(self.shape);
-        assert_u32_count_domain(
-            compute.constants.model.num_candidate_conv_state_values(self.shape),
-            "GDN candidate convolution state",
-        );
         validate_buffers(compute.constants, self.shape, &self.buffers);
         compute.record_short_conv(
             recorder,
@@ -848,13 +790,6 @@ impl Operator for CandidateStateUpdateInvocation<'_> {
             self.num_active_reqs,
             self.num_active_tokens,
             false,
-        );
-        compute.record_candidate_conv_state(
-            recorder,
-            self.shape,
-            &self.buffers,
-            self.num_active_reqs,
-            self.num_active_tokens,
         );
         recurrent_snapshot::record_candidate_recurrent_state(
             compute,
@@ -896,19 +831,6 @@ impl Operator for MixedInvocation<'_> {
             self.num_active_tokens,
             !self.write_candidate_states,
         );
-        if self.write_candidate_states {
-            assert_u32_count_domain(
-                compute.constants.model.num_candidate_conv_state_values(self.shape),
-                "GDN candidate convolution state",
-            );
-            compute.record_candidate_conv_state(
-                recorder,
-                self.shape,
-                &self.buffers,
-                self.num_active_reqs,
-                self.num_active_tokens,
-            );
-        }
         // The request prefix and suffix own disjoint output rows and state
         // slots. State slots may be scattered, but each has one request owner.
         recorder.record_disjoint_buffers(

@@ -133,8 +133,16 @@ Both branches retain the full recorded request capacity. Their active counts sel
 An empty branch performs no work. The two cores access disjoint output rows and request-owned state slots.
 The recorder declares that disjoint access. Output norm/gate waits for both cores through buffer dependencies.
 
+Short convolution writes requested convolution snapshots in the same dispatch.
+Each thread owns one token/channel pair and reads that token's destination slot once.
+An invalid slot suppresses the snapshot. Final-only mode also suppresses nonfinal destinations.
+The convolution loop reuses raw inputs from taps `1..Kc` to store the next `Ks` history values.
+It does not apply convolution weights or SiLU to the stored history.
+The recorded grid covers `num_total_tokens * Cqkv`. Inactive threads return before they read metadata.
+The component records no separate convolution snapshot command.
+
 Short convolution also copies raw QKV for replay requests in the same dispatch.
-Its compile-time `SaveReplay` specialization keeps the old standalone recurrent APIs independent of the log.
+Its compile-time `SaveReplay` specialization keeps the standalone recurrent APIs independent of the log.
 
 Recurrent and replay use F32 register recurrence. Neither path uses TensorOps or a triangular chunkwise solve.
 `Compute` owns both kernels. Initialization selects their static geometry and validates the pipeline and SMEM limits.
@@ -249,6 +257,8 @@ Qwen's sampled input contract requires at least one fixed input.
 
 The model retains the Main replay cache. GDN does not own a separate component replay cache.
 `GDNReplayTopology` contains the QKVABZ and output affine topologies. Total capacities and model topology are record-time facts.
+Both projections use the shared [affine selection policy](executor_dense_mlp.md#backend-selection).
+Their sliced-K MMA topologies include the recorded row and column tile counts.
 The prefill/decode mixture is submission data and does not create a new Main key by itself.
 
 ### Execution strategy

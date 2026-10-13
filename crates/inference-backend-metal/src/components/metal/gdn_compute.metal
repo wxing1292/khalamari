@@ -31,107 +31,13 @@ kernel void gdn_compute_short_conv(
     constant uint& num_active_recurrent_requests [[buffer(15)]],
     uint global_linear_index [[thread_position_in_grid]]
 ) {
-    const ulong conv_state_base = conv_state_offset_bytes / sizeof(bfloat16_t);
-    const ulong next_conv_state_base = next_conv_state_offset_bytes / sizeof(bfloat16_t);
-    const uint num_conv_qkv_values = num_active_tokens * qkv_dim;
-    const uint num_next_conv_state_values = num_active_reqs * qkv_dim * conv_state_len;
-
-    if (global_linear_index < num_conv_qkv_values) {
-        const uint channel_index = global_linear_index % qkv_dim;
-        const uint flat_token_index = global_linear_index / qkv_dim;
-        uint req_index = 0;
-        for (uint candidate_req_index = 0; candidate_req_index < num_active_reqs; ++candidate_req_index) {
-            if (flat_token_index < cu_tokens[candidate_req_index + 1]) {
-                req_index = candidate_req_index;
-                break;
-            }
-        }
-        const uint flat_token_begin = cu_tokens[req_index];
-        const uint token_index_in_req = flat_token_index - flat_token_begin;
-        const uint src_state_slot = src_conv_state_slots[req_index];
-
-        float acc = 0.0f;
-        for (uint kernel_index = 0; kernel_index < conv_kernel_size; ++kernel_index) {
-            const long sequence_index =
-                (long)token_index_in_req + (long)kernel_index - (long)conv_state_len;
-            float x = 0.0f;
-            if (sequence_index < 0) {
-                const uint state_index = uint(sequence_index + (long)conv_state_len);
-                const uint state_offset = (src_state_slot * qkv_dim + channel_index) * conv_state_len + state_index;
-                x = conv_state[conv_state_base + (ulong)state_offset];
-            } else {
-                const ulong input_offset = (ulong)(flat_token_begin + uint(sequence_index)) * input_qkv_stride + channel_index;
-                x = qkv[input_offset];
-            }
-            const uint weight_offset = channel_index * conv_kernel_size + kernel_index;
-            acc += x * float(conv_weight[weight_offset]);
-        }
-        if constexpr (SaveReplay) {
-            if (req_index >= num_active_recurrent_requests) {
-                const uint replay_token_index = flat_token_index - cu_tokens[num_active_recurrent_requests];
-                replay_qkv[(replay_token_offset + replay_token_index) * qkv_dim + channel_index] = qkv[(ulong)flat_token_index * input_qkv_stride + channel_index];
-            }
-        }
-        conv_qkv[global_linear_index] = bfloat16_t(acc / (1.0f + metal::exp(-acc)));
-    }
-
-    if (global_linear_index < num_next_conv_state_values) {
-        const uint state_index = global_linear_index % conv_state_len;
-        const uint channel_group = global_linear_index / conv_state_len;
-        const uint channel_index = channel_group % qkv_dim;
-        const uint req_index = channel_group / qkv_dim;
-        const uint flat_token_begin = cu_tokens[req_index];
-        const uint flat_token_end = cu_tokens[req_index + 1];
-        const uint num_req_tokens = flat_token_end - flat_token_begin;
-        const uint src_state_slot = src_conv_state_slots[req_index];
-        // An invalid slot keeps the row output but does not materialize its state.
-        const uint state_slot = flat_conv_state_write_slots[flat_token_end - 1];
-        const long sequence_index = (long)num_req_tokens + (long)state_index - (long)conv_state_len;
-        float x = 0.0f;
-        if (sequence_index < 0) {
-            const uint src_state_index = state_index + num_req_tokens;
-            const uint state_offset =
-                (src_state_slot * qkv_dim + channel_index) * conv_state_len + src_state_index;
-            x = conv_state[conv_state_base + (ulong)state_offset];
-        } else {
-            const ulong input_offset = (ulong)(flat_token_begin + uint(sequence_index)) * input_qkv_stride + channel_index;
-            x = qkv[input_offset];
-        }
-        if (write_final_conv_state != 0 && state_slot != GDN_INVALID_STATE_SLOT_ID) {
-            const uint dst_offset = (state_slot * qkv_dim + channel_index) * conv_state_len + state_index;
-            next_conv_state[next_conv_state_base + (ulong)dst_offset] = bfloat16_t(x);
-        }
-    }
-}
-
-template [[host_name("gdn_compute_short_conv_bf16")]] [[kernel]]
-decltype(gdn_compute_short_conv<false>) gdn_compute_short_conv<false>;
-template [[host_name("gdn_compute_short_conv_replay_bf16")]] [[kernel]]
-decltype(gdn_compute_short_conv<true>) gdn_compute_short_conv<true>;
-
-kernel void gdn_compute_candidate_conv_state_bf16(
-    device bfloat16_t* next_conv_state [[buffer(0)]],
-    device const bfloat16_t* qkv [[buffer(1)]],
-    device const bfloat16_t* conv_state [[buffer(2)]],
-    device const uint* src_conv_state_slots [[buffer(3)]],
-    device const uint* flat_conv_state_write_slots [[buffer(4)]],
-    device const uint* cu_tokens [[buffer(5)]],
-    constant uint& num_active_reqs [[buffer(6)]],
-    constant uint& num_active_tokens [[buffer(7)]],
-    constant ulong& conv_state_offset_bytes [[buffer(8)]],
-    constant ulong& next_conv_state_offset_bytes [[buffer(9)]],
-    uint global_linear_index [[thread_position_in_grid]]
-) {
-    const ulong conv_state_base = conv_state_offset_bytes / sizeof(bfloat16_t);
-    const ulong next_conv_state_base = next_conv_state_offset_bytes / sizeof(bfloat16_t);
-    const uint state_index = global_linear_index % conv_state_len;
-    uint coordinate_linear_index = global_linear_index / conv_state_len;
-    const uint channel_index = coordinate_linear_index % qkv_dim;
-    const uint flat_token_index = coordinate_linear_index / qkv_dim;
-    if (flat_token_index >= num_active_tokens) {
+    if (global_linear_index >= num_active_tokens * qkv_dim) {
         return;
     }
-
+    const ulong conv_state_base = conv_state_offset_bytes / sizeof(bfloat16_t);
+    const ulong next_conv_state_base = next_conv_state_offset_bytes / sizeof(bfloat16_t);
+    const uint channel_index = global_linear_index % qkv_dim;
+    const uint flat_token_index = global_linear_index / qkv_dim;
     uint req_index = 0;
     for (uint candidate_req_index = 0; candidate_req_index < num_active_reqs; ++candidate_req_index) {
         if (flat_token_index < cu_tokens[candidate_req_index + 1]) {
@@ -139,28 +45,47 @@ kernel void gdn_compute_candidate_conv_state_bf16(
             break;
         }
     }
-
     const uint flat_token_begin = cu_tokens[req_index];
-    const uint num_verified_req_tokens = flat_token_index - flat_token_begin + 1;
+    const uint token_index_in_req = flat_token_index - flat_token_begin;
     const uint src_state_slot = src_conv_state_slots[req_index];
     const uint state_slot = flat_conv_state_write_slots[flat_token_index];
-    if (state_slot == GDN_INVALID_STATE_SLOT_ID) {
-        return;
+    const bool write_state = state_slot != GDN_INVALID_STATE_SLOT_ID
+        && (write_final_conv_state == 0 || flat_token_index + 1 == cu_tokens[req_index + 1]);
+
+    float acc = 0.0f;
+    for (uint kernel_index = 0; kernel_index < conv_kernel_size; ++kernel_index) {
+        const long sequence_index =
+            (long)token_index_in_req + (long)kernel_index - (long)conv_state_len;
+        float x = 0.0f;
+        if (sequence_index < 0) {
+            const uint state_index = uint(sequence_index + (long)conv_state_len);
+            const uint state_offset = (src_state_slot * qkv_dim + channel_index) * conv_state_len + state_index;
+            x = conv_state[conv_state_base + (ulong)state_offset];
+        } else {
+            const ulong input_offset = (ulong)(flat_token_begin + uint(sequence_index)) * input_qkv_stride + channel_index;
+            x = qkv[input_offset];
+        }
+        // Taps 1..Kc retain the raw history after this token.
+        if (write_state && kernel_index > 0) {
+            const ulong dst_offset = ((ulong)state_slot * qkv_dim + channel_index) * conv_state_len + kernel_index - 1;
+            next_conv_state[next_conv_state_base + dst_offset] = bfloat16_t(x);
+        }
+        const uint weight_offset = channel_index * conv_kernel_size + kernel_index;
+        acc += x * float(conv_weight[weight_offset]);
     }
-    const long sequence_index =
-        (long)num_verified_req_tokens + (long)state_index - (long)conv_state_len;
-    float x = 0.0f;
-    if (sequence_index < 0) {
-        const uint src_state_index = state_index + num_verified_req_tokens;
-        const uint state_offset = (src_state_slot * qkv_dim + channel_index) * conv_state_len + src_state_index;
-        x = conv_state[conv_state_base + (ulong)state_offset];
-    } else {
-        const ulong input_offset = (ulong)(flat_token_begin + uint(sequence_index)) * input_qkv_stride + channel_index;
-        x = qkv[input_offset];
+    if constexpr (SaveReplay) {
+        if (req_index >= num_active_recurrent_requests) {
+            const uint replay_token_index = flat_token_index - cu_tokens[num_active_recurrent_requests];
+            replay_qkv[(replay_token_offset + replay_token_index) * qkv_dim + channel_index] = qkv[(ulong)flat_token_index * input_qkv_stride + channel_index];
+        }
     }
-    const uint dst_offset = (state_slot * qkv_dim + channel_index) * conv_state_len + state_index;
-    next_conv_state[next_conv_state_base + (ulong)dst_offset] = bfloat16_t(x);
+    conv_qkv[global_linear_index] = bfloat16_t(acc / (1.0f + metal::exp(-acc)));
 }
+
+template [[host_name("gdn_compute_short_conv_bf16")]] [[kernel]]
+decltype(gdn_compute_short_conv<false>) gdn_compute_short_conv<false>;
+template [[host_name("gdn_compute_short_conv_replay_bf16")]] [[kernel]]
+decltype(gdn_compute_short_conv<true>) gdn_compute_short_conv<true>;
 
 // One logical OutputNormGateThreadBlockTask maps 1:1 to one 128-thread
 // threadblock. It RMS-normalizes and gates one [Dv] recurrent-output vector.
