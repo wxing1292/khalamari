@@ -235,12 +235,28 @@ All paths above live under `crates/`.
 - [llama.cpp](https://github.com/ggml-org/llama.cpp)
 - [mistral.rs](https://github.com/EricLBuehler/mistral.rs)
 
-The project uses [MLX](https://github.com/ml-explore/mlx) by Apple.
-The build embeds downloaded MLX Metal kernel headers and retains their MIT notice in [`NOTICE`](NOTICE).
+The Metal backend adapts existing implementations and uses established GPU work partitions.
+The reusable backend components and operators own these adaptations. Model code supplies shapes and model semantics.
+
+| Area | Reference or implementation source |
+| --- | --- |
+| Steel matrix fragments, tiled matmul, and quantized operand loaders | [MLX](https://github.com/ml-explore/mlx) Metal headers |
+| Register-based small-row affine QMM | [oMLX](https://github.com/jundot/omlx), `omlx/patches/qwen35_verify_qmm.py` |
+| GDN eight-lane state recurrence | [oMLX](https://github.com/jundot/omlx), `omlx/custom_kernels/qwen35_prefill/gdn.py` |
+| GEMM tiling and sliced-K/split-K terminology | [CUTLASS efficient GEMM documentation](https://docs.nvidia.com/cutlass/latest/media/docs/cpp/efficient_gemm.html#parallelized-reductions) |
+
+Sliced-K partitions K across SIMDgroups inside one threadgroup. Split-K partitions K across threadgroups.
+These work partitions are independent of quantization bit width and implementation language.
+The CUTLASS reference describes these work partitions. The Metal kernels use Apple SIMDgroup instructions.
+See the [dense MLP design](docs/executor_dense_mlp.md#steel-and-sliced-k) for the tensor and threadgroup diagrams.
+
+[NOTICE](NOTICE) records source versions, copyright notices, licenses, and adaptation details.
+The [license directory](licenses) contains the additional license text.
+
 The [Qwen team](https://qwen.ai/) develops the supported models.
 Model weights are separate artifacts with their own terms.
 
 ## License
 
 `psi-dec` is distributed under the [MIT License](LICENSE).
-See [NOTICE](NOTICE) for the retained MLX header attribution.
+See [NOTICE](NOTICE) for third-party attribution and licenses.

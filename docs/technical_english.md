@@ -159,6 +159,13 @@ Define symbols beside the figure. State the example inputs and distinguish them 
 Keep diagrams narrow and label arrows with the data or event they carry.
 Do not repeat the complete diagram in prose or add a diagram that does not answer a reader's question.
 
+Recommendation: Use compact loop pseudocode to explain kernel data flow, one implementation difference at a time.
+Label tensor shapes, data types, and storage locations in place.
+Use `GMEM` for device memory, `SMEM` for threadgroup memory, and `register` for thread-local values.
+Show which threads or groups use each buffer and accumulator.
+Put loads, computation, synchronization, and stores at their actual loop scope to show reuse and lifetime.
+Distinguish distributed register tensor shapes from per-thread storage.
+
 A note gives information only.
 Do not put a required action in a note.
 Put the action in the applicable procedure step.

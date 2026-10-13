@@ -265,6 +265,13 @@ Keep backend details behind backend APIs. Metal components may own these details
 - Tile scratch
 - Runtime resource bindings
 
+Performance optimizations must belong to reusable operators or components, such as matmul, GQA, GDN, sampling, and rejection sampling.
+Kernel selection must use workload facts, such as dimensions, dtype, quantization layout, topology, and device capabilities.
+Kernel selection must not use model family names, checkpoint names, or checkpoint paths.
+Model implementations must compose components and supply their validated inputs.
+Model-specific semantic contracts and checkpoint adaptation remain at the owning model boundary.
+Model-specific benchmark fixtures may validate reusable optimizations. They do not justify model-specific kernel routing.
+
 Recommendation: Model executors own model semantics, persistent model or request buffers, and component connections.
 They do not expose backend tiling, temporary scratch, or kernel-local tables in model APIs.
 
