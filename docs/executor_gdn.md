@@ -380,9 +380,11 @@ cargo test -p inference-backend-metal --all-features --lib components::gdn -- --
 cargo test -p inference-executor-metal --all-features --lib attn::gdn -- --test-threads=1
 ```
 
-`qwen35_gdn` measures one GDN forward with real 35B-A3B weights. It excludes accepted-state commit and cache publication.
-`--tokens-per-req` sets ragged input lengths. `--prefill-requests` selects the recurrent prefix.
-The prefix writes final snapshots; the suffix writes replay logs. `--subcomponents` uses the same forward contract.
+`qwen35_gdn` measures one GDN forward with real 27B or 35B-A3B weights.
+It excludes accepted-state commit and cache publication.
+`--gdn-model 27b|35b` selects the fixture geometry. The default is `35b`.
+`--tokens-per-req` sets ragged input lengths. `--prefill-requests` selects the chunkwise request prefix.
+The prefix writes final snapshots. The suffix writes replay logs. `--subcomponents` uses the same forward contract.
 
 `--compare-recurrent` compares that forward with all-recurrent computation using the same state-write map.
 The reference does not write a replay log or full decode states. It is not a comparison with the previous complete model lifecycle.
@@ -391,3 +393,6 @@ Its untimed checks compare outputs, source preservation, and requested snapshots
 Use the production service and external caller for model-level acceptance checks. Follow
 [`executor_benchmarks.md`](executor_benchmarks.md) and [`service.md`](service.md).
 Do not compare component forward timings with complete forward/commit timings.
+
+The [component latency matrix](executor_benchmarks.md#component-latency-matrix) provides request/input axes, resume, and grouped reports.
+All positive ctx values reuse one fixed nonzero GDN state fixture. They do not measure prefix construction.

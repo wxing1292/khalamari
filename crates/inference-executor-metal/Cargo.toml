@@ -92,6 +92,14 @@ name = "qwen35_vanilla_prefill_decode"
 path = "benches/qwen35/vanilla_prefill_decode.rs"
 harness = false
 
+[[example]]
+name = "component-latency-bench"
+path = "examples/component_latency.rs"
+
 [dev-dependencies]
+clap = { workspace = true, features = ["derive"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+inference-error = { workspace = true }
 futures-lite = { workspace = true }
 libc = { workspace = true }

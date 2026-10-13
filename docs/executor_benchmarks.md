@@ -49,7 +49,7 @@ dense_mlp  sparse_mlp  moe  gqa_split_kv  gqa_bidi_block_sdpa  gdn_attn  gdn_sta
 embedding  unembedding  norm  gated_residual  affine_quantized_matmul  matmul_bf16  buffer_io
 ```
 
-`rejection_sampling` is the backend custom-CLI target. Model-executor targets:
+`rejection_sampling` and `gqa_sdpa_matrix` are backend custom-CLI targets. Model-executor targets:
 
 ```text
 qwen3_gqa              qwen3_dspark           qwen3_dspark_forward
@@ -83,6 +83,116 @@ baseline and current binaries.
 
 Run the initial measurements with the serial Metal compute pass.
 Treat a concurrent compute dispatch and a multi-queue overlap as separate measured follow-ups.
+
+## Component latency matrix
+
+`component-latency-bench` plans, resumes, and reports real-weight component measurements.
+The controller uses existing executor benchmark workers. It does not change production kernel selection.
+
+```text
+CLI shape product                         Component measurement key
+requests x contexts x queries  -- GQA --> request segments, ctx, Q, recorded capacity
+                               -- GDN --> request segments, zero/nonzero state, write mode
+                               -- MLP --> total rows = requests * queries
+                               -- MoE --> total rows = requests * queries
+
+full Prefill: requests x full  ----------> ctx = 0, Q = full input per request
+
+plan -> canonical cases -> worker -> durable JSONL -> grouped Markdown/JSON report
+                           |
+                           +-- no new swap -> measured -> skip on resume
+                           +-- swap/error -> unusable/failed -> stop -> retry on resume
+```
+
+| Component | Worker | Fixture | Timed path |
+| --- | --- | --- | --- |
+| GQA | `qwen35_gqa` | 27B or 35B-A3B | Full production replay with the automatic lookup |
+| GDN | `qwen35_gdn` | 27B or 35B-A3B | Full chunkwise/replay forward |
+| Dense MLP | `qwen35_dense_mlp` | 27B | `full_auto` |
+| MoE | `qwen35_moe` | 35B-A3B, layer 0 | Complete token-major and expert-major graphs |
+
+MoE includes routing, layouts, sparse expert MLPs, shared experts, and combine.
+It is not a sparse-expert-only latency.
+Use the backend `sparse_mlp` target to isolate sparse expert computation and occupancy.
+
+| Axis | Default values |
+| --- | --- |
+| Requests | `1,2,4,8` |
+| Existing ctx per request | `0,1024,2048,4096,8192,16384,32768,65536` |
+| New input per request | `1,2,3,4,5,6,7,8,12,16,32,64,128,256` |
+| Full Prefill per request | `2048,4096,8192,16384` |
+
+The default product contains 464 logical cases per component.
+The controller measures equivalent component inputs once. Each report row names that measurement.
+
+GQA uses real projection weights, synthetic hidden inputs, and initially zero FP8 cached K/V.
+The ctx axis changes paged visibility, positions, and allocated cache capacity.
+It does not construct a real model prefix.
+`--max-tokens` defaults to 256. Each GQA case raises this recorded capacity when its active rows require more space.
+
+GDN uses zero state at ctx=0. All positive contexts use the same fixed nonzero state fixture.
+Their report rows therefore reuse the same materialized-state measurement.
+The default path writes final Prefill snapshots.
+`--gdn-replay` makes append cases write per-token replay logs. Full Prefill cases still write final snapshots.
+The measurement excludes accepted-state reconstruction and cache publication.
+
+Dense MLP and MoE receive flat input rows. They have no request segmentation or ctx input.
+Cases with the same total row count reuse one measurement, including equivalent full-Prefill rows.
+
+Latency is the median replay submission-and-wait wall time in milliseconds.
+Raw logs retain each run sample. Setup, loading, compilation, and prefix construction are outside the timing.
+Full Prefill here means one component forward from zero history. It is not complete model Prefill or E2E latency.
+Use the [fixed-work E2E matrix](#cross-engine-serving-matrix) for serving comparisons.
+
+Build the controller without a GPU run:
+
+```sh
+cargo build --release -p inference-executor-metal --example component-latency-bench
+```
+
+Generate all four plans without loading a model or initializing Metal:
+
+```sh
+for component in gqa gdn dense-mlp moe; do
+  target/release/examples/component-latency-bench \
+    --component "$component" --mode plan --out "target/perf/components/$component"
+done
+```
+
+Run a component after GPU measurements are authorized:
+
+```sh
+caffeinate -i target/release/examples/component-latency-bench \
+  --component gdn --mode run --model-dir <27b-model-dir> \
+  --requests 1,2,4,8 --contexts 0,1024,2048,4096,8192,16384,32768 \
+  --queries 1,2,4,8,16,32,64,128,256 --full 2048,4096,8192,16384 \
+  --hours 2 --out target/perf/components/gdn
+```
+
+`run` builds only the selected optimized worker with `cargo bench --no-run`.
+The controller reads checkpoint metadata to select the 27B or 35B-A3B fixture.
+The worker validates the actual tensors. Dense MLP requires 27B. MoE requires 35B-A3B.
+
+Repeat the same command to resume. `--hours 0` removes the deadline.
+A positive deadline starts after worker build and identity checks. The current case completes before the controller stops.
+Measured cases are skipped. Failed or swap-affected cases are retried with a new raw log.
+Any new swap-in or swap-out invalidates the case and stops the run.
+Existing swap occupancy alone does not invalidate a new zero-activity measurement.
+Run GPU workers serially across all processes and worktrees.
+
+`plan.json` contains logical cases and canonical measurement keys.
+`identity.json` binds results to checkpoint metadata, shard file metadata, measurement source, worker binary, hardware, and timing options.
+The controller must use a new output directory when that identity changes.
+Documentation-only edits and Git history rewrites do not change measurement identity.
+Each JSONL record also includes the commit, dirty state, controller command, worker arguments, and swap counters.
+
+`results.jsonl` records each completed attempt. Resume removes only an incomplete final record.
+`report.md` groups and sorts rows by append/full Prefill, requests, ctx, and input length.
+`report.json` retains the same groups as structured rows.
+`--mode report` rebuilds reports without GPU work. Supply the same shape axes and GDN write mode.
+
+The controller does not run oMLX or TensorFold workers.
+An external comparison must match weights, input tensors, state contents, precision, state writes, and operation boundaries.
 
 ## Target meanings
 
@@ -133,7 +243,7 @@ Treat a concurrent compute dispatch and a multi-queue overlap as separate measur
   The timed buffer-to-file case overwrites the same range with `F_NOCACHE` enabled and calls `sync_all` during each
   iteration.
   File creation, file opening, pattern generation, correctness validation, and cleanup remain outside all timed cases.
-- `qwen35_gqa` selects `--gqa-model 27b|35b` and accepts the SplitKV `sliced_kv` or `sliced_q` variant. It derives FP8
+- `qwen35_gqa` selects `--gqa-model 27b|35b` and accepts SplitKV `auto`, `sliced_kv`, and `sliced_q` variants. It derives FP8
   E4M3FN KV tokens per page from the production 32 KiB page size and the selected model profile. It can run an explicit
   untimed `--validate-sdpa-sliced-q` comparison. `--max-tokens` fixes the token and Map task-template capacities.
   Each candidate derives its partial-state capacity from its registered Q-range width.
@@ -182,7 +292,7 @@ Treat a concurrent compute dispatch and a multi-queue overlap as separate measur
     -> Markov correction + sampling
   ```
 
-- `qwen35_gdn` measures the production chunkwise/replay GDN forward with the 35B-A3B profile.
+- `qwen35_gdn` measures the production chunkwise/replay GDN forward with the 27B or 35B-A3B profile.
   It excludes accepted-state commit and cache publication.
   `--tokens-per-req` selects a ragged request layout. `--prefill-requests` selects the chunkwise prefix.
   The prefix writes final states. The suffix writes per-token F32 replay logs.
@@ -438,3 +548,423 @@ A throughput change with a different deterministic acceptance trajectory is not 
 A checked-in end-to-end reference is an observed result, not a threshold. The owning helper must record its complete
 provenance. It must suppress throughput deltas when the current provenance or deterministic trajectory does not match
 the reference.
+
+## Generic GQA matrix
+
+The standalone matrix keeps measurement, dataset control, policy fitting, and reporting in their existing benchmark owners:
+
+```text
+crates/inference-backend-metal/benches/gqa/
+  matrix.rs                    Metal worker and CPU-reference measurement
+  matrix/
+    controller.rs              CLI, resume identity, durable results, and worker lifecycle
+    controller_test.rs         host dataset and process-contract tests
+    policy.rs                  benchmark policy candidates
+    report.rs                  quality filtering, coverage, fitting, and exports
+    report_test.rs              host report and calibration-contract tests
+```
+
+`gqa-sdpa-bench` is a standalone backend benchmark executable.
+It owns matrix planning, serial measurements, SQLite resume, reports, and table generation.
+The original `gqa_sdpa_matrix` custom bench remains the JSON measurement worker.
+Both entry points use the same worker source.
+`scripts/gqa_sdpa_matrix.py` only builds and starts the standalone executable.
+
+Build the executable before the scan:
+
+```sh
+cargo build --release -p inference-backend-metal --example gqa-sdpa-bench
+```
+
+The executable is `target/release/examples/gqa-sdpa-bench`.
+Measurement commands require a release build and the build checkout for source provenance.
+The controller uses the macOS `/usr/bin/sqlite3` and `/usr/bin/shasum` tools.
+It does not require Python or a new database library.
+
+### Matrix and measurement contract
+
+The runner uses nonzero BF16 Q, FP8 K/V, per-token causal masks, and reversed physical page IDs.
+V has a positive offset. A zero-output kernel therefore fails the numerical gate even at long contexts.
+It compares every measured output with SlicedKv output.
+It also checks CPU attention for one head at the first, middle, and last Q tokens.
+The focused backend test covers sliding and empty visibility plus split/direct parity.
+
+| Input axis | Default values |
+| --- | --- |
+| History tokens | `0, 64, 256, 1024, 2048, 4096, 8192, 16384, 32768` |
+| Queries per request | `1, 2, 3, 4, 5, 6, 7, 8, 12, 16, 32, 64, 128, 256` |
+| Request count | `1, 2, 4, 8` |
+| Q/KV head ratio | `6, 8, 12` |
+| Head dimension | `128, 256` |
+| KV head count | `2, 8` |
+| KV tokens per page | `16` |
+
+`--history`, `--queries`, `--requests`, and `--ratios` select workload axes.
+These axes can contain other nonnegative history lengths and positive counts.
+`--dims`, `--kv-heads`, and `--pages` configure operator profiles.
+The implemented cache profiles are `D128/P8,16` and `D256/P8,16,32`.
+`D128/P32` is excluded because the backend does not implement it.
+
+The full candidate product contains SlicedKv plus three Q-token/head assignments.
+The assignments are QTokensPerHead, QHeadsPerToken, and QTokensAndHeads.
+Token tiles are `1,2,4,8,16,32`.
+Head extents are `1,ceil(ratio/2),ratio`.
+KV staging lengths are `8,16,32,64,128`.
+KV slice rules are `64,128,256,512,1024,2048,4096,8192,full`.
+Direct output requires a full KV slice.
+Slice rules that resolve to the same partition share one case key.
+Distinct static row geometries remain separate candidates.
+
+The default full product contains 6048 workload profiles and 11727168 resolved candidate tuples.
+Resource filtering occurs after enumeration.
+Queries and histories follow argument order.
+The traversal order is query count, history length, then operator profile.
+The runner visits all profiles at one history before it advances to the next history.
+It visits every history before it advances to the next query count.
+Other profile axes advance by increasing sums of their value indices.
+Recommendation: Put the highest-priority query and history values first for a limited run.
+
+The screen contains QHeadsPerToken and QTokensAndHeads with token tiles `1,2,4,8`.
+It tests half/full head extents, staging lengths `16,64`, and slices `64,128,256,512,2048,full`.
+Existing SlicedKv and QTokensPerHead kernel geometries use the same screen slice rules.
+`--mode smoke` uses history `64`, query count `5`, two requests, and ratios `6,12`.
+`--mode plan` enumerates the full product without GPU work.
+With `--policy`, plan mode enumerates a focused comparison set instead.
+`--mode policy --policy <path>` measures that focused set.
+Frozen policies use schema 4 and criterion `shared-partitioned-grid-v2`.
+Older policies must be regenerated from recorded measurements because single-query short-context routing changed.
+Saved measurement keys retain their existing candidate and coefficient field tags.
+The set contains the frozen route, full/same-slice SlicedKv, Q-token/head assignment controls, and an unsplit Map/Reduce control.
+It pairs each comparison geometry with adjacent KV slices.
+This pairing supports complete geometry/partition comparisons.
+It contains at most 16 distinct candidates per workload.
+The added comparisons retain the original canonical case keys.
+Resume skips the original completed comparisons and measures only newly requested keys.
+The controls depend on the workload and frozen rule. They do not depend on measured winners.
+The plan retains the frozen coefficients and source document.
+The shared criterion code belongs to the controller. Planning and reporting use that code.
+
+The metric is amortized replay wall time in milliseconds.
+The default replay contains eight ordered SDPA invocations.
+The time includes submission and completion wait.
+Compilation, allocation, recording, and numerical checks occur outside the measured interval.
+Each round alternates baseline/candidate/baseline and candidate/baseline/candidate.
+The fixed reference is full-slice SlicedKv.
+The policy-loss reference uses the best stable compatible recorded candidate for each input workload.
+The report retains compatible records outside the current candidate shortlist.
+The existing-kernel comparison separately uses the best stable existing kernel geometry across measured KV slices.
+Selected coverage describes only the current plan.
+A complete screen or focused policy scan does not establish the full candidate optimum.
+The forced candidates do not exercise production selection.
+These measurements do not report isolated GPU stage time or model throughput.
+
+### Run, stop, and resume
+
+Run a plan without GPU work:
+
+```sh
+target/release/examples/gqa-sdpa-bench --mode plan --out target/perf/gqa-night
+```
+
+Recommendation: Start with this screen across all default history lengths:
+
+```sh
+caffeinate -i target/release/examples/gqa-sdpa-bench \
+  --mode screen --hours 2 --queries 2 4 8 --kv-heads 4 \
+  --out target/perf/gqa-balanced
+```
+
+Repeat the command to continue for another two hours.
+The default `--hours 0` has no deadline.
+`--limit` limits new measurements. Its default `0` has no limit.
+A deadline or Ctrl-C finishes and commits the current case before it stops.
+`status.json` distinguishes `complete`, `time_budget`, `measurement_limit`, `interrupted`, and `runner_error`.
+A worker error retains committed cases and generates a report before the controller returns the error.
+`complete` means the traversal finished. The report separately states whether every selected candidate was measured.
+
+Continue with the full candidate product:
+
+```sh
+caffeinate -i target/release/examples/gqa-sdpa-bench \
+  --mode full --hours 2 --queries 2 4 8 --kv-heads 4 \
+  --out target/perf/gqa-balanced
+```
+
+Inspect a frozen policy against saved records without GPU work:
+
+```sh
+cp target/perf/gqa-balanced/policy.json target/perf/gqa-policy.json
+
+target/release/examples/gqa-sdpa-bench \
+  --mode plan --policy target/perf/gqa-policy.json \
+  --history 8192 --queries 1 2 3 4 5 6 7 8 --kv-heads 2 4 8 \
+  --out target/perf/gqa-night
+```
+
+The focused plan reports recorded candidate counts and retryable deferred candidates.
+It does not create a worker or a Metal device.
+Measure the remaining cases with the same axes and output directory:
+
+```sh
+caffeinate -i target/release/examples/gqa-sdpa-bench \
+  --mode policy --policy target/perf/gqa-policy.json --hours 2 \
+  --history 8192 --queries 1 2 3 4 5 6 7 8 --kv-heads 2 4 8 \
+  --out target/perf/gqa-night
+```
+
+The frozen input must differ from the generated local and frozen policy exports in the output directory.
+The runner rejects that collision before it replaces report artifacts.
+The report evaluates the saved frozen snapshot alongside the local fit.
+It exports the snapshot as `frozen-policy.json` and `frozen-policy.rs`.
+It does not replace or refit the frozen input.
+Report mode uses the saved snapshot when `--policy` is omitted.
+
+The capacity report groups uniform workloads by operator geometry, query length, and request count.
+It inspects context lengths from the query length through that profile's largest visible interval in the plan.
+It evaluates both sides of geometry, general slice, slice-floor, adaptive slice, and decode-grid boundaries.
+Within one geometry and slice interval, causal Map counts are nondecreasing in visibility.
+The report therefore retains each geometry's peak active Map count, split count, reserved partial groups, and a witness.
+A maximum-context endpoint alone can miss a peak before the policy selects a larger slice.
+The analysis runs on the CPU. It adds no GPU measurements.
+These uniform active bounds do not include production replay padding or prove ragged lifecycle allocations.
+The plan endpoint is an analysis envelope. It is not a runtime context cap.
+The report also groups the supplied uniform profiles by operator configuration.
+Each group uses one shared Map allocation ceiling and the production `ReplayBucketPolicy`.
+The report pads each geometry's Map bound before it multiplies by that geometry's token width.
+Direct replay uses equal Map and Q-range extents and reserves no partial-state groups.
+These envelopes cover the supplied query/request profiles. Their displayed bounds do not imply complete combination coverage.
+Configured lifecycle limits and ragged routing still require separate integration.
+
+Recorded measurements, failures, and hardware exclusions are skipped by canonical case key.
+A missing record remains unmeasured.
+An allocation above `--max-scratch-mib` is recorded as `deferred`.
+Increasing that budget retries newly eligible deferred cases without repeating measured cases.
+A physical mapping above the thread limit has `hardware_ineligible` status.
+A compilation or numerical error has `failed` status.
+
+Resume identity contains measurement source, GPU chip/core count, memory, OS, execution environment, `inner`, and `repeats`.
+Axis subsets, mode, time budget, and report settings do not change measurement identity.
+The binary refuses changed measurement identity and refuses measurement source newer than the executable.
+Use a new output directory after a kernel or measurement change.
+Old datasets require a verified measurement-source migration record before they can resume through the new controller.
+Report mode can still read an old dataset without migration or current hardware checks.
+
+Run Metal and GPU commands one at a time.
+A checkout GPU lock prevents concurrent matrix runners in that checkout.
+A dataset lock prevents concurrent writers of the same report set.
+These locks do not control inference services or other GPU tools.
+
+### Reports and direct lookup tables
+
+Regenerate reports without GPU work:
+
+```sh
+target/release/examples/gqa-sdpa-bench \
+  --mode report --out target/perf/gqa-balanced \
+  --max-regret 0.05 --max-noise 0.10
+```
+
+Report mode uses the saved plan and measurement configuration.
+It does not create a Metal device.
+
+| Artifact | Contract |
+| --- | --- |
+| `plan.json` | Selected axes, mode, resource budget, metric, and optional frozen policy snapshot. A focused plan also reports recorded candidate counts. |
+| `results.sqlite3` | Durable case keys, status, commands, raw timing samples, and numerical evidence. |
+| `identity.json` | Measurement identity. A migrated dataset preserves its original identity. |
+| `controller-identity.json` | Validated controller identity for a migrated dataset. |
+| `measurement-identity.json` | Migration evidence that matches the original source fingerprint. |
+| `runs.jsonl` | Commit, dirty state, executable hash, compiler, device, power, command, and environment. |
+| `status.json` | Stop reason, new measurement count, skipped case count, and elapsed scan time. |
+| `best.json` | Raw best measured candidate per selected workload. |
+| `comparisons.json` | Raw winner, stable winner, and stable existing-kernel envelope per workload. |
+| `report.md`, `report.json` | Selected coverage, numerical results, quality exclusions, and table size. |
+| `selection.json`, `selection.rs` | Exact-grid diagnostic: candidate dictionaries and direct-index decisions. |
+| `policy.json`, `policy.rs` | Local fitted lookup: 24 geometry strategy slots, general KV slice thresholds, and the single-query partition budgets. |
+| `frozen-policy.json`, `frozen-policy.rs` | Evaluated frozen coefficients with the dataset identity. The lookup returns `None` when no frozen input exists. |
+| `compression.json` | Exploratory dictionary sizes under per-point relative or absolute loss bounds. |
+| `policy-evaluation.json` | Local calibration, context holdouts, and optional frozen-policy evaluation with timing and reference coverage. |
+| `policy-capacity.json` | Continuous-context active bounds and shared uniform replay envelopes for local and frozen policies. Includes per-geometry padding, peak witnesses, and unavailable routes. |
+
+The quality filter checks baseline drift, candidate bracket drift, and normalized sample range.
+`--max-noise` defaults to `0.10` for each check.
+Raw samples and excluded winners remain in the result set.
+
+Each table profile contains actual Q heads, KV heads, head dimension, and page length.
+Its calibration identity contains the hardware and operator contract.
+The profile does not use a model name or a head ratio alone.
+The operator contract is BF16 Q/output, FP8 E4M3 cache, and uniform per-request causal history.
+
+The generator reuses a candidate across points only when each point satisfies `--max-regret`.
+The default `0.05` permits at most five percent observed relative-time loss from that point's best stable candidate.
+`comparisons.json` records candidate coverage and scan completeness for each measured workload in the current mode.
+The reference includes all compatible recorded candidates for each input workload.
+Scan completeness covers only the selected mode. A focused scan does not identify the full candidate optimum.
+`compression.json` compares relative bounds and absolute-time allowances.
+It counts kernel geometries with output mode and KV slice parameters separately.
+Its geometry cover can choose a different measured KV slice for each point.
+This ablation does not define a runtime policy or prove the minimum geometry count.
+An absolute allowance dominates the relative bound below `absolute_bound / relative_bound` reference time.
+Use the reference-time buckets to check its effect on expensive points.
+Estimated extra time equals normalized relative loss multiplied by the best stable candidate wall time.
+Each alternative reports maximum loss for reference-time buckets at `0,0.05,0.2,1,2` ms.
+These overlapping buckets expose expensive-point regressions separately from tiny-point tradeoffs.
+They describe measurements. They do not define a production performance policy.
+It is not a new timing measurement or a model-level latency result.
+The greedy alternatives do not prove the minimum dictionary size.
+They do not change `selection.json`.
+
+`policy-evaluation.json` evaluates four geometry families and integer KV slice thresholds.
+The generic geometry criteria use a Q-token/head dimension budget and a cooperative KV-loader allowance.
+The Q-token/head capacity is `q_token_head_values / head_dimension`.
+QTokensAndHeads uses `ceil(token_tile * head_extent / 8)` SIMDgroups.
+QHeadsPerToken uses `token_tile * ceil(head_extent / 8)` SIMDgroups.
+QHeadsPerToken must add SIMDgroups before the criterion spends padded Q-token/head positions to reduce cooperative KV-loader work.
+The loader-work proxy is `ceil(KV_stage / QTokensAndHeads_SIMDgroups)`.
+These coefficients are empirical proxies. They are not compiler register limits or measured residency.
+
+The report fits nine pairs from `q_token_head_values=8192,16384,32768` and `loader_tokens=8,16,32`.
+Each fit compares complete selected routes with stable references.
+The training set contains only inputs with stable measured selected routes for all nine parameter pairs.
+The fit must compare every pair on the same input set.
+Missingness must not act as a timing signal.
+The report retains the available, common, and excluded reference counts.
+It also counts training inputs where the parameter sets select different complete routes.
+A stage with no route differences retains its prior coefficients.
+The fit ranks worst relative loss and worst estimated extra time at `>=2`, `>=1`, then `>=0.2` ms.
+The fit does not use winner labels or a partition oracle.
+The second stage compares 195 base-grid and partition parameter sets.
+The base grid is `requests * KV_heads * ceil(queries / token_tile) * ceil(head_ratio / head_extent)`.
+A small base grid can select padded QHeadsPerToken or impose a minimum KV slice.
+The floor feature is `visible_KV_tokens * base_grid * SIMDgroups_per_threadblock`.
+Each parameter set must have stable selected timings at every common training point.
+The second stage must not worsen the first-stage maximum relative loss or maximum estimated extra time in any cost tier.
+This guard prevents a gain at slow inputs from hiding a large regression at medium-cost inputs.
+The third stage compares the fixed single-query prior with six shared grid policies.
+It fits a minimum partitioned-grid budget and a partition target.
+The tested budgets are `2,4,8` and `16,32` times the calibration device compute-unit count.
+The export stores the two calibrated budgets. Runtime lookup does not query hardware again.
+The third stage must not worsen the preceding cost-tier bounds on its common stable support.
+The report refits all three stages after withholding each history length.
+The holdouts do not validate the prior kernel repertoire, D128/head-tile eligibility, slice envelope, or first two general slice thresholds.
+The report returns no fitted policy without common stable references at `>=0.2` ms.
+It also returns no fitted policy when no stage changes a complete route on its common training set.
+Single-query measurements can identify the third-stage coefficients when the resource and general partition stages remain invariant.
+
+The single-query strategy uses the existing SlicedKv and QTokensAndHeads implementations.
+SlicedKv processes at most eight logical heads in one head tile.
+Let `L` be visible KV tokens and `G` be the GQA ratio.
+Let `target_groups` and `min_grid_groups` be the calibrated budgets.
+The adaptive criterion uses these quantities:
+
+```text
+matrix_base_groups = requests * KV_heads * ceil(G / 8)
+matrix_slice = clamp(floor_power_of_two(L * matrix_base_groups / target_groups), 256, 512)
+matrix_grid = matrix_base_groups * ceil(L / matrix_slice)
+SlicedKv_base_tasks = requests * KV_heads * ceil(G / min(G, 8))
+SlicedKv_slice = clamp(floor_power_of_two(L * SlicedKv_base_tasks * 4 / target_groups), 256, 1024)
+```
+
+The slice calculation clamps its positive work input to at least one before rounding.
+D256 groups with `G > 8` use QTokensAndHeads when `matrix_grid >= min_grid_groups`.
+Other inputs retain SlicedKv.
+QTokensAndHeads uses one query token, the complete logical head group, and KV stage 16.
+The two paths share `target_groups`. The criterion does not fit separate slice budgets per path.
+The short-KV direct-output limit is `L <= 32` for one Q token per request and `L <= 512` for multiple Q tokens.
+Above the single-query limit, selection retains its KV partition budget.
+These quantities are empirical parallelism proxies. They do not establish compiler residency.
+Frozen context-transfer comparisons must verify complete-route loss and coverage before promotion.
+The criterion uses operator dimensions. It does not use model names.
+
+The schema-3 export records either an adaptive policy or the fixed prior.
+An invariant third stage retains the fixed prior of a 512-token slice and an eight-task base-grid threshold.
+The reader accepts schema-2 frozen exports and saved plans with their original fixed routing.
+It must not reinterpret an old frozen artifact as the adaptive policy.
+Unsupported schemas, invalid budgets, and different calibration devices return an input error.
+
+The short-KV alternatives use row capacities `16,32,64`.
+The criteria use rounded query capacity, head ratio, head dimension, visible KV length, request count, KV-head count, and SIMDgroup count.
+The integer feature replaces floating-point geometric slice rounding. It does not estimate kernel residency.
+The family repertoire and slice thresholds use M3 Max 40-core calibration through 32K.
+The report retains the saved identity of the evaluated dataset.
+`report.json` and `policy-evaluation.json` also record the generator command and executable SHA-256.
+It does not claim calibration quality on another device.
+
+Use `--policy` to evaluate a frozen exported policy alongside the local fit:
+
+```sh
+target/release/examples/gqa-sdpa-bench \
+  --mode report \
+  --out target/perf/gqa-night \
+  --policy target/perf/gqa-balanced-20261006/policy.json
+```
+
+This command does not create a Metal device or repeat measurements.
+The frozen comparison does not refit coefficients, select a per-point winner, or replace the local export.
+`policy-evaluation.json` retains the source path, source document, and complete evaluation.
+`report.md` includes a separate frozen-policy cost table.
+`frozen-policy.json` and `frozen-policy.rs` export exactly the evaluated frozen coefficients.
+The exporter uses the same criterion implementation for the local and frozen policies.
+Both exports record the evaluated dataset identity.
+The source path and original source document remain in `policy-evaluation.json`.
+The input must use schema 2 or 3, the matching decode criterion, the current strategy table, and the dataset's device.
+The input coefficients must belong to the supported calibration domain.
+Invalid or unavailable input policy data returns a typed error before report artifacts are replaced.
+This check prevents an old criterion from being interpreted as the current criterion.
+
+Each point retains its proposed complete candidate.
+It also retains selected and reference timing summaries, including bracket drift and normalized sample range.
+The report does not replace a missing or unstable candidate with a recorded winner.
+Its reference-time buckets count verified and unverified selected timings separately.
+Workloads without a stable reference have a separate count.
+The proposals export `policy.json` and `policy.rs`. They do not change the exact-grid diagnostic or production routing.
+They require independent coverage and expensive-point validation before promotion.
+
+Each dictionary value contains layout, token tile, head extent, KV stage, KV slice, and direct-output mode.
+A null KV slice means a full slice.
+
+The decision grid stores one `u16` per input point.
+Zero means the point has no eligible stable candidate.
+Other values are one-based dictionary indices.
+The generator verifies the measured loss bound and one decision per covered point.
+The bound describes these measurements. It is not a statistical confidence interval.
+
+The exact-grid diagnostic lookup has three steps:
+
+1. Match hardware and static operator profile.
+2. Find exact history, query, and request indices in the recorded axes.
+3. Read `decisions[(history_index * query_count + query_index) * request_count + request_index]` and its dictionary value.
+
+The exact-grid lookup returns `None` for unmeasured shapes, excluded points, and different hardware.
+It does not match continuous intervals or run a cost model.
+The factored export has a different contract:
+
+1. Match hardware and validate operator dimensions. The caller must establish uniform BF16/FP8 causal inputs.
+2. Index one of four static profile rows and six rounded-query columns.
+3. Derive the selected row geometry from shared resource and base-grid criteria.
+4. Read the general KV slice from integer threshold tables, or derive the single-query slice from its shared partition budget.
+
+The strategy slots contain four shared strategy values. They are not 24 independently fitted winners.
+The exporter embeds the same private criterion implementation that the report evaluates.
+It performs no runtime search, cost-model evaluation, or per-point winner lookup.
+
+The generated artifact also exports `lookup_batch`.
+Each request shape is `(history_tokens, query_tokens)`. Query counts must be positive.
+The entry point validates the same shader and host-allocation domains as uniform lookup.
+Geometry uses the longest query and maximum visible KV endpoint.
+The base grid uses `sum_requests(ceil(query_tokens / token_tile))`.
+Adaptive single-query partitioning uses the sum of request endpoints.
+Its reuse grid uses `sum_requests(ceil(visible_KV_tokens / KV_slice))`.
+Uniform lookup retains constant-time calculations and selects the same routes.
+Batch lookup extends the uniform calibration. Existing performance reports evaluate uniform inputs only.
+Ragged numerical, performance, and configured lifecycle validation remain required before production promotion.
+The factored export accepts legal intermediate contexts. It does not clamp them to the measured grid.
+It returns `None` for unavailable calibration, unsupported operator inputs, or different hardware.
+A completed report must replace a prior export when fitting becomes unavailable.
+Off-grid selection is not numerical, scratch, replay, or performance validation.
+Performance evidence remains limited to stable measured selected routes.
+
+The generated table is a calibration artifact.
+It does not change the production registry, selector, replay capacity, or scratch lifecycle.
+See [future work](future_work.md#performance-investigations) for production promotion.
+

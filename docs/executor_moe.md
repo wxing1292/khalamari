@@ -769,3 +769,6 @@ It uses expert-major for larger microbatches.
 
 [`executor_benchmarks.md`](executor_benchmarks.md) defines shared GPU serialization, benchmark metrics, and
 performance-evidence rules.
+
+The [component latency matrix](executor_benchmarks.md#component-latency-matrix) measures both complete real-weight replay layouts and supports resume.
+The report reuses equivalent total-row shapes. It does not label full MoE latency as sparse-expert-only latency.

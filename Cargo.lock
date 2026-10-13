@@ -1444,13 +1444,17 @@ name = "inference-backend-metal"
 version = "0.1.0"
 dependencies = [
  "block2",
+ "clap",
  "criterion",
  "half",
+ "inference-error",
  "inference-executor-core",
  "libc",
  "objc2",
  "objc2-foundation",
  "objc2-metal",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -1480,15 +1484,19 @@ name = "inference-executor-metal"
 version = "0.1.0"
 dependencies = [
  "async-channel",
+ "clap",
  "futures-lite",
  "half",
  "inference-backend-metal",
+ "inference-error",
  "inference-executor-core",
  "inference-runtime-core",
  "inference-runtime-macro",
  "libc",
  "offset-allocator",
  "safetensors",
+ "serde",
+ "serde_json",
  "wincode",
 ]
 

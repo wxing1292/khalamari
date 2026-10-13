@@ -1221,6 +1221,10 @@ See [explicit route materialization](gqa_sdpa_selection.md#explicit-and-composit
 
 ## Tests and benches
 
+The [component latency matrix](executor_benchmarks.md#component-latency-matrix) measures real-weight GQA through the production lookup.
+`qwen35_gqa --gqa-split-kv-variants auto` uses backend-owned metadata, scratch, and replay selection.
+The existing `sliced_kv` and `sliced_q` options remain explicit comparison probes.
+
 Focused backend and component tests provide part of the correctness coverage. Qwen wiring and model tests provide the
 remaining coverage.
 

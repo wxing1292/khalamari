@@ -29,6 +29,10 @@ objc2-metal = { workspace = true, features = [
 ] }
 
 [dev-dependencies]
+clap = { workspace = true, features = ["derive"] }
+serde = { workspace = true, features = ["derive"] }
+inference-error = { path = "../inference-error" }
+serde_json = { workspace = true }
 criterion = { workspace = true }
 inference-executor-core = { path = "../inference-executor-core" }
 
@@ -106,3 +110,12 @@ harness = false
 name = "buffer_io"
 path = "benches/metal/buffer_io.rs"
 harness = false
+
+[[bench]]
+name = "gqa_sdpa_matrix"
+path = "benches/gqa/matrix.rs"
+harness = false
+
+[[example]]
+name = "gqa-sdpa-bench"
+path = "examples/gqa_sdpa_matrix.rs"

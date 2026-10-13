@@ -91,93 +91,159 @@ pub fn run(args: Args) {
     } else {
         args.contexts.clone()
     };
-    let token_counts = args
-        .tokens_per_req
-        .as_ref()
-        .map(|tokens_per_req| vec![tokens_per_req.iter().sum()])
-        .unwrap_or_else(|| args.tokens.clone());
-
-    for num_tokens in token_counts {
-        if let Some(tokens_per_req) = &args.tokens_per_req {
-            if let Some(contexts_per_req) = &args.contexts_per_req {
-                let fixture = RealGQAFixture::new(
-                    &device,
-                    tokens_per_req.clone(),
-                    contexts_per_req.clone(),
-                    args.max_tokens,
-                    &weights,
-                    args.params,
-                    args.model,
-                );
-                if args.validate_sdpa_sliced_q {
-                    fixture.validate_sdpa_sliced_q_attention();
-                }
-                fixture.measure(&args.split_kv_variants, args.warmup_iters, args.iters, args.runs);
-                if args.subcomponents {
-                    fixture.measure_subcomponents(
-                        &args.selected_subcomponents,
-                        args.warmup_iters,
-                        args.iters,
-                        args.runs,
-                    );
-                }
-                continue;
+    if let Some(counts) = &args.tokens_per_req {
+        if let Some(lengths) = &args.contexts_per_req {
+            run_case(&device, &args, &weights, counts.clone(), lengths.clone());
+        } else {
+            for &context in &contexts {
+                run_case(&device, &args, &weights, counts.clone(), vec![context; counts.len()]);
             }
-            for &existing_context_len in &contexts {
-                let fixture = RealGQAFixture::new(
-                    &device,
-                    tokens_per_req.clone(),
-                    vec![existing_context_len; tokens_per_req.len()],
-                    args.max_tokens,
-                    &weights,
-                    args.params,
-                    args.model,
-                );
-                if args.validate_sdpa_sliced_q {
-                    fixture.validate_sdpa_sliced_q_attention();
-                }
-                fixture.measure(&args.split_kv_variants, args.warmup_iters, args.iters, args.runs);
-                if args.subcomponents {
-                    fixture.measure_subcomponents(
-                        &args.selected_subcomponents,
-                        args.warmup_iters,
-                        args.iters,
-                        args.runs,
-                    );
-                }
-            }
-            continue;
         }
-
-        for &num_reqs in &args.num_reqs {
-            if !valid_num_reqs(num_tokens, num_reqs) {
-                print_skip(num_tokens, num_reqs, None, None, "num_reqs_exceeds_tokens");
-                continue;
-            }
-            for &existing_context_len in &contexts {
-                let fixture = RealGQAFixture::new(
-                    &device,
-                    request_token_counts(num_tokens, num_reqs),
-                    vec![existing_context_len; num_reqs as usize],
-                    args.max_tokens,
-                    &weights,
-                    args.params,
-                    args.model,
-                );
-                if args.validate_sdpa_sliced_q {
-                    fixture.validate_sdpa_sliced_q_attention();
+    } else {
+        for &tokens in &args.tokens {
+            for &requests in &args.num_reqs {
+                if !valid_num_reqs(tokens, requests) {
+                    print_skip(tokens, requests, None, None, "num_reqs_exceeds_tokens");
+                    continue;
                 }
-                fixture.measure(&args.split_kv_variants, args.warmup_iters, args.iters, args.runs);
-                if args.subcomponents {
-                    fixture.measure_subcomponents(
-                        &args.selected_subcomponents,
-                        args.warmup_iters,
-                        args.iters,
-                        args.runs,
+                for &context in &contexts {
+                    run_case(
+                        &device,
+                        &args,
+                        &weights,
+                        request_token_counts(tokens, requests),
+                        vec![context; requests as usize],
                     );
                 }
             }
         }
+    }
+}
+
+fn measure_lookup(device: &Device, args: &Args, weights: &RealGQAWeights, counts: &[u32], contexts: &[u32]) {
+    let model = args.model;
+    let num_tokens = counts.iter().sum::<u32>();
+    let num_reqs = counts.len() as u32;
+    let end = contexts
+        .iter()
+        .zip(counts)
+        .map(|(&context, &tokens)| context.checked_add(tokens).expect("GQA context endpoint must fit u32"))
+        .max()
+        .unwrap();
+    let config = GQAMetalConfig {
+        group_size: GROUP_SIZE,
+        bits: BITS,
+        page_bytes: model.page_bytes(),
+        rope_dim: GQA_ROPE_DIM,
+        norm_eps: GQA_NORM_EPS,
+        rope_theta: GQA_ROPE_THETA,
+        rope_scaling: RopeScaling::Default,
+        io_dtype: Dtype::Bfloat16,
+    };
+    let core = GQACore::new(
+        model.model_layer_index,
+        model.hidden_dim,
+        model.head_dim,
+        model.num_q_heads,
+        model.num_kv_heads,
+        (model.head_dim as f32).sqrt().recip(),
+    );
+    let blocks = end.div_ceil(model.num_tokens_per_page());
+    let layout = GQAPageTableLayout {
+        num_req_slots: num_reqs,
+        num_blocks: blocks,
+        num_gqa_layers: 1,
+        num_page_ids_per_block: 1,
+    };
+    let backend = GQA::new(device, core, config, args.max_tokens, layout);
+    let metadata = backend.new_metadata();
+    let slots = (0..num_reqs).collect::<Vec<_>>();
+    let cu = cu_tokens(counts).into_iter().map(|n| n as u32).collect::<Vec<_>>();
+    backend.prepare(
+        &metadata,
+        &slots,
+        contexts,
+        &cu,
+        &backend.replay_bucket_policy(),
+        num_tokens,
+    );
+    let scratch = backend.new_scratch();
+    let hidden = Buffer::from_slice(device, &hidden_fixture(num_tokens as usize, model.hidden_dim));
+    let output = Buffer::new_zeroed(device, hidden.len_bytes());
+    let kv = Buffer::new_zeroed(device, num_reqs as usize * blocks as usize * config.page_bytes as usize);
+    let pages = Buffer::from_slice(device, &page_table(num_reqs, blocks));
+    let stream = Stream::new(device);
+    let mut recorder = MetalReplayRuntime::new(&stream).create_recorder();
+    <GQA as ReplayLayer>::record(
+        &backend,
+        &mut recorder,
+        GQAInput {
+            page_table_layout: layout,
+            gqa_layer_index: ReplayU32::Fixed(0),
+            batch_metadata: &metadata,
+            hidden_state: &hidden,
+            next_hidden_state: &output,
+            kv_cache: GQAKVCacheBindings {
+                kv_pages: &kv,
+                page_ids: &pages,
+            },
+            weights: GQAWeights {
+                qgkv_weight: &weights.qgkv_weight,
+                qgkv_scales: &weights.qgkv_scales,
+                qgkv_biases: &weights.qgkv_biases,
+                q_norm_weight: &weights.q_norm_weight,
+                k_norm_weight: &weights.k_norm_weight,
+                output_weight: &weights.output_weight,
+                output_scales: &weights.output_scales,
+                output_biases: &weights.output_biases,
+            },
+            scratch: scratch.bindings(),
+            num_active_tokens: ReplayU32::Fixed(num_tokens),
+        },
+    );
+    let replay = recorder.build();
+    print_split_selection(
+        "auto",
+        &metadata,
+        metadata.variant().map.thread_block.max_q_tokens,
+        metadata.variant().map.thread_block.kv_tokens_per_iteration,
+        args.max_tokens,
+    );
+    let samples = measure_runs(args.runs, args.warmup_iters, args.iters, || {
+        MetalReplayRuntime::new(&stream).submit_replay(&replay).wait();
+    });
+    let uniform = contexts.iter().all(|&n| n == contexts[0]).then_some(contexts[0]);
+    print_perf(num_tokens, num_reqs, uniform, Some("auto"), args.iters, &samples);
+}
+
+fn run_case(device: &Device, args: &Args, weights: &RealGQAWeights, counts: Vec<u32>, contexts: Vec<u32>) {
+    if args.split_kv_variants.contains(&GQASplitKVBenchVariant::Auto) {
+        measure_lookup(device, args, weights, &counts, &contexts);
+    }
+    let variants = args
+        .split_kv_variants
+        .iter()
+        .copied()
+        .filter(|v| *v != GQASplitKVBenchVariant::Auto)
+        .collect::<Vec<_>>();
+    if variants.is_empty() && !args.validate_sdpa_sliced_q && !args.subcomponents {
+        return;
+    }
+    let fixture = RealGQAFixture::new(
+        device,
+        counts,
+        contexts,
+        args.max_tokens,
+        weights,
+        args.params,
+        args.model,
+    );
+    if args.validate_sdpa_sliced_q {
+        fixture.validate_sdpa_sliced_q_attention();
+    }
+    fixture.measure(&variants, args.warmup_iters, args.iters, args.runs);
+    if args.subcomponents {
+        fixture.measure_subcomponents(&args.selected_subcomponents, args.warmup_iters, args.iters, args.runs);
     }
 }
 
@@ -202,9 +268,9 @@ struct RealGQAFixture<'a> {
     batch_metadata: GQAMetadataBuffers,
     sliced_q_batch_metadata: GQAMetadataBuffers,
     _page_ids: Buffer,
-    _tiled_partial_output: Buffer,
-    _tiled_partial_exp_sums: Buffer,
-    _tiled_partial_max_logits: Buffer,
+    _sliced_q_partial_output: Buffer,
+    _sliced_q_partial_exp_sums: Buffer,
+    _sliced_q_partial_max_logits: Buffer,
     _qgkv: Buffer,
     _q: Buffer,
     _g: Buffer,
@@ -216,7 +282,7 @@ struct RealGQAFixture<'a> {
     _sdpa_partial_max_logits: Buffer,
     _sdpa_partial_output: Buffer,
     _attention_output: Buffer,
-    _tiled_attention_output: Buffer,
+    _sliced_q_attention_output: Buffer,
     _gated_attention_output: Buffer,
     _weights: &'a RealGQAWeights,
 }
@@ -653,9 +719,9 @@ impl<'a> RealGQAFixture<'a> {
             batch_metadata,
             sliced_q_batch_metadata,
             _page_ids: page_ids,
-            _tiled_partial_output: sliced_q_partial_output,
-            _tiled_partial_exp_sums: sliced_q_partial_exp_sums,
-            _tiled_partial_max_logits: sliced_q_partial_max_logits,
+            _sliced_q_partial_output: sliced_q_partial_output,
+            _sliced_q_partial_exp_sums: sliced_q_partial_exp_sums,
+            _sliced_q_partial_max_logits: sliced_q_partial_max_logits,
             _qgkv: qgkv,
             _q: q,
             _g: g,
@@ -667,7 +733,7 @@ impl<'a> RealGQAFixture<'a> {
             _sdpa_partial_max_logits: sdpa_partial_max_logits,
             _sdpa_partial_output: sdpa_partial_output,
             _attention_output: attention_output,
-            _tiled_attention_output: sliced_q_attention_output,
+            _sliced_q_attention_output: sliced_q_attention_output,
             _gated_attention_output: gated_attention_output,
             _weights: weights,
         }
@@ -729,7 +795,7 @@ impl<'a> RealGQAFixture<'a> {
                 .replay_shape()
                 .num_total_sdpa_map_task_templates,
         };
-        let sliced_q = backend_sliced_q::Compute::new(
+        let tiled = backend_sliced_q::Compute::new(
             &self.device,
             sliced_q_config,
             self.sliced_q_batch_metadata.variant(),
@@ -737,7 +803,7 @@ impl<'a> RealGQAFixture<'a> {
         );
         let sliced_q_replay = {
             let mut recorder = MetalReplayRuntime::new(&self.stream).create_recorder();
-            recorder.record(ReplayOp::opaque(sliced_q.invoke_map(
+            recorder.record(ReplayOp::opaque(tiled.invoke_map(
                 backend_sliced_q::MapBuffers {
                     q: &self._q_norm_rope,
                     kv_pages: &self._kv_pages,
@@ -746,23 +812,23 @@ impl<'a> RealGQAFixture<'a> {
                     visible_kv_token_ranges: self.sliced_q_batch_metadata.visible_kv_token_ranges(),
                     q_token_ranges: self.sliced_q_batch_metadata.q_token_ranges(),
                     sdpa_map_task_templates: self.sliced_q_batch_metadata.sdpa_map_task_templates(),
-                    partial_output: &self._tiled_partial_output,
-                    partial_exp_sums: &self._tiled_partial_exp_sums,
-                    partial_max_logits: &self._tiled_partial_max_logits,
+                    partial_output: &self._sliced_q_partial_output,
+                    partial_exp_sums: &self._sliced_q_partial_exp_sums,
+                    partial_max_logits: &self._sliced_q_partial_max_logits,
                 },
                 ReplayU32::Fixed(0),
                 ReplayU32::Fixed(sliced_q_shape.num_total_tokens),
                 ReplayU32::Fixed(sliced_q_shape.num_total_q_token_tiles),
                 ReplayU32::Fixed(sliced_q_shape.num_total_sdpa_map_task_templates),
             )));
-            recorder.record_with_barrier_before(ReplayOp::opaque(sliced_q.invoke_reduce(
+            recorder.record_with_barrier_before(ReplayOp::opaque(tiled.invoke_reduce(
                 backend_sliced_q::ReduceBuffers {
-                    partial_output: &self._tiled_partial_output,
-                    partial_exp_sums: &self._tiled_partial_exp_sums,
-                    partial_max_logits: &self._tiled_partial_max_logits,
+                    partial_output: &self._sliced_q_partial_output,
+                    partial_exp_sums: &self._sliced_q_partial_exp_sums,
+                    partial_max_logits: &self._sliced_q_partial_max_logits,
                     q_token_ranges: self.sliced_q_batch_metadata.q_token_ranges(),
                     cu_sdpa_partial_outputs: self.sliced_q_batch_metadata.cu_sdpa_partial_outputs(),
-                    output: &self._tiled_attention_output,
+                    output: &self._sliced_q_attention_output,
                 },
                 ReplayU32::Fixed(sliced_q_shape.num_total_q_token_tiles),
             )));
@@ -775,7 +841,7 @@ impl<'a> RealGQAFixture<'a> {
         let sdpa_sliced_kv_output = &self._attention_output;
         let num_q_slots = self.num_tokens as usize * self.model.q_dim();
         let (max_diff_index, expected, actual, max_abs_diff) =
-            max_bf16_diff(sdpa_sliced_kv_output, &self._tiled_attention_output, num_q_slots);
+            max_bf16_diff(sdpa_sliced_kv_output, &self._sliced_q_attention_output, num_q_slots);
         if max_abs_diff > 0.0625 {
             let reference = gqa_attention_reference_at(
                 &self._q_norm_rope,
@@ -1008,9 +1074,9 @@ impl<'a> RealGQAFixture<'a> {
                     visible_kv_token_ranges: self.sliced_q_batch_metadata.visible_kv_token_ranges(),
                     q_token_ranges: self.sliced_q_batch_metadata.q_token_ranges(),
                     sdpa_map_task_templates: self.sliced_q_batch_metadata.sdpa_map_task_templates(),
-                    partial_output: &self._tiled_partial_output,
-                    partial_exp_sums: &self._tiled_partial_exp_sums,
-                    partial_max_logits: &self._tiled_partial_max_logits,
+                    partial_output: &self._sliced_q_partial_output,
+                    partial_exp_sums: &self._sliced_q_partial_exp_sums,
+                    partial_max_logits: &self._sliced_q_partial_max_logits,
                 },
                 ReplayU32::Fixed(0),
                 ReplayU32::Fixed(self.num_tokens),
@@ -1019,12 +1085,12 @@ impl<'a> RealGQAFixture<'a> {
             )));
             recorder.record_with_barrier_before(ReplayOp::opaque(sliced_q_kernel.invoke_reduce(
                 backend_sliced_q::ReduceBuffers {
-                    partial_output: &self._tiled_partial_output,
-                    partial_exp_sums: &self._tiled_partial_exp_sums,
-                    partial_max_logits: &self._tiled_partial_max_logits,
+                    partial_output: &self._sliced_q_partial_output,
+                    partial_exp_sums: &self._sliced_q_partial_exp_sums,
+                    partial_max_logits: &self._sliced_q_partial_max_logits,
                     q_token_ranges: self.sliced_q_batch_metadata.q_token_ranges(),
                     cu_sdpa_partial_outputs: self.sliced_q_batch_metadata.cu_sdpa_partial_outputs(),
-                    output: &self._tiled_attention_output,
+                    output: &self._sliced_q_attention_output,
                 },
                 ReplayU32::Fixed(sliced_q_shape.num_total_q_token_tiles),
             )));
@@ -1036,7 +1102,7 @@ impl<'a> RealGQAFixture<'a> {
         let sdpa_sliced_kv_output = &self._attention_output;
         assert_bf16_close(
             sdpa_sliced_kv_output,
-            &self._tiled_attention_output,
+            &self._sliced_q_attention_output,
             self.num_tokens as usize * self.model.q_dim(),
             0.0625,
         );

@@ -28,19 +28,14 @@ use safetensors::SafeTensors;
 
 use crate::Args;
 use crate::BITS;
-use crate::GDN_CONV_DIM;
 use crate::GDN_CONV_KERNEL_SIZE;
 use crate::GDN_EPS;
 use crate::GDN_LAYER;
 use crate::GDN_QK_HEAD_DIM;
 use crate::GDN_QK_HEADS;
-use crate::GDN_QKVABZ_DIM;
-use crate::GDN_SHARD;
-use crate::GDN_V_DIM;
 use crate::GDN_V_HEAD_DIM;
-use crate::GDN_V_HEADS;
+use crate::GDNModelProfile;
 use crate::GROUP_SIZE;
-use crate::HIDDEN_DIM;
 use crate::build_single_invocation_replay;
 use crate::concat_parts;
 use crate::cu_tokens;
@@ -61,14 +56,14 @@ use crate::validate_qkvabz_sizes;
 
 pub fn run(args: Args) {
     let device = Device::system_default();
-    let mapped = MappedFile::open(&args.model_dir.join(GDN_SHARD));
+    let mapped = MappedFile::open(&args.model_dir.join(args.model.shard));
     let tensors = SafeTensors::deserialize(mapped.as_bytes()).unwrap_or_else(|err| {
         panic!(
             "unable to deserialize safetensors shard {}: {err:?}",
-            args.model_dir.join(GDN_SHARD).display()
+            args.model_dir.join(args.model.shard).display()
         )
     });
-    let weights = RealGDNWeights::load(&device, &tensors);
+    let weights = RealGDNWeights::load(&device, &tensors, args.model);
     let contexts = if args.contexts.is_empty() {
         vec![0]
     } else {
@@ -98,6 +93,7 @@ pub fn run(args: Args) {
                 args.prefill_requests,
                 existing_context_len,
                 &weights,
+                args.model,
             );
             println!(
                 "bench_shape component=gdn tokens_per_req={num_tokens_per_req:?} prefill_requests={}",
@@ -122,6 +118,7 @@ struct RealGDNFixture<'a> {
     num_reqs: u32,
     num_prefill_requests: u32,
     existing_context_len: u32,
+    model: GDNModelProfile,
     next_hidden_state: Buffer,
     replay: ReplayProgram,
     hidden_state: Buffer,
@@ -147,6 +144,7 @@ impl<'a> RealGDNFixture<'a> {
         num_prefill_requests: u32,
         existing_context_len: u32,
         weights: &'a RealGDNWeights,
+        model: GDNModelProfile,
     ) -> Self {
         let num_tokens = num_tokens_per_req.iter().sum();
         let num_reqs = u32::try_from(num_tokens_per_req.len()).expect("request count must fit u32");
@@ -157,10 +155,10 @@ impl<'a> RealGDNFixture<'a> {
         let stream = Stream::new(device);
         let core = GDNCore {
             model_layer_index: GDN_LAYER,
-            hidden_dim: HIDDEN_DIM,
+            hidden_dim: model.hidden_dim,
             num_qk_heads: GDN_QK_HEADS,
             qk_head_dim: GDN_QK_HEAD_DIM,
-            num_v_heads: GDN_V_HEADS,
+            num_v_heads: model.num_v_heads,
             v_head_dim: GDN_V_HEAD_DIM,
             conv_kernel_size: GDN_CONV_KERNEL_SIZE,
             q_scale: (GDN_QK_HEAD_DIM as f32).sqrt().recip(),
@@ -176,9 +174,11 @@ impl<'a> RealGDNFixture<'a> {
             output_scale_bias_dtype: Dtype::Bfloat16,
         };
         let backend = GDN::new(device, core, config);
-        let hidden_state = Buffer::from_slice(device, &hidden_fixture(num_tokens as usize, HIDDEN_DIM));
-        let next_hidden_state =
-            Buffer::new_zeroed(device, num_tokens as usize * HIDDEN_DIM * Dtype::Bfloat16.item_size());
+        let hidden_state = Buffer::from_slice(device, &hidden_fixture(num_tokens as usize, model.hidden_dim));
+        let next_hidden_state = Buffer::new_zeroed(
+            device,
+            num_tokens as usize * model.hidden_dim * Dtype::Bfloat16.item_size(),
+        );
         let batch_metadata = GDNMetadataBuffers::new(device, num_reqs as usize, num_tokens as usize);
         let cu_tokens = cu_tokens(num_tokens_per_req)
             .into_iter()
@@ -204,35 +204,37 @@ impl<'a> RealGDNFixture<'a> {
         let conv_state = Buffer::from_slice(
             device,
             &gdn_conv_state_fixture(
+                model,
                 existing_context_len,
                 num_reqs as usize,
-                num_state_slots as usize * GDN_CONV_DIM * (GDN_CONV_KERNEL_SIZE - 1),
+                num_state_slots as usize * model.conv_dim() * (GDN_CONV_KERNEL_SIZE - 1),
             ),
         );
         let next_conv_state = Buffer::new_zeroed(
             device,
-            num_state_slots as usize * GDN_CONV_DIM * (GDN_CONV_KERNEL_SIZE - 1) * size_of::<u16>(),
+            num_state_slots as usize * model.conv_dim() * (GDN_CONV_KERNEL_SIZE - 1) * size_of::<u16>(),
         );
         let recurrent_state_arena = Buffer::from_slice(
             device,
             &gdn_recurrent_state_fixture(
+                model,
                 existing_context_len,
                 num_reqs as usize,
-                num_state_slots as usize * GDN_V_HEADS * GDN_V_HEAD_DIM * GDN_QK_HEAD_DIM,
+                num_state_slots as usize * model.num_v_heads * GDN_V_HEAD_DIM * GDN_QK_HEAD_DIM,
             ),
         );
-        let qkvabz = Buffer::new_zeroed(device, num_tokens as usize * GDN_QKVABZ_DIM * size_of::<u16>());
-        let conv_qkv = Buffer::new_zeroed(device, num_tokens as usize * GDN_CONV_DIM * size_of::<u16>());
-        let recurrent_output = Buffer::new_zeroed(device, num_tokens as usize * GDN_V_DIM * size_of::<u16>());
-        let norm_gated_output = Buffer::new_zeroed(device, num_tokens as usize * GDN_V_DIM * size_of::<u16>());
-        let replay_alpha = Buffer::new_zeroed_elements(device, num_tokens as usize * GDN_V_HEADS, Dtype::Float32);
+        let qkvabz = Buffer::new_zeroed(device, num_tokens as usize * model.qkvabz_dim() * size_of::<u16>());
+        let conv_qkv = Buffer::new_zeroed(device, num_tokens as usize * model.conv_dim() * size_of::<u16>());
+        let recurrent_output = Buffer::new_zeroed(device, num_tokens as usize * model.v_dim() * size_of::<u16>());
+        let norm_gated_output = Buffer::new_zeroed(device, num_tokens as usize * model.v_dim() * size_of::<u16>());
+        let replay_alpha = Buffer::new_zeroed_elements(device, num_tokens as usize * model.num_v_heads, Dtype::Float32);
         let replay_k = Buffer::new_zeroed_elements(
             device,
             num_tokens as usize * GDN_QK_HEADS * GDN_QK_HEAD_DIM,
             Dtype::Float32,
         );
-        let replay_u = Buffer::new_zeroed_elements(device, num_tokens as usize * GDN_V_DIM, Dtype::Float32);
-        let replay_qkv = Buffer::new_zeroed_elements(device, num_tokens as usize * GDN_CONV_DIM, Dtype::Bfloat16);
+        let replay_u = Buffer::new_zeroed_elements(device, num_tokens as usize * model.v_dim(), Dtype::Float32);
+        let replay_qkv = Buffer::new_zeroed_elements(device, num_tokens as usize * model.conv_dim(), Dtype::Bfloat16);
         let mut recorder = MetalReplayRuntime::new(&stream).create_recorder();
         let _ = <GDN as ReplayLayer>::record(
             &backend,
@@ -269,6 +271,7 @@ impl<'a> RealGDNFixture<'a> {
         );
         let replay = recorder.build();
         let fixture = Self {
+            model,
             device: device.clone(),
             stream,
             num_tokens,
@@ -334,7 +337,7 @@ impl<'a> RealGDNFixture<'a> {
             expected_conv,
             "short convolution must remain unchanged"
         );
-        let source_state_len = self.num_reqs as usize * GDN_V_HEADS * GDN_V_HEAD_DIM * GDN_QK_HEAD_DIM;
+        let source_state_len = self.num_reqs as usize * self.model.num_v_heads * GDN_V_HEAD_DIM * GDN_QK_HEAD_DIM;
         assert_eq!(
             &actual_recurrent[..source_state_len],
             &initial_recurrent[..source_state_len]
@@ -348,11 +351,11 @@ impl<'a> RealGDNFixture<'a> {
             .cu_tokens()
             .read_typed::<u32>(self.num_prefill_requests as usize, 1)[0] as usize;
         assert_eq!(
-            &actual_hidden[prefill_tokens * HIDDEN_DIM..],
-            &expected_hidden[prefill_tokens * HIDDEN_DIM..],
+            &actual_hidden[prefill_tokens * self.model.hidden_dim..],
+            &expected_hidden[prefill_tokens * self.model.hidden_dim..],
             "replay forward must preserve the recurrent output bits",
         );
-        let state_stride = GDN_V_HEADS * GDN_V_HEAD_DIM * GDN_QK_HEAD_DIM;
+        let state_stride = self.model.num_v_heads * GDN_V_HEAD_DIM * GDN_QK_HEAD_DIM;
         let write_slots = self
             .batch_metadata
             .flat_recurrent_state_write_slots()
@@ -442,10 +445,10 @@ impl<'a> RealGDNFixture<'a> {
     fn recurrent_replay(&self) -> ReplayProgram {
         let device = &self.device;
         let mut builder = self.stream.create_replay_program();
-        let qkvabz_config = gdn_qkvabz_affine_config();
+        let qkvabz_config = gdn_qkvabz_affine_config(self.model);
         let qkvabz = affine_quantized::Matmul::new(device, qkvabz_config);
-        let compute = backend_compute::Compute::new(device, gdn_compute_config());
-        let output_config = gdn_output_affine_config();
+        let compute = backend_compute::Compute::new(device, gdn_compute_config(self.model));
+        let output_config = gdn_output_affine_config(self.model);
         let output = affine_quantized::Matmul::new(device, output_config);
 
         builder.record_with_barrier_before(qkvabz.invoke(
@@ -517,10 +520,10 @@ impl<'a> RealGDNFixture<'a> {
 
     fn measure_subcomponents(&self, warmup_iters: usize, iters: usize, runs: usize) {
         let device = &self.device;
-        let qkvabz_config = gdn_qkvabz_affine_config();
+        let qkvabz_config = gdn_qkvabz_affine_config(self.model);
         let qkvabz = affine_quantized::Matmul::new(device, qkvabz_config);
-        let compute = backend_compute::Compute::new(device, gdn_compute_config());
-        let output_config = gdn_output_affine_config();
+        let compute = backend_compute::Compute::new(device, gdn_compute_config(self.model));
+        let output_config = gdn_output_affine_config(self.model);
         let output = affine_quantized::Matmul::new(device, output_config);
 
         let qkvabz_replay = build_single_invocation_replay(
@@ -624,12 +627,12 @@ impl<'a> RealGDNFixture<'a> {
     }
 }
 
-fn gdn_compute_config() -> backend_compute::Config {
+fn gdn_compute_config(model: GDNModelProfile) -> backend_compute::Config {
     backend_compute::Config {
         projection_layout: backend_compute::ProjectionLayout::PackedQkvabz,
         num_qk_heads: GDN_QK_HEADS.try_into().expect("GDN qk heads must fit u32"),
         qk_head_dim: GDN_QK_HEAD_DIM.try_into().expect("GDN qk head dim must fit u32"),
-        num_v_heads: GDN_V_HEADS.try_into().expect("GDN V heads must fit u32"),
+        num_v_heads: model.num_v_heads.try_into().expect("GDN V heads must fit u32"),
         v_head_dim: GDN_V_HEAD_DIM.try_into().expect("GDN V head dim must fit u32"),
         conv_kernel_size: GDN_CONV_KERNEL_SIZE
             .try_into()
@@ -654,67 +657,140 @@ struct RealGDNWeights {
 }
 
 impl RealGDNWeights {
-    fn load(device: &Device, tensors: &SafeTensors<'_>) -> Self {
+    fn load(device: &Device, tensors: &SafeTensors<'_>, model: GDNModelProfile) -> Self {
         let prefix = format!("language_model.model.layers.{GDN_LAYER}.linear_attn");
         let qkv_weight = tensor_bytes(
+            model,
             tensors,
             &format!("{prefix}.in_proj_qkv.weight"),
             safetensors::Dtype::U32,
         );
-        let a_weight = tensor_bytes(tensors, &format!("{prefix}.in_proj_a.weight"), safetensors::Dtype::U32);
-        let b_weight = tensor_bytes(tensors, &format!("{prefix}.in_proj_b.weight"), safetensors::Dtype::U32);
-        let z_weight = tensor_bytes(tensors, &format!("{prefix}.in_proj_z.weight"), safetensors::Dtype::U32);
+        let a_weight = tensor_bytes(
+            model,
+            tensors,
+            &format!("{prefix}.in_proj_a.weight"),
+            safetensors::Dtype::U32,
+        );
+        let b_weight = tensor_bytes(
+            model,
+            tensors,
+            &format!("{prefix}.in_proj_b.weight"),
+            safetensors::Dtype::U32,
+        );
+        let z_weight = tensor_bytes(
+            model,
+            tensors,
+            &format!("{prefix}.in_proj_z.weight"),
+            safetensors::Dtype::U32,
+        );
         let qkv_scales = tensor_bytes(
+            model,
             tensors,
             &format!("{prefix}.in_proj_qkv.scales"),
             safetensors::Dtype::BF16,
         );
-        let a_scales = tensor_bytes(tensors, &format!("{prefix}.in_proj_a.scales"), safetensors::Dtype::BF16);
-        let b_scales = tensor_bytes(tensors, &format!("{prefix}.in_proj_b.scales"), safetensors::Dtype::BF16);
-        let z_scales = tensor_bytes(tensors, &format!("{prefix}.in_proj_z.scales"), safetensors::Dtype::BF16);
+        let a_scales = tensor_bytes(
+            model,
+            tensors,
+            &format!("{prefix}.in_proj_a.scales"),
+            safetensors::Dtype::BF16,
+        );
+        let b_scales = tensor_bytes(
+            model,
+            tensors,
+            &format!("{prefix}.in_proj_b.scales"),
+            safetensors::Dtype::BF16,
+        );
+        let z_scales = tensor_bytes(
+            model,
+            tensors,
+            &format!("{prefix}.in_proj_z.scales"),
+            safetensors::Dtype::BF16,
+        );
         let qkv_biases = tensor_bytes(
+            model,
             tensors,
             &format!("{prefix}.in_proj_qkv.biases"),
             safetensors::Dtype::BF16,
         );
-        let a_biases = tensor_bytes(tensors, &format!("{prefix}.in_proj_a.biases"), safetensors::Dtype::BF16);
-        let b_biases = tensor_bytes(tensors, &format!("{prefix}.in_proj_b.biases"), safetensors::Dtype::BF16);
-        let z_biases = tensor_bytes(tensors, &format!("{prefix}.in_proj_z.biases"), safetensors::Dtype::BF16);
+        let a_biases = tensor_bytes(
+            model,
+            tensors,
+            &format!("{prefix}.in_proj_a.biases"),
+            safetensors::Dtype::BF16,
+        );
+        let b_biases = tensor_bytes(
+            model,
+            tensors,
+            &format!("{prefix}.in_proj_b.biases"),
+            safetensors::Dtype::BF16,
+        );
+        let z_biases = tensor_bytes(
+            model,
+            tensors,
+            &format!("{prefix}.in_proj_z.biases"),
+            safetensors::Dtype::BF16,
+        );
         let qkvabz_weight = concat_parts(&[&qkv_weight, &a_weight, &b_weight, &z_weight]);
         let qkvabz_scales = concat_parts(&[&qkv_scales, &a_scales, &b_scales, &z_scales]);
         let qkvabz_biases = concat_parts(&[&qkv_biases, &a_biases, &b_biases, &z_biases]);
-        validate_qkvabz_sizes(&qkvabz_weight, &qkvabz_scales, &qkvabz_biases);
+        validate_qkvabz_sizes(model, &qkvabz_weight, &qkvabz_scales, &qkvabz_biases);
         Self {
             qkvabz_weight: Buffer::from_slice(device, &qkvabz_weight),
             qkvabz_scales: Buffer::from_slice(device, &qkvabz_scales),
             qkvabz_biases: Buffer::from_slice(device, &qkvabz_biases),
             conv_weight: Buffer::from_slice(
                 device,
-                &tensor_bytes(tensors, &format!("{prefix}.conv1d.weight"), safetensors::Dtype::BF16),
+                &tensor_bytes(
+                    model,
+                    tensors,
+                    &format!("{prefix}.conv1d.weight"),
+                    safetensors::Dtype::BF16,
+                ),
             ),
             norm_weight: Buffer::from_slice(
                 device,
-                &tensor_bytes(tensors, &format!("{prefix}.norm.weight"), safetensors::Dtype::BF16),
+                &tensor_bytes(
+                    model,
+                    tensors,
+                    &format!("{prefix}.norm.weight"),
+                    safetensors::Dtype::BF16,
+                ),
             ),
             a_log: Buffer::from_slice(
                 device,
-                &tensor_bytes(tensors, &format!("{prefix}.A_log"), safetensors::Dtype::BF16),
+                &tensor_bytes(model, tensors, &format!("{prefix}.A_log"), safetensors::Dtype::BF16),
             ),
             dt_bias: Buffer::from_slice(
                 device,
-                &tensor_bytes(tensors, &format!("{prefix}.dt_bias"), safetensors::Dtype::BF16),
+                &tensor_bytes(model, tensors, &format!("{prefix}.dt_bias"), safetensors::Dtype::BF16),
             ),
             output_weight: Buffer::from_slice(
                 device,
-                &tensor_bytes(tensors, &format!("{prefix}.out_proj.weight"), safetensors::Dtype::U32),
+                &tensor_bytes(
+                    model,
+                    tensors,
+                    &format!("{prefix}.out_proj.weight"),
+                    safetensors::Dtype::U32,
+                ),
             ),
             output_scales: Buffer::from_slice(
                 device,
-                &tensor_bytes(tensors, &format!("{prefix}.out_proj.scales"), safetensors::Dtype::BF16),
+                &tensor_bytes(
+                    model,
+                    tensors,
+                    &format!("{prefix}.out_proj.scales"),
+                    safetensors::Dtype::BF16,
+                ),
             ),
             output_biases: Buffer::from_slice(
                 device,
-                &tensor_bytes(tensors, &format!("{prefix}.out_proj.biases"), safetensors::Dtype::BF16),
+                &tensor_bytes(
+                    model,
+                    tensors,
+                    &format!("{prefix}.out_proj.biases"),
+                    safetensors::Dtype::BF16,
+                ),
             ),
         }
     }

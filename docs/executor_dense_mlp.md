@@ -855,3 +855,6 @@ The caller must preserve the layer-boundary hidden buffer until downstream resid
 
 [`executor_benchmarks.md`](executor_benchmarks.md) defines shared GPU serialization, benchmark metrics, and
 performance-evidence rules.
+
+The [component latency matrix](executor_benchmarks.md#component-latency-matrix) provides resumable `full_auto` measurements and grouped reports.
+The measured input is the total row count. Request and ctx labels do not change this component input.

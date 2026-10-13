@@ -285,6 +285,7 @@ impl Args {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum GQASplitKVBenchVariant {
+    Auto,
     SlicedKv,
     SlicedQ,
 }
@@ -299,10 +300,11 @@ fn parse_split_kv_variants(value: &str) -> Vec<GQASplitKVBenchVariant> {
         .into_iter()
         .map(|part| {
             match part.as_str() {
+                "auto" => GQASplitKVBenchVariant::Auto,
                 "sliced_kv" => GQASplitKVBenchVariant::SlicedKv,
                 "sliced_q" => GQASplitKVBenchVariant::SlicedQ,
                 _ => {
-                    panic!("invalid --gqa-split-kv-variants entry {part:?}; expected sliced_kv or sliced_q")
+                    panic!("invalid --gqa-split-kv-variants entry {part:?}; expected auto, sliced_kv, or sliced_q")
                 },
             }
         })
@@ -372,7 +374,7 @@ fn print_help_and_exit() -> ! {
 --gqa-tokens-per-req 1,2,4,8
 --gqa-contexts-per-req 0,128,1024,65536
 --max-tokens 128
---gqa-split-kv-variants sliced_kv,sliced_q
+--gqa-split-kv-variants auto,sliced_kv,sliced_q
 --subcomponents
 --gqa-subcomponents qgkv,qgkv-to-q-g-k-v,q-norm-rope,k-norm-rope,kv-page-write,sdpa-sliced-kv,sdpa-sliced-q,gate,output
 --validate-sdpa-sliced-q
@@ -452,7 +454,7 @@ fn assert_bf16_close(expected: &Buffer, actual: &Buffer, num_values: usize, tole
     let (max_abs_index, expected_value, actual_value, max_abs_diff) = max_bf16_diff(expected, actual, num_values);
     assert!(
         max_abs_diff <= tolerance,
-        "GQA token-sliced_q mismatch at {max_abs_index}: expected={expected_value} actual={actual_value} \
+        "GQA sliced-Q mismatch at {max_abs_index}: expected={expected_value} actual={actual_value} \
          max_abs_diff={max_abs_diff} tolerance={tolerance}"
     );
 }
