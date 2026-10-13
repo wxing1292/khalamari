@@ -1256,6 +1256,9 @@ The reference records unknown provenance explicitly. The summary-only comparison
 Use `--show-runs` for per-row deltas and mismatches. Use `--no-reference` to disable the comparison.
 Run `python3 scripts/qwen35_e2e_decode_perf_test.py` for CPU-only script contract tests.
 
+Use the [cross-engine serving matrix](executor_benchmarks.md#cross-engine-serving-matrix) for exact raw-token, retained-context, and request-count comparisons.
+The matrix records fixed proposal counts, actual cache reuse, output counts, and engine provenance.
+
 The Qwen3 helper does not contain a checked-in reference run. Record its comparison results outside the script with the
 complete provenance required by [`executor_benchmarks.md`](executor_benchmarks.md).
 

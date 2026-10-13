@@ -56,6 +56,10 @@ pub fn run_vanilla() {
     let setup_elapsed = setup_start.elapsed();
 
     provenance.print(&args.model_dir);
+    if args.reuse_context {
+        run_reused_prefill(&args, &shapes, &mut fixture);
+        return;
+    }
     let expected = fixture.validate_cross_checks(&shapes);
     for shape in shapes {
         println!(
@@ -170,6 +174,7 @@ struct Args {
     warmup_iters: usize,
     iters: usize,
     runs: usize,
+    reuse_context: bool,
 }
 
 impl Args {
@@ -196,6 +201,7 @@ impl Args {
             warmup_iters: DEFAULT_WARMUP_ITERS,
             iters: DEFAULT_ITERS,
             runs: DEFAULT_RUNS,
+            reuse_context: false,
         };
         let mut values = values.into_iter().skip(1);
         while let Some(arg) = values.next() {
@@ -219,6 +225,7 @@ impl Args {
                 "--warmup-iters" => args.warmup_iters = parse_usize(&next_arg(&mut values, &arg), &arg),
                 "--iters" => args.iters = parse_usize(&next_arg(&mut values, &arg), &arg),
                 "--runs" => args.runs = parse_usize(&next_arg(&mut values, &arg), &arg),
+                "--reuse-context" => args.reuse_context = true,
                 "--bench" => {},
                 "--help" | "-h" => print_help_and_exit(),
                 _ => panic!("unknown argument {arg:?}; pass --help for usage"),
@@ -266,6 +273,19 @@ impl Args {
             self.max_tokens / self.num_reqs > 0,
             "--max-tokens must process at least one token for every active request"
         );
+        if self.reuse_context {
+            assert_eq!(
+                self.cases,
+                vec![Case::Prefill],
+                "--reuse-context requires --cases prefill"
+            );
+            assert!(
+                self.contexts
+                    .iter()
+                    .all(|context| context % self.num_tokens_per_block == 0),
+                "--reuse-context requires contexts at state publication boundaries"
+            );
+        }
     }
 
     fn validate_for_model(&self, vocab_size: usize, max_position_embeddings: usize) {
@@ -1505,9 +1525,126 @@ fn print_help_and_exit() -> ! {
         "qwen35_vanilla_prefill_decode benchmark\n--model-dir PATH\n--cases prefill,decode\n--contexts \
          N[,N...]\n--prefill-tokens N[,N...]\n--decode-tokens N[,N...]\n--num-reqs N\n--max-tokens \
          N\n--max-tokens-per-request N\n--num-tokens-per-block N\n--num-cache-pages N\n--seed N\n--temperature \
-         F\n--top-k N\n--top-p F\n--warmup-iters N\n--iters N\n--runs N"
+         F\n--top-k N\n--top-p F\n--warmup-iters N\n--iters N\n--runs N\n--reuse-context"
     );
     std::process::exit(0);
+}
+
+// Reuse materialized prefix pages. All benchmark contexts must end at a state
+// publication boundary. Resetting the request slot then restores the last prefix
+// state through the normal prepare_batch path, without recomputing the prefix.
+fn run_reused_prefill(args: &Args, shapes: &[Shape], fixture: &mut VanillaFixture) {
+    use std::io::Write;
+
+    let skipped = std::env::var("PSI_PREFILL_SKIP").unwrap_or_default();
+    let skipped = skipped.split(',').collect::<BTreeSet<_>>();
+    let req_slots = (0..args.num_reqs).map(|index| index as u32).collect::<Vec<_>>();
+    for &context in &args.contexts {
+        let pending = shapes
+            .iter()
+            .copied()
+            .filter(|shape| {
+                shape.context == context
+                    && !skipped.contains(format!("{}:{}", context, shape.operation_tokens).as_str())
+            })
+            .collect::<Vec<_>>();
+        if pending.is_empty() {
+            continue;
+        }
+        fixture.model.reset_req_slots(&req_slots);
+        fixture.pages.reset_sync();
+        let epoch = fixture.next_epoch;
+        fixture.next_epoch += 1;
+        let prefix_start = Instant::now();
+        if context > 0 {
+            fixture.execute_prefill_range(0, context, fixture.active_chunk_tokens, epoch);
+        }
+        fixture.model.reset_req_slots(&req_slots);
+        println!(
+            "matrix_prefix num_reqs={} context={} elapsed_ms={:.6}",
+            args.num_reqs,
+            context,
+            prefix_start.elapsed().as_secs_f64() * 1000.0
+        );
+        std::io::stdout().flush().unwrap();
+
+        for shape in pending {
+            let mut samples = Vec::new();
+            let mut submit_samples = Vec::new();
+            let mut prepare_samples = Vec::new();
+            let mut cold_ms = 0.0;
+            let mut expected_outputs: Option<Vec<Vec<OutputSample>>> = None;
+            for iteration in 0..(args.warmup_iters + args.iters * args.runs) {
+                fixture.model.reset_req_slots(&req_slots);
+                fixture.pages.reset_sync();
+                let epoch = fixture.next_epoch;
+                fixture.next_epoch += 1;
+                let start = Instant::now();
+                let (timing, consumed) =
+                    fixture.execute_prefill_range(context, shape.operation_tokens, fixture.active_chunk_tokens, epoch);
+                assert_eq!(consumed, shape.operation_tokens);
+                // commit_batch submits the recurrent-state commit asynchronously.
+                // A warmup probe, or reset below, waits for that submission.
+                if iteration < args.warmup_iters {
+                    let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
+                    if iteration == 0 {
+                        cold_ms = elapsed_ms;
+                    }
+                    let outputs = fixture.execute_decode_probe(shape.final_context(), epoch);
+                    if let Some(expected) = &expected_outputs {
+                        assert_decomposition_output_tokens(
+                            expected,
+                            &outputs,
+                            "restored prefix must reproduce the warmup probe",
+                        );
+                    } else {
+                        expected_outputs = Some(outputs);
+                    }
+                    fixture.model.reset_req_slots(&req_slots);
+                } else {
+                    fixture.model.reset_req_slots(&req_slots);
+                    samples.push(start.elapsed().as_secs_f64() * 1000.0);
+                    submit_samples.push(timing.main_submit_wait.as_secs_f64() * 1000.0);
+                    prepare_samples.push(timing.prepare.as_secs_f64() * 1000.0);
+                }
+            }
+            // Check page restoration against a fresh production-path prefix at a
+            // representative publication boundary. This check is outside timing.
+            if context == DEFAULT_NUM_TOKENS_PER_BLOCK && shape.operation_tokens == 8 {
+                let fresh =
+                    fixture.run_trajectory(shape, fixture.active_chunk_tokens, fixture.active_chunk_tokens, false);
+                assert_decomposition_output_tokens(
+                    expected_outputs.as_ref().unwrap(),
+                    &fresh.outputs,
+                    "restored state must match a recomputed prefix",
+                );
+                println!(
+                    "matrix_check num_reqs={} context={} tokens={} status=pass",
+                    args.num_reqs, context, shape.operation_tokens
+                );
+            }
+            let format_values = |values: &[f64]| {
+                values
+                    .iter()
+                    .map(|value| format!("{value:.6}"))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            };
+            println!(
+                "matrix_result num_reqs={} context={} tokens={} chunk_tokens={} cold_ms={:.6} samples_ms={} \
+                 submit_ms={} prepare_ms={} status=measured",
+                args.num_reqs,
+                context,
+                shape.operation_tokens,
+                fixture.active_chunk_tokens,
+                cold_ms,
+                format_values(&samples),
+                format_values(&submit_samples),
+                format_values(&prepare_samples)
+            );
+            std::io::stdout().flush().unwrap();
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1567,6 +1704,7 @@ mod tests {
             warmup_iters: 1,
             iters: 1,
             runs: 1,
+            reuse_context: false,
         };
         assert_eq!(
             args.shapes(),

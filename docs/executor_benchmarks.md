@@ -336,6 +336,16 @@ An external comparison must match weights, input tensors, state contents, precis
   It resets request slots and rebuilds each starting context with committed, chunked Prefill work before each
   trajectory.
   The operation timer excludes the reset and context rebuild.
+  `--reuse-context` selects a Prefill-only matrix with retained prefix pages.
+  Each context must end at a `--num-tokens-per-block` boundary.
+  This mode builds the prefix once per context.
+  Each sample resets its request slot and restores the retained state through `prepare_batch`.
+  Its wall timer includes metadata preparation, state restoration, Main execution, and the final state commit wait.
+  It emits `matrix_result` with cold, warm wall, submission, and preparation times.
+  Its untimed warmup probes verify that restoration preserves the output tokens.
+  At one publication boundary, the 8-token case also checks a recomputed prefix.
+  `PSI_PREFILL_SKIP` contains completed `context:tokens` pairs, separated by commas.
+  The comparison runner sets this benchmark-only variable when it resumes a matrix.
   Prefill skips gather, unembedding, sampling, and readback because it has no Main output rows.
   Decode commits one visible sampled token per request and uses that token as the next input.
   `--prefill-tokens` and `--decode-tokens` are per-request operation totals.
@@ -518,6 +528,12 @@ structured logs.
 The `--profile component|operation` modes currently produce the same CPU tree.
 `MetalRuntime` enables relaxed Metal 4 GPU stage timestamps by default.
 The backend Stream API supports precise timestamps for explicit diagnostics. Precise timestamps can change execution performance.
+An ICB stage timing claim must validate the timestamp boundaries against GPU completion feedback.
+Monotonic encoder timestamps alone do not prove that a sample includes the preceding ICB work.
+The local M3 Max audit observed unavailable relaxed samples and implausibly short precise Main samples.
+Use command-buffer completion times for an independent check.
+A diagnostic that submits and waits for each stage must preserve the output and acceptance trajectory.
+Keep its added synchronization cost separate from normal service throughput.
 Use service `executor_cpu_ms`, not `main_cpu_ms`, to compare a split Main-to-Spec lifecycle with an integrated
 lifecycle.
 [`service.md`](service.md) documents the GPU timing fields and defaults.
@@ -968,3 +984,153 @@ The generated table is a calibration artifact.
 It does not change the production registry, selector, replay capacity, or scratch lifecycle.
 See [future work](future_work.md#performance-investigations) for production promotion.
 
+## Cross-engine serving matrix
+
+`scripts/qwen35_e2e_matrix.py` compares a fixed raw-token workload across psi-dec, oMLX, and TensorFold.
+It complements the representative text prompts in `qwen35_e2e_decode_perf.sh`.
+It does not replace their output-quality checks.
+
+The default matrix has 232 shapes:
+
+- Request counts: `1,2,4,8`.
+- Retained context: `0,2048,4096,8192,16384,32768`.
+- Appended input tokens per request: `1,2,4,8,16,32,64,128,256`.
+- From-empty input tokens per request: `2048,4096,8192,16384`.
+
+Each request generates exactly 256 tokens by default. Use `--output-tokens` to change this fixed count.
+The default prefill chunk is 128 tokens per request.
+Append cases use one warm-up and two measured samples by default.
+Full-prefill cases run after the append matrix has exercised the operator paths.
+They use no additional full-prompt warm-up and one measured sample by default.
+Use `--full-repeats` for more full-prompt samples.
+The modes are Main-only, MTP proposal counts 1 through 4, and DFlash2 with seven proposals.
+The oMLX worker uses the official Lightning MTP path with `mtp_fixed_depth`.
+Its metadata view binds the supplied standalone head as `language_model.mtp.*`.
+Native MTP uses `model-native-mtp-no-eos`. Other modes use `model-no-eos`.
+The view retains the original shard files and the head's quantization metadata.
+The loader renames parameter keys. It does not requantize or copy checkpoint values.
+Initialization rejects a legacy norm repair that would change the shared head weights.
+The native path supports concurrent requests. Earlier external-drafter fallback results remain separate.
+The adapter disables native context-copy proposals. A copied window can exceed `mtp_fixed_depth`.
+It records every MTP verify width and accepted count at the existing chain owner.
+The native summary log counts deeper positions only until the first rejection.
+That conditional denominator does not count all generated proposals.
+A measured MTP sample without proposal statistics is also excluded as `N/A: MTP fallback`.
+The TensorFold Qwen dense family has no MTP mode. The report marks those entries `N/A`.
+
+The controller starts one engine at a time. It initializes each request capacity separately.
+The psi-dec worker calls the production raw-token gRPC API from a separate process.
+The oMLX worker uses the production VLM serving engine and its in-memory prefix cache.
+The TensorFold worker uses the maintained Python `0.6` LaneEngine path.
+The native TensorFold `1.0.4` server has a different fixed tree policy and no raw-token completion API.
+Do not label the Python fixed-chain results as native-server performance.
+
+Use the same local Main, MTP, and affine DFlash2 checkpoint paths for all workers.
+The workers do not download checkpoints or compare weight values.
+The TensorFold adapter reads the affine metadata before loading the existing draft.
+It expands quantized selector embeddings for TensorFold's CPU selector.
+It retains the production draft kernels and fixes the maximum chain at seven candidates.
+It records the actual generated and accepted candidate counts.
+A shared TensorFold forward retains its published row capacity.
+The fixed-chain request cohort is limited to `family.batch_rows // 8` streams.
+It disables adaptive chain allocation and selects the full vocabulary through `TF_DRAFT_VOCAB=full`.
+The oMLX DFlash2 adapter records actual verify widths through the existing chain owner.
+Its conditional log denominator is not the complete generated-proposal count.
+
+The benchmark creates a local metadata view with EOS stopping disabled.
+All weight and tokenizer files remain linked to their original files.
+Greedy sampling uses temperature 0 and seed 42.
+Synthetic tokens establish input identity and shape. Their acceptance rate does not describe natural conversation.
+Default KV precision remains engine-specific: psi-dec uses FP8; the MLX engines use BF16.
+Different numerical paths can produce different greedy output hashes.
+The report retains the hashes and fixed output counts.
+
+Prefix setup is outside timing. Each measured request must resume at the exact requested context.
+The default fixture has a distinct prefix for each request.
+`--shared-prefix` prepares one identical prefix for all requests.
+The suffix after the four fixed lookahead positions remains distinct for each request.
+The psi-dec and oMLX workers use their native prefix caches to share the prepared prefix.
+TensorFold shares immutable baseline arrays and uses `LaneEngine.copy_single_cache` for each working cache.
+The TensorFold worker extends a matching baseline as context grows.
+Changed or shorter prefixes require fresh preparation.
+A shorter GDN prefix requires its recurrent state at that position. Truncating a longer KV cache is insufficient.
+Recommendation: List contexts in increasing order to reuse incremental preparation.
+Shared and distinct prefixes are different workloads. A changed prefix policy requires a new output directory.
+MLX prefix setup uses `--prefix-chunk` (default 2048). Timed input uses `--chunk` (default 128).
+The psi-dec server uses `--chunk` for setup and timing because its request capacity is static.
+The setup chunk and cache budgets are part of provenance.
+Both MLX engines limit their allocator's retained free buffers with `--mlx-cache-gib` (default 1).
+This limit does not change active model tensors or the retained context.
+It prevents unused GPU buffers from competing with oMLX's CPU hot-cache data for unified memory.
+The allocator cache limit is part of provenance. A changed limit requires a new output directory.
+The default oMLX hot-cache budget is 20 GiB. The psi-dec page budget is 98304 pages per request.
+The psi-dec server allocates and zeros the full page arena during initialization.
+Shared prefixes reduce occupied pages. They do not reduce that configured allocation.
+Recommendation: Size `--cache-pages-per-request` for the unique retained blocks and concurrent mutable tails.
+The page budget must include Main and shifted MTP lanes, GDN snapshots, and pending output blocks.
+Full-prefill inputs remain distinct for each request. The shared-prefix policy does not reduce their required page budget.
+Up to four suffix tokens remain fixed as MTP lookahead.
+The remaining suffix tokens vary before they can publish another complete cache block.
+The psi-dec MTP depth `K` needs `K` exact suffix tokens as lookahead during untimed prefix setup.
+A retained-context shape with fewer than `K` input tokens cannot reuse a complete shifted cache column.
+At zero context, the runtime also requires at least `K` initial input tokens.
+The report marks it `N/A: MTP lookahead`. It must not time history recomputation as a hot-prefix result.
+The script verifies psi-dec's first submitted token index and oMLX's reported cached-token count.
+The reported cached-token count is authoritative.
+A sample with fewer cached tokens is recorded as `N/A: prefix not retained`.
+Its excluded timing remains in JSONL. It must not produce a hot-prefix comparison ratio.
+TensorFold preserves its prepared cache as an immutable baseline.
+Each sample copies its cache containers through the native copy API.
+The native API can share contiguous immutable arrays. It materializes array views when required.
+
+TTFT ends when every request has its first token. Decode ends when every request finishes.
+The TensorFold adapter observes `LaneStream.emitted` after each engine step.
+It records the first token time when that list first becomes nonempty.
+An early request can decode before the last request has its first token.
+For concurrent requests, decode latency measures the remaining batch phase, not a separate kernel interval.
+Total includes request dispatch, prefix restoration, model execution, sampling, and completion delivery.
+The psi-dec transport is gRPC. The MLX adapters enter their serving engines in process.
+Record this transport difference when interpreting small latency differences.
+These are ordinary wall-clock timings. They are not force-sync GPU profile timings.
+
+Install the engine environments separately. The psi-dec worker also needs `grpcio` and `grpcio-tools`.
+Build the production release launcher before timing:
+
+```sh
+cargo build --release -p inference-runtime-launcher --bin qwen3_5_dense
+python3 scripts/qwen35_e2e_matrix.py \
+  --engine all \
+  --omlx-python /path/to/omlx-env/bin/python \
+  --tensorfold-python /path/to/tensorfold-env/bin/python \
+  --out target/perf/qwen35-e2e-matrix
+```
+
+`results.jsonl` stores engine, mode, and shape keys. Resume uses the latest result for each key.
+It skips valid completed results and fixed capability exclusions. It retries OOM and swap-invalidated results.
+Each worker checks its source, script, checkpoint metadata, version, and timing configuration before appending.
+GPU provenance records the GPU model and core count. Display state and resolution do not change the benchmark identity.
+A Metal out-of-memory failure records the affected keys as `N/A: Metal OOM`.
+The psi-dec adapter classifies an RPC failure as Metal OOM only when the new server log segment contains `kIOGPUCommandBufferCallbackErrorOutOfMemory`.
+The worker closes its GPU owner and returns exit code 86.
+The controller stops. It does not retry OOM automatically.
+Correct the memory budget before an explicit resume.
+Each GPU worker runs under an external supervisor.
+The supervisor samples macOS `Swapins` and `Swapouts` counters every 0.5 seconds.
+Existing swap usage alone does not reject a run. Any new swap-in or swap-out stops the worker and controller.
+The supervisor records counter observations in `<engine>-<mode>-memory.jsonl`.
+It preserves raw results and excludes newly completed rows in the affected observation interval through `timing-exclusions.jsonl`.
+The reports label those timings `unusable: swap activity` and omit their comparison ratios.
+Each new result has a durable ledger offset. A timing exclusion applies to that result, not to a later clean retry.
+Legacy key-only exclusions apply to legacy results that have no ledger offset.
+An interrupted, unrecorded shape remains pending. Earlier clean observations remain available on resume.
+Use a new output directory when those facts change.
+`report.md` groups rows by mode, operation, request count, context, and input length.
+`report.md`, `ttft.md`, and `decode.md` contain separate total, TTFT, and decode tables.
+Each table shows all engine values and psi-dec latency differences.
+Results with different input hashes must not produce a comparison ratio.
+
+Use `--engine plan` to inspect the matrix without loading a model.
+Use `--engine report` to regenerate the table without GPU work.
+Use `--requests`, `--contexts`, `--tokens`, `--full`, and `--modes` for a subset.
+Use `--engine psi-dec --mode mtp2` to run one worker with its engine Python environment.
+Run `python3 scripts/qwen35_e2e_matrix_test.py` for CPU-only workload-identity checks.
