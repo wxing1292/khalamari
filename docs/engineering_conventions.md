@@ -505,6 +505,9 @@ If the trajectory changes, report these values:
 Throughput from a different trajectory is not a like-for-like executor or kernel comparison. See
 [`executor_benchmarks.md`](executor_benchmarks.md) for the verification and performance-evidence rules.
 
+Keep the README performance summary limited to PSI results. Identify each measurement date and mode.
+Keep historical results separate from current results. Put cross-framework comparisons in the owning performance report.
+
 ## Public API
 
 Keep the public surface small. Items remain private unless an external caller needs them. Do not use `pub(crate)` or

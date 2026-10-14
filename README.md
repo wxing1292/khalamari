@@ -219,7 +219,6 @@ Its comparison baseline remains dated 2026-09-19.
 </details>
 
 See the [performance helper guide](docs/service.md#end-to-end-performance-helper) for commands, configuration, and comparison limits.
-See the [component report](docs/component_performance.md) for the dated PSI/oMLX/TensorFold component measurements.
 
 ## Workspace map
 

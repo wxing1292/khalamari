@@ -490,8 +490,12 @@ cargo bench -p inference-executor-metal --bench qwen35_vanilla_prefill_decode --
   --iters 1 --warmup-iters 1 --runs 1
 ```
 
-Run one performance command at a time. List the planned cases first. GPU contention and memory pressure invalidate
-comparisons.
+Run one performance command at a time. List the planned cases first. Concurrent GPU benchmarks and memory pressure
+invalidate comparisons.
+
+When the desktop is in use, alternate baseline and candidate measurements in the same session.
+Compare paired latency ratios. Discard unstable pairs.
+An absolute difference from an idle historical run does not establish a regression.
 
 ## Metrics
 
