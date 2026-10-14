@@ -546,6 +546,9 @@ lifecycle.
 
 ## Performance evidence
 
+[Component latency data](component_performance.md) records the existing five-component, three-engine snapshot.
+It keeps complete MoE, sparse expert compute, and separate policy probes distinct.
+
 A performance claim records all of:
 
 ```text
@@ -570,6 +573,43 @@ A throughput change with a different deterministic acceptance trajectory is not 
 A checked-in end-to-end reference is an observed result, not a threshold. The owning helper must record its complete
 provenance. It must suppress throughput deltas when the current provenance or deterministic trajectory does not match
 the reference.
+
+### Main-only serving results, 2026-10-14
+
+The user supplied these eight helper-summary results after the short-context GQA selection fix.
+Local `main` at receipt was `7c5d4356e561a6f49a8f002b256756bbbaebd77c`.
+That association does not replace the producing run's missing CONFIG record.
+The session machine is Apple M3 Max with 40 GPU cores and 48 GiB unified memory.
+The model names follow the helper cases: `Qwen3.6-35B-A3B-4bit` and `Qwen3.8-27B-4bit`.
+Run count, variance, exact output hashes, OS/configuration records, and memory telemetry were not supplied with the summary.
+
+```text
+helper case: one model, one prompt, one output limit
+    -> complete serving path with Spec disabled
+    -> sampled output tokens
+    -> observed decode tokens/s
+
+This metric includes the serving decode lifecycle.
+It is separate from precise GPU intervals and isolated component latency.
+```
+
+| Case | Prompt | Output limit | Output tokens | Decode tokens/s | Tokens/chunk |
+| --- | --- | ---: | ---: | ---: | ---: |
+| 35b_off | GSM8K | 256 | 256 | 96.146 | 1.000 |
+| 35b_off | GSM8K | 1024 | 1024 | 94.874 | 1.000 |
+| 35b_off | Chat | 256 | 256 | 97.135 | 1.000 |
+| 35b_off | Chat | 1024 | 1024 | 94.985 | 1.000 |
+| 27b_off | GSM8K | 256 | 256 | 22.730 | 1.000 |
+| 27b_off | GSM8K | 1024 | 279 | 22.760 | 1.000 |
+| 27b_off | Chat | 256 | 256 | 22.834 | 1.000 |
+| 27b_off | Chat | 1024 | 1024 | 22.236 | 1.000 |
+
+The observed Off throughput is about 95–97 tokens/s for 35B and 22–23 tokens/s for 27B.
+The 27B GSM8K case at limit 1024 ended at 279 tokens, so the limit does not establish equal work.
+This summary is an observed serving result. It is not a controlled kernel-speedup claim or a pass/fail threshold.
+No new MTP, DSpark, DFlash2, or cross-engine result is implied.
+The helper retains its separate 2026-09-19 comparison baseline.
+The [component snapshot](component_performance.md) retains its original measurement identities and values.
 
 ## Generic GQA matrix
 

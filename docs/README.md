@@ -14,7 +14,7 @@ For documentation changes, use [technical English](technical_english.md).
 | Change scheduling or cache lifecycle | [Runtime core](core.md) | [Token-budget allocation](token_budget_allocator.md) |
 | Change model execution or replay composition | [Executor architecture](executor.md) | [Qwen executor](executor_qwen.md) and the component below |
 | Change GPU recording or a kernel | [GPU execution](gpu_execution.md) | [Metal backend](../crates/inference-backend-metal/README.md) and the component below |
-| Verify correctness or investigate performance | [Verification and benchmarks](executor_benchmarks.md) | The affected component and [active work](future_work.md) |
+| Verify correctness or investigate performance | [Verification and benchmarks](executor_benchmarks.md) | [Component latency data](component_performance.md), the affected component, and [active work](future_work.md) |
 
 For one request, follow the ownership chain:
 

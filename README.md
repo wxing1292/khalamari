@@ -178,13 +178,31 @@ cargo run --release --bin qwen3_5_dense -- \
 
 ## Reference performance
 
-Decode throughput in tokens/s at an output limit of 1024 tokens, from the reference supplied on 2026-09-19.
-The reference profile is Apple M3 Max (40 GPU cores), macOS 27.0, arm64.
+The latest user-supplied Main-only (Off) results were received on 2026-10-14, after the short-context GQA selection fix.
 `27B` is Qwen3.8-27B. `35B` is Qwen3.6-35B-A3B.
+The session machine is Apple M3 Max with 40 GPU cores and 48 GiB unified memory.
+Values are decode tokens/s. The token limit is an output limit, not a fixed output length.
+
+| Model | Prompt | Limit 256 | Limit 1024 | Output at limit 1024 |
+| --- | --- | ---: | ---: | ---: |
+| 35B | GSM8K | 96.146 | 94.874 | 1024 |
+| 35B | Chat | 97.135 | 94.985 | 1024 |
+| 27B | GSM8K | 22.730 | 22.760 | 279 |
+| 27B | Chat | 22.834 | 22.236 | 1024 |
+
+All limit-256 cases emitted 256 tokens. Every chunk contained one token.
+The [performance record](docs/executor_benchmarks.md#main-only-serving-results-2026-10-14) retains all eight cases and their provenance limits.
+The supplied summary does not include run count, variance, or memory telemetry.
+These observations are not performance thresholds.
+
+<details>
+<summary>Historical speculative reference, 2026-09-19</summary>
+
+These Spec results precede the current GQA and matmul changes. They are not measurements of current `main`.
+The producing profile was Apple M3 Max (40 GPU cores), macOS 27.0, arm64, with an output limit of 1024 tokens.
 
 | Mode      | 27B GSM8K | 27B Chat | 35B GSM8K | 35B Chat |
 | --------- | --------: | -------: | --------: | -------: |
-| Vanilla   |    22.761 |   22.554 |    93.701 |   93.952 |
 | MTP=1     |    39.110 |   33.988 |   148.439 |  135.227 |
 | MTP=2     |    39.618 |   30.503 |   154.959 |  128.282 |
 | MTP=3     |    38.399 |   22.353 |   163.067 |  117.661 |
@@ -192,12 +210,16 @@ The reference profile is Apple M3 Max (40 GPU cores), macOS 27.0, arm64.
 | DSpark=7  |    43.603 |   15.790 |         — |        — |
 | DFlash2=7 |    47.769 |   21.303 |         — |        — |
 
-Output lengths and acceptance trajectories vary by case. These results are not performance thresholds.
-The user identified main tip at receipt: `d6dc5da7`, before history cleanup and the SlicedQ pipeline-capacity fix.
-These values are a baseline for that fix, not measurements of the revised code.
-Dirty state, run count, and variance were not supplied. A dash means no reference result.
-See the [perf script](scripts/qwen35_e2e_decode_perf.sh) for all 48 rows, output counts, and acceptance metrics.
+The historical source was `d6dc5da7`, before history cleanup.
+Output lengths and acceptance trajectories vary. Dirty state, run count, and variance were not supplied.
+A dash means no reference result.
+The [perf script](scripts/qwen35_e2e_decode_perf.sh) retains the original 48-case reference, including its historical Off values.
+Its comparison baseline remains dated 2026-09-19.
+
+</details>
+
 See the [performance helper guide](docs/service.md#end-to-end-performance-helper) for commands, configuration, and comparison limits.
+See the [component report](docs/component_performance.md) for the dated PSI/oMLX/TensorFold component measurements.
 
 ## Workspace map
 
