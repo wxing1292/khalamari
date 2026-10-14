@@ -1221,6 +1221,8 @@ warning and skips that case. A missing Main checkpoint remains an error.
 Before it starts a DFlash2 case, the helper validates the affine config and safetensors headers.
 It rejects a checkpoint that contains a BF16 matrix.
 The helper stops the server after each explicit case.
+Its process guard matches Qwen and Decode release-worker paths, the runtime service, and Cargo run/bench commands.
+The guard does not match the perf helper filename in a `caffeinate` launcher command.
 It applies the configured cooldown between runnable cases. The default cooldown is 8 seconds.
 Each Spec summary label includes its actual proposal count, including checkpoint defaults.
 Examples are `27b_mtp4`, `27b_dspark_k7`, and `27b_dflash2_k8`.

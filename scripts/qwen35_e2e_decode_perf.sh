@@ -1217,9 +1217,10 @@ if [[ "$BUILD" -eq 1 ]]; then
     cargo build --release --bin qwen3_5_dense --bin qwen3_5_sparse --bin decode
 fi
 
-if pgrep -fl "qwen3_5|decode|inference-runtime-service|cargo bench|cargo run" >/dev/null 2>&1; then
+CONFLICT_PATTERN='target/release/qwen3|target/release/decode|inference-runtime-service|cargo bench|cargo run'
+if pgrep -fl "$CONFLICT_PATTERN" >/dev/null 2>&1; then
     echo "refusing to run while another qwen/decode/cargo perf process is active:" >&2
-    pgrep -fl "qwen3_5|decode|inference-runtime-service|cargo bench|cargo run" >&2 || true
+    pgrep -fl "$CONFLICT_PATTERN" >&2 || true
     exit 1
 fi
 
