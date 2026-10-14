@@ -478,24 +478,39 @@ impl GatherGateUpSwiGLUKernel {
 struct ExpertMajorKernels {
     qmv: CompiledKernel,
     qmv_all: CompiledKernel,
-    qmm: CompiledKernel,
+    qmm: [CompiledKernel; EXPERT_QMM_KINDS.len()],
 }
 
 impl ExpertMajorKernels {
-    fn new(device: &Device, config: Config, entry: &str) -> Self {
+    fn new(device: &Device, config: ExpertConfig, entry: &str) -> Self {
         let args = [
-            metal_type_string(config.input_dtype).to_string(),
-            config.group_size.to_string(),
-            config.bits.to_string(),
+            metal_type_string(config.matmul.input_dtype).to_string(),
+            config.matmul.group_size.to_string(),
+            config.matmul.bits.to_string(),
             EXPERT_QMM_MIN_ROWS.to_string(),
         ];
-        let qmm_name = format!("{entry}_qmm");
-        let template = template_definition(&qmm_name, &qmm_name, &args);
-        let source = affine_quantized_source(&format!(
-            "{MIXED_AFFINE_SOURCE}\n{STEEL_SOURCE}\n{EXPERT_MAJOR_STEEL_SOURCE}\n{template}"
-        ));
-        let qmm = CompiledKernel::new(device, &source, &qmm_name);
-        validate_qmm_pipeline(device, Dtype::Float32, KernelKind::QmmBm8Bn32, QMM_BK, 2, &qmm);
+        let qmm_function = format!("{entry}_qmm");
+        let qmm = EXPERT_QMM_KINDS.map(|kind| {
+            let bm = kind.qmm_shape().unwrap().0;
+            let qmm_name = format!("{qmm_function}_bm{bm}");
+            let mut qmm_args = args.to_vec();
+            qmm_args.push(config.num_experts.to_string());
+            qmm_args.push(bm.to_string());
+            let template = template_definition(&qmm_name, &qmm_function, &qmm_args);
+            let source = affine_quantized_source(&format!(
+                "{MIXED_AFFINE_SOURCE}\n{STEEL_SOURCE}\n{EXPERT_MAJOR_STEEL_SOURCE}\n{template}"
+            ));
+            let qmm = CompiledKernel::new(device, &source, &qmm_name);
+            validate_qmm_pipeline(
+                device,
+                config.matmul.input_dtype,
+                kind,
+                QMM_BK,
+                expert_qmm_num_simdgroups(bm),
+                &qmm,
+            );
+            qmm
+        });
         let qmv_name = format!("{entry}_qmv");
         let template = template_definition(&qmv_name, &qmv_name, &args);
         let source = affine_quantized_source(&format!(
@@ -514,15 +529,15 @@ impl ExpertMajorKernels {
     fn record(
         &self,
         recorder: &CommandRecorder<'_>,
-        config: Config,
+        config: ExpertConfig,
         activity: RouteActivity,
         num_total_routes: i32,
         output: &Buffer,
         bind: impl Fn(),
     ) {
         // Small batches use direct QMV to avoid the complementary dispatch overhead.
-        // Larger batches select QMM by actual per-expert reuse.
-        let num_kernels = if activity.num_total_tokens < adaptive_qmv_batch_limit(config) as u32 {
+        // Larger batches dispatch both families. Actual expert lengths assign their outputs.
+        let num_kernels = if activity.num_total_tokens < adaptive_qmv_batch_limit(config.matmul) as u32 {
             1
         } else {
             2
@@ -531,17 +546,42 @@ impl ExpertMajorKernels {
         let qmv_row_tasks = if num_kernels == 1 {
             num_total_routes
         } else {
-            num_total_routes.min(ceil_div_i32(EXPERT_QMV_THREADBLOCKS, ceil_div_i32(config.n, 8)))
+            num_total_routes.min(ceil_div_i32(EXPERT_QMV_THREADBLOCKS, ceil_div_i32(config.matmul.n, 8)))
         };
-        let kernels = [(qmv, 8, qmv_row_tasks), (&self.qmm, 32, num_total_routes)];
+        let nominal_rows = num_total_routes / config.num_experts;
+        let large_bm = EXPERT_QMM_KINDS[2].qmm_shape().unwrap().0;
+        let qmm_index = if nominal_rows < EXPERT_QMM_MIN_ROWS {
+            0
+        } else if config.matmul.input_dtype == Dtype::Bfloat16
+            && config.matmul.bits == 4
+            && nominal_rows >= 2 * large_bm
+        {
+            2
+        } else {
+            1
+        };
+        let (bm, bn) = EXPERT_QMM_KINDS[qmm_index].qmm_shape().unwrap();
+        // Sum of per-expert ceil(rows / BM) is bounded by ceil(routes / BM) + experts - 1.
+        let num_total_row_tiles = (num_total_routes as u32)
+            .min((num_total_routes as u32).div_ceil(bm as u32) + config.num_experts as u32 - 1)
+            as i32;
+        let kernels = [
+            (qmv, 8, qmv_row_tasks, 2),
+            (
+                &self.qmm[qmm_index],
+                bn,
+                num_total_row_tiles,
+                expert_qmm_num_simdgroups(bm),
+            ),
+        ];
         // Both families select disjoint expert segments from the same offsets.
         recorder.record_disjoint_buffers(&[output], || {
-            for &(kernel, bn, num_row_tasks) in &kernels[..num_kernels] {
+            for &(kernel, bn, num_row_tasks, num_simdgroups) in &kernels[..num_kernels] {
                 recorder.set_kernel(kernel);
                 bind();
                 recorder.dispatch_threadblocks(
-                    (num_row_tasks as usize, ceil_div_i32(config.n, bn) as usize, 1),
-                    (32, 2, 1),
+                    (num_row_tasks as usize, ceil_div_i32(config.matmul.n, bn) as usize, 1),
+                    (32, num_simdgroups, 1),
                 );
             }
         });
@@ -553,7 +593,7 @@ impl RaggedExpertMajorGateUpSwiGLUKernel {
         config.validate();
         Self {
             config,
-            kernels: ExpertMajorKernels::new(device, config.matmul, "expert_major_gate_up_swiglu"),
+            kernels: ExpertMajorKernels::new(device, config, "expert_major_gate_up_swiglu"),
         }
     }
 
@@ -604,7 +644,7 @@ impl RaggedExpertMajorMatmulKernel {
         config.validate();
         Self {
             config,
-            kernels: ExpertMajorKernels::new(device, config.matmul, "expert_major_down"),
+            kernels: ExpertMajorKernels::new(device, config, "expert_major_down"),
         }
     }
 
@@ -721,7 +761,7 @@ impl Operator for RaggedExpertMajorMatmulInvocation<'_> {
 
         self.kernel.kernels.record(
             recorder,
-            matmul,
+            config,
             self.route_activity,
             shape.num_routes,
             self.output,
@@ -763,7 +803,7 @@ impl Operator for RaggedExpertMajorGateUpSwiGLUInvocation<'_> {
 
         self.kernel.kernels.record(
             recorder,
-            matmul,
+            config,
             self.route_activity,
             shape.num_routes,
             self.output,
@@ -2098,6 +2138,13 @@ fn adaptive_qmv_batch_limit(config: Config) -> i32 {
 
 const EXPERT_QMV_THREADBLOCKS: i32 = 1024;
 const EXPERT_QMM_MIN_ROWS: i32 = 4;
+const EXPERT_QMM_KINDS: [KernelKind; 3] = [KernelKind::QmmBm8Bn32, KernelKind::QmmBm16Bn32, KernelKind::QmmBm32Bn32];
+
+fn expert_qmm_num_simdgroups(bm: i32) -> usize {
+    // The shared expert tile uses WM2 for BM32 and WM1 for smaller rows, with WN2.
+    if bm >= 32 { 4 } else { 2 }
+}
+
 const QMM_BM8_MAX_ROWS: i32 = 8;
 const QMM_BM16_MAX_ROWS: i32 = 16;
 const QMM_MIN_THREADBLOCKS: i32 = 256;

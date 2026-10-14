@@ -102,7 +102,12 @@ Extend the [existing component matrix](executor_benchmarks.md#component-latency-
   Withhold context lengths when fitting both geometry and partition criteria.
   Record grid size, GPU cores, occupancy, and reduction traffic.
 - Verify recorded capacities `64,128,256,384` and shared scratch through production service execution.
-  CPU policy/capacity coverage reaches 256K; GPU measurements above 32K remain deferred until the user resumes them.
+  CPU policy/capacity coverage reaches 256K. Selection calibration and numerical acceptance above 32K remain outstanding.
+  The native-cache component latency matrix also covers uniform 64K ctx. This measurement is not policy or numerical acceptance.
+- Tighten the initialized partial-state envelope from compatible query geometry and Map bounds.
+  Do not multiply independent worst-case capacities. Preserve the shader u32 element-index check.
+  The 27B GQA fixture with a 131072-token capacity currently reserves 6442450944 partial-output elements and fails this check before GPU work.
+  A shared maximum capacity can also reject smaller benchmark shapes. Initialize each full-Prefill shape at its own capacity.
 - Compare a complete base-2 softmax family across SlicedKv, SlicedQ, bidirectional SDPA, and reducers.
   Preserve one compatible partial-state ABI and require parity plus a measured gain.
 - Evaluate pipelined K/V loads after checking an unpadded layout.
@@ -133,8 +138,10 @@ Extend the [existing component matrix](executor_benchmarks.md#component-latency-
 - Evaluate cross-threadgroup split-K for small-M, long-K projections with insufficient output parallelism.
   Compare BM16/BN32 and wider row tiles, including partial storage, reduction cost, scratch ownership, and projection rounding.
 - Measure two-row weight reuse independently. Check packed-dot group accumulation and input magnitudes against the scalar affine reference.
-- Compare sparse batches below/above the expert QMM crossover and uniform/skewed expert occupancy.
-  Measure inactive-candidate overhead without changing compact routing or replay submission.
+- Extend sparse expert calibration across devices, dimensions, and natural routing distributions.
+  Preserve the [current per-expert QMV/QMM strategy](executor_moe.md) until a measured alternative improves mixed segments.
+- Reduce empty complementary dispatch and padded-candidate cost without a CPU routing readback.
+  Whole-batch selection regressed on the measured mixed segments. Preserve compact routing, fused gate/up/SiLU, and replay dependencies.
 
 ### Whole-model measurement
 

@@ -446,25 +446,159 @@ Original route order inside each expert is not a forward contract.
 Expert-major sparse compute uses ragged rows with shape `{ num_experts, num_routes }`.
 For each `expert_route` in `0..num_routes`, `experts_by_route[expert_route]` selects the expert.
 It does not allocate `num_experts * routes_per_expert` rows.
-Each active QMM thread block covers up to eight rows of one expert and 32 output columns.
-The recorded grid contains one candidate per route and output-column tile. `expert_offsets` identifies the starts
-of eight-row tiles within each expert. Other candidates return before loading operands or reaching a barrier.
+Each active QMM thread block covers up to eight, 16, or 32 rows of one expert and 32 output columns.
+The recorded route capacity divided by the expert count selects the row tile.
+This nominal count includes empty experts. It is not the active expert distribution.
+
+| Recorded routes per expert | Operand domain | BM | SIMDgroups |
+| --- | --- | ---: | ---: |
+| `<4` | All supported domains | 8 | 2 |
+| `>=64` | BF16 Q4 | 32 | 4 |
+| Other capacities | All supported domains | 16 | 2 |
+BM8/BM16 use two SIMDgroups. BM32 uses four. All variants use BN32/BK32.
+Active expert segments still use their actual row count to select QMV or QMM.
+The recorded row grid is bounded by `min(num_total_routes, ceil(num_total_routes / BM) + num_experts - 1)`.
+Each SIMDgroup scans expert offsets in batches of 32 experts. A prefix sum maps a row-tile index to one expert segment.
+Segments below the QMM crossover contribute no row tiles. The complementary QMV command computes those segments.
+QMV skips each complete QMM segment through the existing expert offsets. It preserves the block's strided route assignment.
+Padded tile candidates return before loading matrix operands or reaching a barrier.
+The shader also bounds candidates by the submission-time active route count. It retains the recorded grid capacity.
+The existing expert offsets are sufficient. The scheduler does not allocate a tile map or a tile-offset buffer.
 Different expert tiles can execute independently.
 The gate/up and down stages reuse `affine_qmm_tile` from `operators/metal/affine_quantized_steel.metal`.
 The helper uses Steel `BlockMMA` with native 8x8 SIMDgroup matrix operations.
-F32 operands use a 32-element K tile. For group size 64, each thread block uses 5760 bytes: an `8 × 36` input tile
-and a `32 × 36` weight tile. Gate/up reuses this scratch across its two projections and keeps both F32 REGISTER
-accumulators for the fused activation. Short-segment QMV retains its paired gate/up dot products within each SIMDgroup.
+Shared operands use the configured input dtype. The K tile contains 32 elements.
+For BF16 input, BM8/BM16/BM32 use 3200/3840/5120 bytes. The weight tile is `32 × 40`.
+The stride includes 16 bytes of padding per row. Dequantization rounds each weight to the operand dtype.
+Steel accumulates products in F32. Gate/up reuses the shared scratch across both projections.
+It retains both F32 accumulators for the fused activation.
+Short-segment QMV retains its paired gate/up dot products within each SIMDgroup.
 The private `ExpertMajorKernels` owner compiles and selects both families for gate/up and down. Each stage retains
 its own buffer bindings.
 One weight tile is dequantized once for all rows in that tile.
 The affine batch crossover keeps small recorded batches on direct QMV. This avoids complementary dispatch overhead.
 At larger capacities, expert segments with at least four rows use QMM. Shorter segments use QMV.
-This per-expert crossover controls weight reuse inside the ragged eight-row tile.
+This per-expert crossover controls weight reuse inside the selected row tile.
 QMV and QMM commands declare disjoint output segments and share one parent replay submission.
+No barrier separates these commands within one projection. Hardware may overlap their execution.
+The down projection waits for both gate/up commands to finish.
 The complementary QMV command derives its row-task count from a 1024-threadblock target and the column-tile count.
 Each task walks multiple routes and skips QMM segments. Both families apply SwiGLU before storing the gate/up result.
 The existing compact route maps and pack/scatter stages do not change.
+
+```text
+Example: 20 routes, three experts, BM=4 for illustration
+
+expert 0: [0, 9)    -> tiles [0,4) [4,8) [8,9)
+expert 1: [9, 14)   -> tiles [9,13) [13,14)
+expert 2: [14, 20)  -> tiles [14,18) [18,20)
+
+row-tile grid = min(20, ceil(20 / 4) + 3 - 1) = 7
+
+TG row 0 -> expert 0, routes [ 0,  4)
+TG row 1 -> expert 0, routes [ 4,  8)
+TG row 2 -> expert 0, routes [ 8,  9)
+TG row 3 -> expert 1, routes [ 9, 13)
+TG row 4 -> expert 1, routes [13, 14)
+TG row 5 -> expert 2, routes [14, 18)
+TG row 6 -> expert 2, routes [18, 20)
+
+One production TG:
+  input rows          <= BM, from one expert segment
+  output columns      <= 32
+  K step              = 32
+  threads             = 64 for BM8/BM16; 128 for BM32
+  shared operands     = configured input dtype (BF16 for BF16 input)
+  MMA accumulation    = F32
+  gate/up activation  = fused SwiGLU with BF16 storage rounding
+```
+
+The fused gate/up stage keeps both accumulators in each thread block.
+It reads the input again during the up projection. It reuses shared scratch, not a full-K input copy.
+It writes only the activation. The down stage reads that activation.
+
+```text
+Same input: expert e, packed routes [112,128), output features [64,96)
+            X [16,2048], gate/up Q4 W [32,2048]
+            threadgroup = 64 threads; SG0/SG1 each own 16 output columns
+
+for K_tile in [0,32), [32,64), ... [2016,2048):
+  GMEM X[16,32] ---------> SMEM Xs[16,40] BF16 --+
+  GMEM gate W[32,32] ---> SMEM Ws[32,40] BF16 --+--> MMA --> gate registers
+  barrier before scratch overwrite
+                                                     |
+                                     retain gate registers across the up loop
+                                                     |
+for K_tile in [0,32), [32,64), ... [2016,2048):
+  GMEM X[16,32] ---------> SMEM Xs[16,40] BF16 --+
+  GMEM up W[32,32] -----> SMEM Ws[32,40] BF16 --+--> MMA --> up registers
+  barrier before scratch overwrite
+
+  gate/up storage rounding --> SiLU(gate) * up --> S[112:128,64:96]
+
+QMV(short experts) -- writes S[short rows] --+
+QMM(long experts) -- writes S[long rows] ---+--> barrier --> down projection
+```
+
+```text
+Example: expert e owns packed routes [96,144), hidden K=2048, intermediate F=512
+         BM16 / BN32 / BK32; one gate/up TG owns routes [112,128), F [64,96)
+
+packed_input [R,2048]        gate/up Q4 weights [E,512,2048]
++------------------+        +-----------------------------+
+| routes [112,128) | ------>| expert e, F [64,96)           |
+| K [0,2048)       |        | K [0,2048), scale/bias groups |
++------------------+        +-----------------------------+
+          \                            /
+           \  each K step reads 32     /
+            v                        v
+       Xs [16,40] BF16         Ws [32,40] BF16
+                    \         /
+                     v       v
+                8x8 MMA, F32 accumulators
+
+  SG0 owns output columns [64,80), all 16 rows, full K
+  SG1 owns output columns [80,96), all 16 rows, full K
+
+  gate accumulators -- retained --+
+                                 +--> storage rounding --> SiLU(gate)*up
+  up accumulators ----------------+                         |
+                                                            v
+                                      swiglu [R,512], rows [112,128), F [64,96)
+                                                            |
+                                                            v
+  down TG reads swiglu rows [112,128), full F [0,512)
+          reads down Q4 weights [e, output columns, 0:512]
+          writes packed_output [112:128, output columns]
+
+  scatter reads packed_output through routes_by_token
+          multiplies expert_probs and sums top-k routes
+          writes next_hidden_state [token, hidden]
+```
+
+The complementary QMV command preserves its strided assignment when it skips a QMM segment.
+The following example uses the same route sequence in both paths.
+
+```text
+QMM expert segment: [10,30)       QMV row-grid stride: 8
+One QMV block starts at route 2:  2,10,18,26,34,...
+
+before: read metadata at 2 -> 10 -> 18 -> 26 -> 34
+                              skip  skip  skip
+after:  read metadata at 2 -> 10 -------------> 34
+                              |
+                              + route += floor((30-10-1)/8)*8 = 16
+                                for-loop then adds 8
+
+The next route is 34 in both paths. QMV owns the same short-expert outputs.
+```
+
+The default retains per-expert QMV/QMM selection.
+A whole-batch alternative selects QMM when recorded routes reach 16 and recorded routes per expert reach four.
+It selects QMV otherwise.
+Controlled mixed one-, two-, and three-row segments regressed under this alternative on M3 Max.
+Pure short or long segments improved. Average occupancy alone does not describe the expert distribution.
+Empty complementary commands remain a [performance follow-up](future_work.md#affine-matmul-and-moe).
 
 Token-major and expert-major replay paths remain explicit benchmark probes.
 The production Metal backend uses token-major for `num_tokens <= 4`.
@@ -761,8 +895,9 @@ Route probability semantics must identify logits or already-softmaxed probabilit
 They must also identify whether routing renormalizes selected top-k probabilities.
 
 Token-major QMV and expert-major Steel QMM must match the sparse CPU reference within its numerical tolerance.
-Expert QMM uses F32 dequantized operands and accumulators. QMV applies scale and bias to packed-weight dot products.
-The different F32 reduction orders can change output bits.
+Expert QMM rounds dequantized weights to the configured input dtype. It accumulates products in F32.
+QMV applies scale and bias to packed-weight dot products.
+Operand rounding and different F32 reduction orders can change output bits.
 The sparse activation retains its existing storage-dtype rounding stages.
 The current production backend uses token-major for `num_tokens <= 4`.
 It uses expert-major for larger microbatches.
@@ -771,4 +906,6 @@ It uses expert-major for larger microbatches.
 performance-evidence rules.
 
 The [component latency matrix](executor_benchmarks.md#component-latency-matrix) measures both complete real-weight replay layouts and supports resume.
+Its `sparse-mlp` component excludes routing, packing, shared experts, and combine.
+The real-weight MoE worker can export route IDs and packed order for matched-route peer measurements.
 The report reuses equivalent total-row shapes. It does not label full MoE latency as sparse-expert-only latency.

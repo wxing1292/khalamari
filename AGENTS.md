@@ -65,6 +65,22 @@ Do not use parallel workspace tests as a GPU gate.
 Before a performance claim, record commit, dirty state, model, command, environment, metric, baseline, current result, and verdict.
 Keep force-sync/profile-summary results separate from normal wall-clock throughput.
 
+## Explain with data-flow diagrams
+
+- Technical explanations in chat and documentation must use ASCII diagrams. Code snippets can supplement the diagrams.
+  Use the [Steel output tiles](docs/executor_dense_mlp.md#steel-output-tiles) and
+  [sliced-K tiles](docs/executor_dense_mlp.md#sliced-k-tiles) as reference examples.
+- Start with one concrete input. Label tensor axes, shapes, and layouts. Show which input slices each worker reads,
+  how it computes intermediate results, and where it writes the output. Show data reuse and reductions when they apply.
+- For a change, use the same input in the before and after diagrams. Mark the changed data movement, computation,
+  or ownership at the relevant stage. Keep unchanged stages visible so the reader can compare the two paths.
+- For a GPU kernel, show the tensor partition, dispatch grid, threadgroup size, and SIMDgroup ownership.
+  Map concrete grid coordinates to row, column, K, or expert ranges. Show how partial results form the final output.
+- For routing or packing, show concrete rows before and after the mapping. Connect each packed row to its source
+  token and destination output. Show partial tiles and inactive work when they affect the design.
+- Explain counts and latency after the reader can follow the data. A list of numbers or arrows between operation
+  names does not explain a design or its differences.
+
 ## Document and deliver
 
 Use ASD-STE100-informed prose. Preserve technical meaning, requirement strength, and exact technical text.

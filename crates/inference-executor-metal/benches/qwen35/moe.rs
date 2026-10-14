@@ -64,8 +64,16 @@ fn main() {
 
         for implementation in &args.implementations {
             let fixture = RealMoEFixture::new(&device, num_tokens, &weights, *implementation);
-            let samples = fixture.measure(*implementation, args.warmup_iters, args.iters, args.runs);
+            let samples = fixture.measure(args.sparse_only, args.warmup_iters, args.iters, args.runs);
+            if let Some(prefix) = &args.routing_output {
+                fixture.write_routing(prefix);
+            }
             print_perf(
+                if args.sparse_only {
+                    "sparse-mlp-real"
+                } else {
+                    "moe-real"
+                },
                 args.model_layer_index,
                 implementation.key(),
                 num_tokens,
@@ -85,6 +93,8 @@ struct Args {
     runs: usize,
     implementations: Vec<MoERealImpl>,
     check_parity: bool,
+    sparse_only: bool,
+    routing_output: Option<PathBuf>,
 }
 
 impl Args {
@@ -98,6 +108,8 @@ impl Args {
             runs: 1,
             implementations: vec![MoERealImpl::TokenMajor, MoERealImpl::ExpertMajor],
             check_parity: false,
+            sparse_only: false,
+            routing_output: None,
         };
         let mut iter = std::env::args().skip(1);
         while let Some(arg) = iter.next() {
@@ -110,6 +122,8 @@ impl Args {
                 "--runs" => args.runs = parse_usize(&next_arg(&mut iter, &arg), &arg),
                 "--impls" => args.implementations = parse_implementations(&next_arg(&mut iter, &arg)),
                 "--check-parity" => args.check_parity = true,
+                "--sparse-only" => args.sparse_only = true,
+                "--routing-output" => args.routing_output = Some(PathBuf::from(next_arg(&mut iter, &arg))),
                 "--bench" => {},
                 "--help" | "-h" => {
                     print_help();
@@ -126,6 +140,11 @@ impl Args {
         assert!(!args.model_dir.as_os_str().is_empty(), "--model-dir is required");
         assert!(args.iters > 0, "--iters must be positive");
         assert!(args.runs > 0, "--runs must be positive");
+        assert!(
+            args.routing_output.is_none()
+                || (args.implementations == [MoERealImpl::ExpertMajor] && args.num_tokens.len() == 1),
+            "--routing-output requires --impls expert_major and one --tokens value"
+        );
         args
     }
 }
@@ -383,6 +402,7 @@ struct RealMoEFixture<'a> {
     stream: Stream,
     output: Buffer,
     replay: ReplayProgram,
+    sparse_replay: ReplayProgram,
     _input: Buffer,
     _router_logits: Buffer,
     _router_probs: Buffer,
@@ -505,10 +525,51 @@ impl<'a> RealMoEFixture<'a> {
             },
         );
         let replay = recorder.build();
+        let mut recorder = MetalReplayRuntime::new(&stream).create_recorder();
+        let scratch = sparse_mlp::Scratch { swiglu: &sparse_swiglu };
+        let num_active_tokens = ReplayU32::Fixed(num_tokens);
+        match implementation {
+            MoERealImpl::TokenMajor => {
+                recorder.record(ReplayOp::opaque(kernels.experts.invoke_token_major(
+                    sparse_shape,
+                    TOPK_EXPERTS,
+                    num_active_tokens,
+                    sparse_mlp::TokenMajorBuffers {
+                        input: &input,
+                        token_indices: &token_indices,
+                        expert_indices: &expert_indices,
+                        route_indices: &route_indices,
+                        routed_hidden: &routed_hidden,
+                    },
+                    scratch,
+                    weights.sparse.as_borrowed(),
+                )))
+            },
+            MoERealImpl::ExpertMajor => {
+                recorder.record(ReplayOp::opaque(kernels.experts.invoke_expert_major(
+                    sparse_mlp::ExpertMajorShape {
+                        num_total_routes: expert_major_config.num_routes(expert_major_shape),
+                        num_total_tokens: num_tokens,
+                        num_experts_per_token: TOPK_EXPERTS,
+                    },
+                    num_active_tokens,
+                    sparse_mlp::ExpertMajorBuffers {
+                        packed_input: &packed_input,
+                        experts_by_route: &experts_by_route,
+                        expert_offsets: &expert_offsets,
+                        packed_output: &routed_hidden,
+                    },
+                    scratch,
+                    weights.sparse.as_borrowed(),
+                )))
+            },
+        }
+        let sparse_replay = recorder.build();
         Self {
             stream,
             output,
             replay,
+            sparse_replay,
             _input: input,
             _router_logits: router_logits,
             _router_probs: router_probs,
@@ -536,13 +597,23 @@ impl<'a> RealMoEFixture<'a> {
         MetalReplayRuntime::new(&self.stream).submit_replay(&self.replay).wait();
     }
 
-    fn measure(&self, implementation: MoERealImpl, warmup_iters: usize, iters: usize, runs: usize) -> Vec<f64> {
-        measure_runs(runs, warmup_iters, iters, || self.run_impl(implementation))
+    fn measure(&self, sparse_only: bool, warmup_iters: usize, iters: usize, runs: usize) -> Vec<f64> {
+        let replay = if sparse_only {
+            self.run_replay(); // Prepare routing and packed input outside sparse-expert timing.
+            &self.sparse_replay
+        } else {
+            &self.replay
+        };
+        measure_runs(runs, warmup_iters, iters, || {
+            MetalReplayRuntime::new(&self.stream).submit_replay(replay).wait();
+        })
     }
 
-    fn run_impl(&self, implementation: MoERealImpl) {
-        match implementation {
-            MoERealImpl::TokenMajor | MoERealImpl::ExpertMajor => self.run_replay(),
+    fn write_routing(&self, prefix: &Path) {
+        for (suffix, buffer) in [("indices", &self._expert_indices), ("routes", &self._routes_by_expert)] {
+            let values = buffer.read_typed::<u32>(0, buffer.len_bytes() / size_of::<u32>());
+            let bytes = values.iter().flat_map(|value| value.to_le_bytes()).collect::<Vec<_>>();
+            std::fs::write(prefix.with_added_extension(suffix), bytes).expect("write benchmark route witness");
         }
     }
 
@@ -1203,6 +1274,8 @@ Options:
   --layer N
   --tokens 1,2,4,8,16,32,64
   --impls token_major,expert_major,both
+  --sparse-only           time only expert compute; prepare routing/layout before measurement
+  --routing-output <path> write route IDs and packed order for cross-engine comparisons
   --check-parity
   --iters N
   --warmup-iters N
@@ -1247,7 +1320,14 @@ fn measure_runs(runs: usize, warmup_iters: usize, iters: usize, mut run: impl Fn
     samples
 }
 
-fn print_perf(model_layer_index: usize, implementation: &str, num_tokens: u32, iters: usize, samples: &[f64]) {
+fn print_perf(
+    component: &str,
+    model_layer_index: usize,
+    implementation: &str,
+    num_tokens: u32,
+    iters: usize,
+    samples: &[f64],
+) {
     let median_us = median(samples);
     let sample_text = samples
         .iter()
@@ -1255,7 +1335,7 @@ fn print_perf(model_layer_index: usize, implementation: &str, num_tokens: u32, i
         .collect::<Vec<_>>()
         .join(",");
     println!(
-        "perf component=moe-real impl={implementation} layer={model_layer_index} num_tokens={num_tokens} \
+        "perf component={component} impl={implementation} layer={model_layer_index} num_tokens={num_tokens} \
          iters={iters} runs={} median_us={median_us:.3} samples_us=[{sample_text}]",
         samples.len()
     );

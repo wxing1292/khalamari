@@ -46,6 +46,10 @@ fn test_matrix_semantics_and_equivalent_work() {
         first.measurement(Component::Moe, false),
         second.measurement(Component::Moe, false)
     );
+    assert_eq!(
+        first.measurement(Component::SparseMlp, false),
+        second.measurement(Component::SparseMlp, false)
+    );
     assert_ne!(
         first.measurement(Component::Gqa, false),
         second.measurement(Component::Gqa, false)
@@ -90,6 +94,10 @@ fn test_worker_segments_and_total_rows() {
     let dense = args("dense-mlp").command(case.measurement(Component::DenseMlp, false), model, "27b");
     assert!(dense.windows(2).any(|a| a == ["--tokens", "512"]));
     assert!(!dense.contains(&"--contexts".to_owned()));
+    let sparse = args("sparse-mlp").command(case.measurement(Component::SparseMlp, false), model, "35b");
+    assert!(sparse.windows(2).any(|a| a == ["--tokens", "512"]));
+    assert!(sparse.windows(2).any(|a| a == ["--impls", "expert_major"]));
+    assert!(sparse.contains(&"--sparse-only".to_owned()));
 }
 
 #[test]
@@ -132,6 +140,14 @@ fn test_worker_samples_and_units() {
     let moe = text
         .replace("component=dense-mlp-real", "component=moe-real")
         .replace("tokens=8", "num_tokens=8");
+    let sparse = moe
+        .replace("component=moe-real", "component=sparse-mlp-real")
+        .replace("full_auto", "expert_major");
+    assert_eq!(
+        parse_latencies(&sparse, Component::SparseMlp, case, 3).unwrap()[0].path,
+        "expert_major"
+    );
+    assert!(parse_latencies(&moe, Component::SparseMlp, case, 3).is_err());
     let both = format!(
         "{}{}",
         moe.replace("full_auto", "token_major"),

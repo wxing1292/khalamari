@@ -24,15 +24,21 @@ enum Layout {
 
 #[test]
 fn test_replay_bucketing() {
-    for (num_total_tokens, intermediate_dim, group_size, active_sequence) in [
-        (4, 64, 32, [1, 4, 3, 2]),
-        (17, 512, 32, [1, 17, 16, 3]),
+    for (num_total_tokens, intermediate_dim, group_size, num_experts, active_sequence) in [
+        (4, 64, 32, 5, [1, 4, 3, 2]),
+        (17, 512, 32, 5, [1, 17, 16, 3]),
         // Nine tokens put three-row QMV and four-row QMM segments in one replay.
-        (49, 64, 32, [1, 49, 9, 10]),
-        // Two F32 K tiles share each quantization group, including mixed QMV/QMM segments.
-        (49, 64, 64, [1, 49, 9, 10]),
+        (49, 64, 32, 5, [1, 49, 9, 10]),
+        // Two K tiles share each quantization group, including mixed QMV/QMM segments.
+        (49, 64, 64, 5, [1, 49, 9, 10]),
+        // Sparse occupancy crosses the 32-expert SIMD batch while active replay counts change.
+        (64, 64, 64, 33, [1, 64, 16, 17]),
+        // Cross the 32-expert SIMD batch with empty experts and mixed QMV/QMM segments.
+        (97, 64, 64, 33, [1, 97, 16, 17]),
+        // Dense occupancy records the wider expert tile and replays partial active batches.
+        (161, 64, 64, 5, [1, 161, 16, 17]),
     ] {
-        let fixture = SparseMLPFixture::new(num_total_tokens, 2, intermediate_dim, group_size);
+        let fixture = SparseMLPFixture::new(num_total_tokens, 2, intermediate_dim, group_size, num_experts);
         let mut cache = ReplayTestCache::new();
         for layout in [Layout::TokenMajor, Layout::ExpertMajor] {
             let key = (fixture.num_total_tokens, intermediate_dim, layout);
@@ -75,11 +81,17 @@ struct SparseMLPFixture {
 }
 
 impl SparseMLPFixture {
-    fn new(num_total_tokens: u32, num_experts_per_token: u32, intermediate_dim: u32, group_size: u32) -> Self {
+    fn new(
+        num_total_tokens: u32,
+        num_experts_per_token: u32,
+        intermediate_dim: u32,
+        group_size: u32,
+        num_experts: u32,
+    ) -> Self {
         let device = Device::system_default();
         let stream = Stream::new(&device);
         let config = Config {
-            num_experts: 5,
+            num_experts,
             hidden_dim: 64,
             intermediate_dim,
             group_size,

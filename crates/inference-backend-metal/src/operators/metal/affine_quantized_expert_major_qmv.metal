@@ -16,8 +16,10 @@ template <typename T, int group_size, int bits, int qmm_min_rows>
   for (uint route = tid.x; route < num_active_tokens * num_experts_per_token;
        route += grid.x) {
     const uint expert = experts_by_route[route];
-    if (expert_offsets[expert + 1] - expert_offsets[expert] >=
-        uint(qmm_min_rows)) {
+    const uint end = expert_offsets[expert + 1];
+    if (end - expert_offsets[expert] >= uint(qmm_min_rows)) {
+      // Skip this QMM segment without changing the block's route stride.
+      route += ((end - route - 1) / grid.x) * grid.x;
       continue;
     }
     const long weight_bytes =
@@ -54,8 +56,10 @@ template <typename T, int group_size, int bits, int qmm_min_rows>
   for (uint route = tid.x; route < num_active_tokens * num_experts_per_token;
        route += grid.x) {
     const uint expert = experts_by_route[route];
-    if (expert_offsets[expert + 1] - expert_offsets[expert] >=
-        uint(qmm_min_rows)) {
+    const uint end = expert_offsets[expert + 1];
+    if (end - expert_offsets[expert] >= uint(qmm_min_rows)) {
+      // Skip this QMM segment without changing the block's route stride.
+      route += ((end - route - 1) / grid.x) * grid.x;
       continue;
     }
     const long weight_bytes =

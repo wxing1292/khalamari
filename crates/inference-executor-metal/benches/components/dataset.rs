@@ -108,7 +108,12 @@ pub fn check_identity(args: &Args, root: &Path, model: &Path, worker: &Path) -> 
         let path = entry.map_err(unavailable)?.path();
         if path.extension().is_some_and(|s| s == "safetensors") {
             let m = fs::metadata(&path).map_err(unavailable)?;
-            shards.push(json!({"name":path.file_name().unwrap(),"bytes":m.len(),"modified":m.modified().map_err(unavailable)?.duration_since(std::time::UNIX_EPOCH).map_err(unavailable)?.as_nanos().to_string()}));
+            let name = path
+                .file_name()
+                .unwrap()
+                .to_str()
+                .ok_or_else(|| Error::invalid_argument("model shard filenames must be UTF-8"))?;
+            shards.push(json!({"name":name,"bytes":m.len(),"modified":m.modified().map_err(unavailable)?.duration_since(std::time::UNIX_EPOCH).map_err(unavailable)?.as_nanos().to_string()}));
         }
     }
     shards.sort_by_key(|v| v["name"].as_str().unwrap().to_owned());

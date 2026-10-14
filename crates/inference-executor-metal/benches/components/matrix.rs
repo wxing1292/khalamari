@@ -26,6 +26,7 @@ enum Component {
     Gqa,
     Gdn,
     DenseMlp,
+    SparseMlp,
     Moe,
 }
 
@@ -35,7 +36,7 @@ impl Component {
             Self::Gqa => "qwen35_gqa",
             Self::Gdn => "qwen35_gdn",
             Self::DenseMlp => "qwen35_dense_mlp",
-            Self::Moe => "qwen35_moe",
+            Self::SparseMlp | Self::Moe => "qwen35_moe",
         }
     }
 }
@@ -80,7 +81,7 @@ impl Case {
                     case.kind = self.kind;
                 }
             },
-            Component::DenseMlp | Component::Moe => {
+            Component::DenseMlp | Component::SparseMlp | Component::Moe => {
                 case.requests = 1;
                 case.context = 0;
                 case.queries = self.rows();
@@ -244,6 +245,15 @@ impl Args {
                     "full_auto".into(),
                 ])
             },
+            Component::SparseMlp => {
+                command.extend([
+                    "--tokens".into(),
+                    case.rows().to_string(),
+                    "--impls".into(),
+                    "expert_major".into(),
+                    "--sparse-only".into(),
+                ])
+            },
             Component::Moe => {
                 command.extend([
                     "--tokens".into(),
@@ -285,6 +295,7 @@ fn parse_latencies(text: &str, component: Component, case: Case, runs: u32) -> R
         Component::Gqa => "gqa",
         Component::Gdn => "gdn",
         Component::DenseMlp => "dense-mlp-real",
+        Component::SparseMlp => "sparse-mlp-real",
         Component::Moe => "moe-real",
     };
     let mut results = Vec::new();
@@ -302,7 +313,7 @@ fn parse_latencies(text: &str, component: Component, case: Case, runs: u32) -> R
                 .copied()
                 .ok_or_else(|| Error::invalid_argument(format!("worker omitted {name}")))
         };
-        let count = field(if component == Component::Moe {
+        let count = field(if matches!(component, Component::SparseMlp | Component::Moe) {
             "num_tokens"
         } else {
             "tokens"
@@ -341,7 +352,7 @@ fn parse_latencies(text: &str, component: Component, case: Case, runs: u32) -> R
         let path = match component {
             Component::Gqa => field("split_kv_variant")?,
             Component::Gdn => field("path")?,
-            Component::DenseMlp | Component::Moe => field("impl")?,
+            Component::DenseMlp | Component::SparseMlp | Component::Moe => field("impl")?,
         }
         .to_string();
         if results.iter().any(|r: &Latency| r.path == path) {
@@ -358,6 +369,7 @@ fn parse_latencies(text: &str, component: Component, case: Case, runs: u32) -> R
         Component::Gqa => ["auto"].into_iter().collect(),
         Component::Gdn => ["mixed_replay"].into_iter().collect(),
         Component::DenseMlp => ["full_auto"].into_iter().collect(),
+        Component::SparseMlp => ["expert_major"].into_iter().collect(),
         Component::Moe => ["token_major", "expert_major"].into_iter().collect(),
     };
     if paths != expected_paths {
@@ -378,7 +390,9 @@ fn model_profile(model: &Path, component: Component) -> Result<&'static str> {
             ));
         },
     };
-    if (component == Component::DenseMlp && profile != "27b") || (component == Component::Moe && profile != "35b") {
+    if (component == Component::DenseMlp && profile != "27b")
+        || (matches!(component, Component::SparseMlp | Component::Moe) && profile != "35b")
+    {
         return Err(Error::invalid_argument(
             "the checkpoint does not match the dense MLP or MoE fixture",
         ));

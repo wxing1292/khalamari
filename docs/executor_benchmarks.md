@@ -94,7 +94,7 @@ CLI shape product                         Component measurement key
 requests x contexts x queries  -- GQA --> request segments, ctx, Q, recorded capacity
                                -- GDN --> request segments, zero/nonzero state, write mode
                                -- MLP --> total rows = requests * queries
-                               -- MoE --> total rows = requests * queries
+                               -- sparse MLP / MoE --> total rows = requests * queries
 
 full Prefill: requests x full  ----------> ctx = 0, Q = full input per request
 
@@ -109,11 +109,17 @@ plan -> canonical cases -> worker -> durable JSONL -> grouped Markdown/JSON repo
 | GQA | `qwen35_gqa` | 27B or 35B-A3B | Full production replay with the automatic lookup |
 | GDN | `qwen35_gdn` | 27B or 35B-A3B | Full chunkwise/replay forward |
 | Dense MLP | `qwen35_dense_mlp` | 27B | `full_auto` |
+| Sparse MLP | `qwen35_moe --sparse-only` | 35B-A3B, layer 0 | Expert-major gate/up/SiLU and down projections |
 | MoE | `qwen35_moe` | 35B-A3B, layer 0 | Complete token-major and expert-major graphs |
 
 MoE includes routing, layouts, sparse expert MLPs, shared experts, and combine.
 It is not a sparse-expert-only latency.
-Use the backend `sparse_mlp` target to isolate sparse expert computation and occupancy.
+The sparse MLP worker prepares routing and the packed input before timing.
+It excludes routing, packing, shared experts, and combine.
+Use `--routing-output <prefix>` with one `--tokens` value and `--impls expert_major` to export route IDs and packed order.
+The worker writes `<prefix>.indices` and `<prefix>.routes` as little-endian `u32` arrays.
+These files let a peer benchmark use the same expert assignments and input order.
+The backend `sparse_mlp` target also isolates sparse expert computation with generated weights.
 
 | Axis | Default values |
 | --- | --- |
@@ -136,7 +142,7 @@ The default path writes final Prefill snapshots.
 `--gdn-replay` makes append cases write per-token replay logs. Full Prefill cases still write final snapshots.
 The measurement excludes accepted-state reconstruction and cache publication.
 
-Dense MLP and MoE receive flat input rows. They have no request segmentation or ctx input.
+Dense MLP, sparse MLP, and MoE receive flat input rows. They have no request segmentation or ctx input.
 Cases with the same total row count reuse one measurement, including equivalent full-Prefill rows.
 
 Latency is the median replay submission-and-wait wall time in milliseconds.
@@ -150,10 +156,10 @@ Build the controller without a GPU run:
 cargo build --release -p inference-executor-metal --example component-latency-bench
 ```
 
-Generate all four plans without loading a model or initializing Metal:
+Generate all five plans without loading a model or initializing Metal:
 
 ```sh
-for component in gqa gdn dense-mlp moe; do
+for component in gqa gdn dense-mlp sparse-mlp moe; do
   target/release/examples/component-latency-bench \
     --component "$component" --mode plan --out "target/perf/components/$component"
 done
@@ -171,7 +177,7 @@ caffeinate -i target/release/examples/component-latency-bench \
 
 `run` builds only the selected optimized worker with `cargo bench --no-run`.
 The controller reads checkpoint metadata to select the 27B or 35B-A3B fixture.
-The worker validates the actual tensors. Dense MLP requires 27B. MoE requires 35B-A3B.
+The worker validates the actual tensors. Dense MLP requires 27B. Sparse MLP and MoE require 35B-A3B.
 
 Repeat the same command to resume. `--hours 0` removes the deadline.
 A positive deadline starts after worker build and identity checks. The current case completes before the controller stops.
