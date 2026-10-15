@@ -190,6 +190,53 @@ fn test_replay_bucketing() {
     );
 }
 
+#[test]
+fn test_sparse_replay_success() {
+    let device = Device::system_default();
+    let stream = Stream::new(&device);
+    let runtime = MetalReplayRuntime::new(&stream);
+    let mut config = fixture_config();
+    // Groups near the causal tail cross a logical page-table block.
+    config.page_table_layout.num_blocks = 2;
+    config.page_table_layout.num_page_ids_per_block = 33;
+    let cache = KVCacheFixture::new(&device, config.page_table_layout);
+    let sdpa = QSASDPA::new(&device, config);
+    let mut replay = Replay::new("test QSA SIMD/MMA", TestQSASDPA(sdpa));
+    let mut recorded_keys = HashSet::new();
+    for (capacity, num_active) in [(1, 1), (2, 2), (4, 3), (8, 5), (128, 8), (513, 4)] {
+        let shape = QSASDPAShape {
+            num_total_tokens: capacity + 2,
+            num_total_sparse_queries: capacity,
+        };
+        let scratch = replay.component().0.new_scratch(shape);
+        let metadata = QSASDPAMetadataBuffers::new(&device, config, shape);
+        let q_values = fixture_q((capacity + 2) as usize, 0xED91_14AF ^ capacity);
+        let q = Buffer::from_slice(&device, &q_values);
+        let groups = fixture_selected_groups((capacity + 2) as usize, GROUP_START);
+        let selected_group_ids = Buffer::from_slice(&device, &groups);
+        let output = Buffer::new_zeroed_elements(&device, (capacity + 2) as usize * ROW_WIDTH, Dtype::Bfloat16);
+        let mut requests = vec![request(1, 100, 2), request(2, 2055, 1)];
+        if num_active > 1 {
+            requests.push(request(0, 2056, num_active - 1));
+        }
+        let bindings = TestBindings {
+            config,
+            shape,
+            metadata: &metadata,
+            scratch: &scratch,
+            q: &q,
+            q_values: &q_values,
+            cache: &cache,
+            selected_group_ids: &selected_group_ids,
+            selected_groups: &groups,
+            output: &output,
+        };
+        bindings.run(&runtime, &mut replay, &mut recorded_keys, &requests);
+        // The same replay must ignore inactive work after a smaller submission.
+        bindings.run(&runtime, &mut replay, &mut recorded_keys, &[request(1, 2058, 1)]);
+    }
+}
+
 #[derive(Clone, Copy)]
 struct TestInput<'a> {
     input: QSASDPAInput<'a>,
@@ -236,9 +283,9 @@ impl TestBindings<'_> {
         let active = self.metadata.update(requests);
         active.validate(self.shape);
         let expected = reference_outputs(self.config, self.cache, self.q_values, self.selected_groups, requests);
-        let sentinel = f32_to_bf16(0.3125).to_bits();
-        self.output
-            .write_typed(0, &vec![sentinel; self.shape.num_total_tokens as usize * ROW_WIDTH]);
+        let before = self
+            .output
+            .read_typed::<u16>(0, self.shape.num_total_tokens as usize * ROW_WIDTH);
 
         let input = TestInput {
             input: QSASDPAInput {
@@ -270,21 +317,15 @@ impl TestBindings<'_> {
                 &format!("QSA prepared-Q row {row}"),
                 &decode_bf16(actual_row),
                 expected_row,
-                0.03125,
+                0.002,
             );
         }
-        for (row, actual_row) in actual
-            .as_chunks::<ROW_WIDTH>()
-            .0
-            .iter()
-            .enumerate()
-            .skip(expected.len())
-        {
-            assert!(
-                actual_row.iter().all(|&value| value == sentinel),
-                "QSA SDPA changed inactive output row {row}"
-            );
-        }
+        let inactive_begin = expected.len() * ROW_WIDTH;
+        assert_eq!(
+            actual[inactive_begin..],
+            before[inactive_begin..],
+            "QSA SDPA changed inactive output tokens"
+        );
         active
     }
 }

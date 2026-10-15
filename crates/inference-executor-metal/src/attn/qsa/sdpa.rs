@@ -223,7 +223,7 @@ impl QSASDPA {
     }
 
     pub fn replay_sparse_query_topology_boundaries(&self) -> Box<[u32]> {
-        qsa_sparse_gqa::Compute::split_topology_boundaries()
+        qsa_sparse_gqa::Compute::topology_boundaries()
     }
 
     pub fn record<'a, R>(&self, recorder: &mut R, input: QSASDPAInput<'a>, active: QSASDPAReplay)
@@ -255,12 +255,7 @@ impl QSASDPA {
             num_total_tokens: shape.num_total_tokens,
             num_total_sparse_queries: shape.num_total_sparse_queries,
         };
-        let sparse_map = qsa_sparse_gqa::Compute::new(
-            &self.device,
-            sparse_config(self.config),
-            sparse_shape,
-            sparse_split_count,
-        );
+        let sparse_map = qsa_sparse_gqa::Compute::new(&self.device, sparse_config(self.config), sparse_shape);
         let sparse_reduce = if sparse_split_count > 1 {
             let sparse_reduce_shape = sliced_kv::Shape {
                 num_total_tokens: shape.num_total_sparse_queries,

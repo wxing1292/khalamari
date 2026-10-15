@@ -11,6 +11,7 @@ use crate::metal::Dtype;
 use crate::metal::Operator;
 
 const FP8_SOURCE: &str = include_str!("metal/gqa_fp8.metal");
+const SIMD_SOURCE: &str = include_str!("metal/qsa_sparse_gqa_simd.metal");
 const MAP_SOURCE: &str = include_str!("metal/qsa_sparse_gqa.metal");
 
 // Sparse map for the production QSA SDPA path.
@@ -81,22 +82,68 @@ impl Shape {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum KernelKind {
+    Simd { num_splits: u32, num_simdgroups: u32 },
+    Mma { num_splits: u32 },
+}
+
+impl KernelKind {
+    fn num_splits(self) -> u32 {
+        match self {
+            Self::Simd { num_splits, .. } | Self::Mma { num_splits } => num_splits,
+        }
+    }
+
+    fn required_threads(self) -> u32 {
+        match self {
+            Self::Simd { num_simdgroups, .. } => num_simdgroups * 32,
+            Self::Mma { .. } => 64,
+        }
+    }
+
+    fn num_head_tiles(self) -> u32 {
+        match self {
+            Self::Simd { .. } => 8,
+            Self::Mma { .. } => 2,
+        }
+    }
+}
+
 struct Selector;
 
 impl Selector {
-    const QUERY_CAPACITIES: [(u32, u32); 6] = [(2, 64), (4, 32), (8, 16), (64, 8), (256, 4), (512, 2)];
+    const QUERY_CAPACITIES: [(u32, KernelKind); 7] = [
+        (
+            1,
+            KernelKind::Simd {
+                num_splits: 8,
+                num_simdgroups: 8,
+            },
+        ),
+        (
+            2,
+            KernelKind::Simd {
+                num_splits: 32,
+                num_simdgroups: 2,
+            },
+        ),
+        (4, KernelKind::Mma { num_splits: 32 }),
+        (8, KernelKind::Mma { num_splits: 16 }),
+        (64, KernelKind::Mma { num_splits: 8 }),
+        (256, KernelKind::Mma { num_splits: 4 }),
+        (512, KernelKind::Mma { num_splits: 2 }),
+    ];
 
-    fn select(num_total_sparse_queries: u32) -> u32 {
+    fn key(num_total_sparse_queries: u32) -> KernelKind {
         assert!(
             num_total_sparse_queries > 0,
             "QSA sparse-query capacity must be positive"
         );
-        for (capacity, num_splits) in Self::QUERY_CAPACITIES {
-            if num_total_sparse_queries <= capacity {
-                return num_splits;
-            }
-        }
-        1
+        Self::QUERY_CAPACITIES
+            .iter()
+            .find(|(capacity, _)| num_total_sparse_queries <= *capacity)
+            .map_or(KernelKind::Mma { num_splits: 1 }, |&(_, kind)| kind)
     }
 }
 
@@ -122,40 +169,43 @@ pub struct MapBuffers<'a> {
     pub destination: MapDestination<'a>,
 }
 
-/// Sparse QSA Map. S=1 writes normalized BF16 output directly. S>1 writes
-/// SplitKV partials for the shared SlicedKv reducer.
+/// Indexed FP8 QSA Map with shape-selected SIMD or register-Q MMA.
+/// Both paths write F32 SplitKV partials for the shared SlicedKv reducer.
+/// The unsplit MMA path writes final BF16 output directly.
 ///
 /// ```text
-/// Q [Tq,24,256] + group IDs [Tq,512] + tail [0..3 tokens]
-///   -> indexed K/V tiles [Tkv_tile,256] for one KV head
-///   -> online softmax -> output [Tq,24,256]
-/// Task: { sparse query, KV split } from grid.x, KV head from grid.y.
-/// Grid: (num_total_sparse_queries * S, 2, 1), 64 threads per threadblock.
-/// The two SIMDgroups share K/V loads for all 12 Q heads (padded to 16).
-/// S=1 writes final BF16 rows. S>1 writes F32 partials and softmax statistics.
+/// Q [Tq,24,256] BF16 + group IDs [Tq,512] U32 + tail [0..3 tokens]
+///     recorded sparse-query capacity -> Selector -> one Map pipeline
+///       <=2: SIMD, 3 Q heads/warp; Q/O [3,8] F32 registers per lane
+///             indexed K/V -> registers -> local warp partials -> SMEM merge
+///        >2: MMA, 12 active Q heads/threadblock; Q stays in registers
+///             indexed K/V -> shared BF16 SMEM -> matrix fragments
+///     -> F32 partials + max/sum -> shared Reduce -> O [Tq,24,256] BF16
+/// Grid: [sparse-query capacity * splits, head tiles], threads = warps * 32.
+/// Submission supplies the active sparse-query count. Inactive tasks return.
 /// ```
 pub struct Compute {
     config: Config,
     shape: Shape,
-    num_splits: u32,
+    kind: KernelKind,
     map: CompiledKernel,
 }
 
 impl Compute {
     pub fn selected_split_count(num_total_sparse_queries: u32) -> u32 {
-        Selector::select(num_total_sparse_queries)
+        Selector::key(num_total_sparse_queries).num_splits()
     }
 
-    /// Exclusive upper bounds where the sparse-query capacity changes SplitKV topology.
-    pub fn split_topology_boundaries() -> Box<[u32]> {
+    /// First capacities where the kernel or its SplitKV topology changes.
+    pub fn topology_boundaries() -> Box<[u32]> {
         Selector::QUERY_CAPACITIES.map(|(capacity, _)| capacity + 1).into()
     }
 
-    pub fn new(device: &Device, config: Config, shape: Shape, num_splits: u32) -> Self {
+    pub fn new(device: &Device, config: Config, shape: Shape) -> Self {
         config.validate();
         shape.validate();
-        assert!(num_splits > 0);
-        assert!(num_splits <= config.top_k * config.compress_ratio);
+        let kind = Selector::key(shape.num_total_sparse_queries);
+        let num_splits = kind.num_splits();
         let tasks = shape
             .num_total_sparse_queries
             .checked_mul(num_splits)
@@ -168,15 +218,20 @@ impl Compute {
             "QSA sparse partial stats",
         );
         crate::components::assert_u32_count_domain(
-            checked_product("QSA sparse map thread count", &[tasks, 2, 64]),
+            checked_product(
+                "QSA sparse map thread count",
+                &[tasks, kind.num_head_tiles() as usize, kind.required_threads() as usize],
+            ),
             "QSA sparse map thread count",
         );
-        let map = CompiledKernel::new(device, &production_map_source(config, num_splits), "qsa_sparse_gqa_map");
+        let map = CompiledKernel::new(device, &production_map_source(config, kind), "qsa_sparse_gqa_map");
         assert_eq!(map.thread_execution_width(), 32);
+        assert!(kind.required_threads() as usize <= map.max_total_threads_per_threadblock());
+        assert!(map.static_threadblock_memory_length() <= device.max_threadblock_memory_length());
         Self {
             config,
             shape,
-            num_splits,
+            kind,
             map,
         }
     }
@@ -191,7 +246,7 @@ impl Compute {
             pipeline: self.map.as_raw_retained(),
             config: self.config,
             shape: self.shape,
-            num_splits: self.num_splits,
+            kind: self.kind,
             buffers,
             num_active_sparse_queries,
             page_table_index,
@@ -203,7 +258,7 @@ pub struct MapInvocation<'a> {
     pipeline: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
     config: Config,
     shape: Shape,
-    num_splits: u32,
+    kind: KernelKind,
     buffers: MapBuffers<'a>,
     num_active_sparse_queries: crate::metal::ReplayU32,
     page_table_index: crate::metal::ReplayU32,
@@ -221,7 +276,7 @@ impl Operator for MapInvocation<'_> {
         recorder.set_buffer_read(4, self.buffers.selected_groups, 0);
         recorder.set_buffer_read(5, self.buffers.query_positions, 0);
         recorder.set_buffer_read(6, self.buffers.sparse_query_rows, 0);
-        if self.num_splits == 1 {
+        if self.kind.num_splits() == 1 {
             let MapDestination::Direct(output) = self.buffers.destination else {
                 panic!("QSA S=1 map requires direct BF16 output");
             };
@@ -271,7 +326,14 @@ impl Operator for MapInvocation<'_> {
                 "QSA page-table layer index",
             );
         }
-        recorder.dispatch_threadblocks((self.shape.num_total_map_tasks(self.num_splits), 2, 1), (64, 1, 1));
+        recorder.dispatch_threadblocks(
+            (
+                self.shape.num_total_map_tasks(self.kind.num_splits()),
+                self.kind.num_head_tiles() as usize,
+                1,
+            ),
+            (self.kind.required_threads() as usize, 1, 1),
+        );
     }
 }
 
@@ -279,7 +341,7 @@ impl MapInvocation<'_> {
     fn validate(&self) {
         let config = self.config;
         let shape = self.shape;
-        let tasks = shape.num_total_map_tasks(self.num_splits);
+        let tasks = shape.num_total_map_tasks(self.kind.num_splits());
         let require = |buffer: &Buffer, bytes: usize, name: &str| {
             assert!(buffer.len_bytes() >= bytes, "QSA sparse {name} buffer is too small");
         };
@@ -315,7 +377,7 @@ impl MapInvocation<'_> {
             shape.num_total_sparse_queries as usize * size_of::<u32>(),
             "sparse query rows",
         );
-        match (self.num_splits == 1, self.buffers.destination) {
+        match (self.kind.num_splits() == 1, self.buffers.destination) {
             (true, MapDestination::Direct(output)) => require(output, tensor_bytes, "output"),
             (
                 false,
@@ -354,22 +416,38 @@ fn set_replay_u32_min(
     }
 }
 
-fn production_map_source(config: Config, num_splits: u32) -> String {
+fn production_map_source(config: Config, kind: KernelKind) -> String {
     let layout = config.page_table_layout;
-    let token_tile = if num_splits == 1 { 32 } else { 16 };
-    format!(
-        "#include <metal_stdlib>\nusing namespace metal;\n{}\n#define QSA_TOKEN_TILE {}\n#define QSA_NUM_SPLITS \
-         {}\n#define QSA_DIRECT_OUTPUT {}\n#define QSA_ATTENTION_SCALE {:.9e}f\n#define QSA_NUM_PAGE_IDS_PER_BLOCK \
-         {}\n#define QSA_NUM_BLOCKS {}\n#define QSA_NUM_GQA_LAYERS {}\n{}\n{}",
-        crate::mlx_headers::steel_mma_source(),
-        token_tile,
-        num_splits,
+    let num_splits = kind.num_splits();
+    let common = format!(
+        "#include <metal_stdlib>\nusing namespace metal;\n#define QSA_NUM_SPLITS {num_splits}\n#define \
+         QSA_DIRECT_OUTPUT {}\n#define QSA_NUM_PAGE_IDS_PER_BLOCK {}\n#define QSA_NUM_BLOCKS {}\n#define \
+         QSA_NUM_GQA_LAYERS {}\n",
         u8::from(num_splits == 1),
-        config.scale * std::f32::consts::LOG2_E,
         layout.num_page_ids_per_block,
         layout.num_blocks,
         layout.num_gqa_layers,
-        FP8_SOURCE,
-        MAP_SOURCE,
-    )
+    );
+    match kind {
+        KernelKind::Simd { num_simdgroups, .. } => {
+            let scale = config.scale * 256.0 * std::f32::consts::LOG2_E;
+            format!(
+                "{common}\n#define QSA_NUM_SIMDGROUPS {num_simdgroups}\n#define QSA_ATTENTION_SCALE \
+                 {scale:.9e}f\n{SIMD_SOURCE}"
+            )
+        },
+        KernelKind::Mma { .. } => {
+            let token_tile = 16;
+            format!(
+                "{common}\n{}\n#define QSA_TOKEN_TILE {token_tile}\n#define QSA_ATTENTION_SCALE \
+                 {:.9e}f\n{FP8_SOURCE}\n{MAP_SOURCE}",
+                crate::mlx_headers::steel_mma_source(),
+                config.scale * std::f32::consts::LOG2_E
+            )
+        },
+    }
 }
+
+#[cfg(test)]
+#[path = "qsa_sparse_gqa_test.rs"]
+mod tests;

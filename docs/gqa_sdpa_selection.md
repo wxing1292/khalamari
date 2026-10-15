@@ -492,3 +492,10 @@ See the [selector source](../crates/inference-executor-metal/src/attn/gqa/sdpa.r
 The implementation must keep registry capability tests, selector crossover tests, ragged-tail tests, metadata ABI
 tests, SlicedKv and SlicedQ Metal parity tests, the Qwen3.8 D=256 page-16 parity test, and representative one-layer
 production performance checks.
+
+## Sparse QSA selection
+
+[QSA SDPA](executor_gqa.md#qsa-sdpa) uses the same record-time selection and active-count submission contract.
+Its private selector chooses indexed FP8 SIMD for up to two recorded sparse Q tokens and register-Q MMA above two.
+Both paths use the same page interpretation and normalized partial-output ABI.
+QSA uses the existing dense GQA selector for its dense-prefix partition.

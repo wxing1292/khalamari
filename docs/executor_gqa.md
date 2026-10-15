@@ -40,6 +40,10 @@ crates/inference-executor-metal/src/attn/
     request_page_table.rs   per-request, per-layer KV page table for runtime-supplied page IDs
     request_page_table/
       file_io.rs            symmetric full and selected state file I/O
+  qsa/
+    sdpa.rs                 prepared-Q dense/sparse owner and shared partial reduction
+    batch_metadata.rs       request-local dense/sparse partition and original Q-token maps
+    sdpa_test.rs            fixed/random CPU parity, mixed requests, and padded replay
   bidi_block_gqa/
     mod.rs                  paged-history plus bidirectional local-block GQA module root
     backend.rs              ungated paged-history plus bidirectional local-block replay graph
@@ -87,8 +91,13 @@ crates/inference-backend-metal/src/components/
       sliced_kv_test.rs      SplitKV SlicedKv Metal parity and replay contracts
       sliced_q.rs            Q-token/head Map/Reduce and unsplit direct-output component
       sliced_q_test.rs       SplitKV SlicedQ Metal parity and padded replay contracts
+  qsa_sparse_gqa.rs         indexed FP8 SIMD/MMA selector and Map recording
+  qsa_sparse_gqa_test.rs    replay-topology and packed FP8 conversion tests
+  qsa_sdpa.rs               disjoint dense/sparse recording and dependency scope
   rms_norm_rope.rs          reusable Metal token/head RMSNorm/RoPE component
   metal/
+    qsa_sparse_gqa_simd.metal  indexed FP8 register loads and local SIMDgroup reduction
+    qsa_sparse_gqa.metal       register-Q Steel MMA with shared K/V tiles
     gqa_qgkv_split.metal       gated QGKV split source
     gqa_qkv_split.metal        ungated QKV split source
     rms_norm_rope.metal         Metal token/head RMSNorm/RoPE source
@@ -1458,6 +1467,104 @@ Debug in this order:
 2. Real-weight GQA wrapper
 3. Attention slice in a layer
 4. Layer ladder
+
+## QSA SDPA
+
+`attn::qsa::sdpa::QSASDPA` consumes prepared BF16 Q and an FP8 page cache.
+It supports 24 Q heads, two KV heads, head dimension 256, and 32 KiB pages.
+One page stores both K/V planes and both KV heads for 32 tokens.
+Each sparse Q token supplies its own 512 selected four-token groups.
+The consumer also includes that token's zero to three visible tail tokens.
+The group producer establishes visibility and complete-group invariants.
+QSA micro-blocks do not define runtime allocation pages.
+
+Batch metadata partitions dense and sparse Q tokens. Dense queries use the existing GQA path.
+A query remains dense while it sees at most 512 complete groups from its `group_start`.
+Both paths scatter to the original Q-token indices.
+The backend records disjoint output ownership and preserves Map-to-Reduce dependencies.
+
+```text
+one mixed batch: req 0 has Q tokens 0..4 at ctx=16
+                 req 1 has Q tokens 4..6 at ctx=16384
+Q [6,24,256] BF16 GMEM; paged K/V FP8 GMEM
+  |
+  +-- dense Q-token map [0,1,2,3] -> existing dense GQA Map + Reduce
+  |
+  +-- sparse Q-token map [4,5], selected groups [6,512] U32 GMEM
+        recorded sparse capacity 2 -> SIMD, S=32, 2 warps/threadblock
+        grid [2 Q tokens * 32 splits,8 Q-head tiles]; 64 threads/threadblock
+        example head tile 0: KV head 0, Q heads [0,3)
+
+        Q -> registers [3 heads,8 dims/lane], once
+        numerator -> registers [3 heads,8 dims/lane] FP32 = 0
+        for assigned four-token group:
+            resolve one page address
+            K -> registers [8 dims/lane]; reuse for 3 Q heads -> scores [3,4]
+            update register softmax max/sum and rescale numerator
+            V -> registers [8 dims/lane]; reuse for 3 Q heads -> numerator
+        warp partials -> SMEM [2 warps,3 heads,256 dims] FP32
+        one threadblock barrier -> warp 0 combines
+        -> normalized F32 partials [2 Q tokens,32 splits,24 heads,256 dims]
+        -> shared SlicedKv Reduce -> scatter to output Q tokens 4 and 5
+
+all writers -> O [6,24,256] BF16 GMEM
+```
+
+The private sparse selector uses recorded sparse-query capacity. It selects one kernel before replay submission.
+The caller uses `replay_sparse_query_topology_boundaries()` when it forms replay buckets.
+The boundaries are `2,3,5,9,65,257,513`. They cover kernel changes as well as split-count changes.
+Submission supplies active counts independently of recorded capacities.
+Inactive threadblocks return before reading Q-token metadata.
+
+| Recorded sparse Q-token capacity | Map | KV splits | Warps per threadblock |
+| ---: | --- | ---: | ---: |
+| 1 | SIMD, three Q heads per warp, base-2 softmax | 8 | 8 |
+| 2 | SIMD, three Q heads per warp, base-2 softmax | 32 | 2 |
+| 3..4 | Register-Q MMA | 32 | 2 |
+| 5..8 | Register-Q MMA | 16 | 2 |
+| 9..64 | Register-Q MMA | 8 | 2 |
+| 65..256 | Register-Q MMA | 4 | 2 |
+| 257..512 | Register-Q MMA | 2 | 2 |
+| Above 512 | Register-Q MMA, direct BF16 output | 1 | 2 |
+
+The SIMD path loads indexed FP8 K/V directly into registers. It does not materialize a gathered KV tensor.
+It rebases E4M3FN into FP16 divided by 256. Q absorbs the K scale; output restores the V scale.
+This conversion preserves zeros, subnormals, finite values, and NaNs. Arithmetic accumulates in FP32.
+Only the final cross-warp reduction uses shared memory.
+
+The MMA path keeps distributed BF16 Q fragments in registers across the complete KV scan.
+Each threadblock owns one Q token, one KV head, and one selected-KV split.
+Its two warps share decoded BF16 K/V tiles across 12 active Q heads, padded to 16.
+A tile contains 16 KV tokens for both split and direct output.
+The tile stages all 256 head dimensions at once.
+
+```text
+same sparse Q [6,24,256] and selected groups [6,512]
+recorded sparse capacity 4, active sparse Q tokens 2 -> register-Q MMA, S=32
+  grid [4 Q tokens * 32 splits,2 KV heads]; 64 threads/threadblock
+  grid (32,1): sparse query 1 -> Q token 5, KV head 1, KV split 0
+  threadblock = one Q token x one KV head x one KV split; 64 threads
+  example warp 0 owns Q heads [12,20), warp 1 owns [20,24) plus padding
+  Q [16 padded heads,256 dims] -> distributed BF16 registers, once
+  numerator [16 padded heads,256 dims] -> distributed FP32 registers = 0
+  for selected KV tile [16 tokens,256 dims]:
+      indexed FP8 K -> shared BF16 SMEM -> matrix fragments
+      register Q x K -> FP32 scores -> online softmax
+      indexed FP8 V -> same shared SMEM -> update register numerator
+  S>1 -> normalized FP32 partials + max (natural-log units) + exp sum
+      -> shared Reduce
+  S=1 -> final BF16 output at the original Q-token index
+```
+
+Initialization validates the supported geometry, shader index domains, thread count, and shared-memory limit.
+The selector and scratch allocation share the same split-count policy.
+The public Map constructor selects its kernel internally; callers do not supply a competing split choice.
+The cache, indexer, projections, and output gate retain their existing owners.
+
+QSA CPU-reference tests cover fixed and seeded random Q, all tail lengths, shuffled group IDs, request and layer IDs,
+logical page-block boundaries, mixed dense/sparse output maps, and inactive replay capacity.
+Partial submissions preserve the previous values at inactive output tokens.
+The packed FP8 conversion test checks all 256 encodings. The replay test checks both sparse kernel families and direct output.
 
 ## FP8 KV-cache storage and validation
 

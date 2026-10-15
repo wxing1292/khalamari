@@ -15,7 +15,7 @@ constant uint qsa_q_heads_per_kv_head = 12;
 constant uint qsa_tokens_per_page = 32;
 constant uint qsa_page_bytes = 32768;
 constant uint qsa_token_tile = QSA_TOKEN_TILE;
-constant uint qsa_dimension_chunk = 64;
+constant uint qsa_dimension_chunk = 256;
 constant float qsa_ln2 = 0.6931471805599453f;
 
 constant uint qsa_kv_workspace_elements = qsa_token_tile * (qsa_dimension_chunk + 8);
@@ -104,7 +104,8 @@ inline void qsa_load_kv_chunk(
 
 // Task: one sparse query and KV split from grid.x, one KV head from grid.y.
 // Q tile [1,16,256] holds 12 active Q heads. K/V tiles [Tkv_tile,256] share
-// indexed loads across both SIMDgroups. Each SIMDgroup owns eight head rows.
+// indexed loads across both SIMDgroups. Each SIMDgroup owns up to eight Q heads.
+// Q stays in distributed BF16 registers across the complete selected-KV scan.
 kernel void qsa_sparse_gqa_map(
     device const bfloat16_t* q [[buffer(0)]],
     device const uchar* pages [[buffer(1)]],
@@ -129,9 +130,7 @@ kernel void qsa_sparse_gqa_map(
     uint lane [[thread_index_in_simdgroup]])
 {
     constexpr short frag = 8;
-    constexpr short leading_q = qsa_dimension_chunk + 8;
     constexpr short leading_v = qsa_dimension_chunk + 8;
-    constexpr uint threads = 64;
     const uint task = block.x;
     if (task >= num_active_sparse_queries * QSA_NUM_SPLITS) return;
     const uint sparse_query = task / QSA_NUM_SPLITS;
@@ -153,7 +152,7 @@ kernel void qsa_sparse_gqa_map(
     threadgroup bfloat16_t kv_tile[qsa_kv_workspace_elements];
     threadgroup uint selected_page[qsa_token_tile];
     threadgroup uint selected_page_token[qsa_token_tile];
-    threadgroup bfloat16_t q_tile[16 * leading_q];
+
     using Frag = BaseMMAFrag<float, 8, 8>;
     MMATile<float, 1, qsa_token_tile / 8, Frag> scores;
     MMATile<float, 1, qsa_head_dim / frag, Frag> output;
@@ -164,6 +163,17 @@ kernel void qsa_sparse_gqa_map(
     const uint q_head_start = query_head_begin + simdgroup_index * 8;
     const uint num_heads = min(8u, query_head_begin + qsa_q_heads_per_kv_head - q_head_start);
 
+    MMATile<bfloat16_t, 1, qsa_head_dim / frag> query_tile;
+    #pragma unroll
+    for (uint f = 0; f < qsa_head_dim / frag; ++f) {
+        bfloat2 value(0);
+        if (row < num_heads) {
+            const device bfloat16_t* source = q + (ulong(query) * qsa_num_q_heads + q_head_start + row) * qsa_head_dim;
+            value = bfloat2(source[f * frag + col], source[f * frag + col + 1]);
+        }
+        query_tile.frag_at(0, f) = value;
+    }
+
     for (uint begin = selected_begin; begin < selected_end; begin += qsa_token_tile) {
         const uint end = min(begin + qsa_token_tile, selected_end);
         qsa_resolve_tile(selected_groups, req_slot, page_ids, page_table_index,
@@ -173,34 +183,13 @@ kernel void qsa_sparse_gqa_map(
         #pragma unroll
         for (uint chunk = 0; chunk < qsa_head_dim / qsa_dimension_chunk; ++chunk) {
             const uint dimension_begin = chunk * qsa_dimension_chunk;
-            #pragma unroll
-            for (uint element = global_lane; element < 16 * qsa_dimension_chunk / 8; element += threads) {
-                const uint head = element / (qsa_dimension_chunk / 8);
-                const uint dim8 = element % (qsa_dimension_chunk / 8);
-                uint4 packed = uint4(0);
-                if (head < qsa_q_heads_per_kv_head) {
-                    const uint head_index = query_head_begin + head;
-                    const device bfloat16_t* source = q
-                        + (uint64_t(query) * qsa_num_q_heads + head_index) * qsa_head_dim
-                        + dimension_begin + dim8 * 8;
-                    packed = *reinterpret_cast<device const uint4*>(source);
-                }
-                *(reinterpret_cast<threadgroup uint4*>(q_tile + head * leading_q) + dim8) = packed;
-            }
             qsa_load_kv_chunk<0>(pages, kv_head, dimension_begin,
                 begin, end, selected_page, selected_page_token, kv_tile, global_lane);
             #pragma unroll
             for (uint sub = 0; sub < qsa_dimension_chunk / frag; ++sub) {
                 simdgroup_barrier(mem_flags::mem_none);
-                simdgroup_matrix<bfloat16_t, 8, 8> q_frag_index;
+                auto q_frag_index = query_tile.mat_at(0, dimension_begin / frag + sub);
                 simdgroup_matrix<bfloat16_t, 8, 8> k_frag_index;
-                vec<bfloat16_t, 2> q_values(bfloat16_t(0.0f));
-                #pragma unroll
-                for (uint item = 0; item < 2; ++item) {
-                    q_values[item] = q_tile[(simdgroup_index * 8 + row) * leading_q
-                        + sub * frag + col + item];
-                }
-                reinterpret_cast<thread vec<bfloat16_t, 2>&>(q_frag_index.thread_elements()) = q_values;
                 #pragma unroll
                 for (uint frag_index = 0; frag_index < qsa_token_tile / 8; ++frag_index) {
                     simdgroup_load(k_frag_index,
