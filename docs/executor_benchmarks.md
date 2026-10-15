@@ -565,6 +565,9 @@ baseline and current samples
 verdict
 ```
 
+Cross-framework tables must identify each framework's measured version or source commit and execution path.
+Group results by component and workload shape. Show each framework's latency and the PSI relative latency difference.
+
 For speculative decoding, also record these values:
 
 - Proposals

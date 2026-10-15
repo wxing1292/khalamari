@@ -13,12 +13,20 @@ Those serving results do not replace or remeasure this component dataset.
 - Measured source: `705aaf3c30ae20b622ec88d2041b326233009a5f` plus the uncommitted MoE candidate.
 - Hardware: Apple M3 Max, 40 GPU cores, 48 GiB unified memory, AC power. The desktop was active.
 - GQA/GDN/dense checkpoint: `Qwen3.8-27B-4bit`. Sparse MLP/MoE checkpoint: `Qwen3.6-35B-A3B-4bit`.
-- oMLX: `0.7.1.dev1`. TensorFold: Python lane `0.6.6`. Both peers use MLX `0.32.3`.
 - The TensorFold values describe its Python lane. They do not describe its native engine.
 - Each group ran PSI/oMLX/TF/TF/oMLX/PSI serially. Accepted groups have zero new swap and normal memory pressure.
 - Small-input runs used 3 warmup iterations, 5 measured iterations, and 3 runs. Full Prefill used 1 warmup iteration, 2 measured iterations, and 3 runs.
 - Latency is ordinary submission-and-wait wall time. Loading, compilation, and preparation are outside timing.
 - Each value is the mean of two per-pass medians. Drift is the largest same-engine change between passes.
+
+These framework versions apply to every shape table below.
+The JSON dataset retains the worker hashes and dependency versions.
+
+| Table label | Framework and execution path | Measured version or source | Dependencies |
+| --- | --- | --- | --- |
+| PSI | psi-dec Rust/Metal | `705aaf3c30ae20b622ec88d2041b326233009a5f` plus the uncommitted MoE candidate | See worker hashes in the dataset |
+| oMLX | oMLX Python/MLX | `0.7.1.dev1` | MLX `0.32.3`; MLX-LM `0.31.4.dev132+g94cdcae13`; MLX-VLM `0.7.7` |
+| TF Python | TensorFold Python/MLX | `0.6.6` | MLX `0.32.3`; MLX-LM `0.32.0` |
 
 ## Measurement scope
 
@@ -50,6 +58,7 @@ Full Prefill means one component forward from zero history. Different real prefi
 ## Read the tables
 
 All latencies use milliseconds. Negative differences mean PSI is faster.
+Each difference is `100 * (PSI latency / peer latency - 1)`.
 Requests are batch members. Q is the number of input tokens per request.
 Ctx `any` covers `0,1024,2048,4096,8192,16384,32768,65536` for the same hidden input.
 GDN ctx `nonzero` covers the positive values of that axis with one fixed state fixture.
