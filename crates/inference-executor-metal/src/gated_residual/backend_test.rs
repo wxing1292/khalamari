@@ -1,4 +1,5 @@
 use half::bf16;
+use inference_backend_metal::metal::Dtype;
 use inference_backend_metal::metal::ReplayArguments;
 use inference_backend_metal::metal::ReplayParameterKey;
 use inference_backend_metal::metal::Stream;
@@ -17,81 +18,82 @@ fn test_read_write_replay() {
     let device = Device::system_default();
     let stream = Stream::new(&device);
     let runtime = MetalReplayRuntime::new(&stream);
-    let core = GatedResidualCore {
-        num_branches: 4,
-        hidden_dim: 37,
-        low_rank_dim: 17,
-        eps: 1.0e-6,
-    };
-    let wide = core.residual_dim();
-    let mut replay = Replay::new(
-        "test-gr",
-        Fixture {
-            gr: GatedResidual::new(&device, core),
-            scratch: GatedResidualScratch::new(&device, core, 4),
-            residual: fixture_buffer(&device, 4 * wide, 0.05, 11),
-            hidden: Buffer::new_zeroed_elements(&device, 4 * core.hidden_dim, Dtype::Bfloat16),
-            output: Buffer::new_zeroed_elements(&device, 4 * wide, Dtype::Bfloat16),
-            final_hidden: Buffer::new_zeroed_elements(&device, 4 * core.hidden_dim, Dtype::Bfloat16),
-            norm: fixture_buffer(&device, wide, 0.01, 7),
-            down: fixture_buffer(&device, wide * core.low_rank_dim, 0.005, 13),
-            up: fixture_buffer(&device, wide * core.low_rank_dim, 0.02, 19),
-            gate: Buffer::new_zeroed_elements(&device, 4 * core.num_branches, Dtype::Bfloat16),
-            write: fixture_buffer(&device, wide * core.num_branches, 0.02, 23),
-        },
-    );
-    let (key, hit) = replay.record(&runtime, &4);
-    assert!(!hit);
-    assert_eq!(replay.replay(&key).command_count(), 6);
-    for active in [1, 4, 3, 2] {
-        assert!(replay.record(&runtime, &4).1);
-        runtime
-            .submit_replay_with_arguments(
-                replay.replay(&key),
-                &ReplayArguments::new().with_u32(ACTIVE, active as u32),
-            )
-            .wait();
-        let fixture = replay.component();
-        let residual = values(&fixture.residual, active * wide);
-        let norm = values(&fixture.norm, wide);
-        let down = values(&fixture.down, wide * core.low_rank_dim);
-        let up = values(&fixture.up, wide * core.low_rank_dim);
-        let write = values(&fixture.write, wide * core.num_branches);
-        let weights = reference::ReadWeights {
-            norm: &norm,
-            down: &down,
-            up: &up,
+    for (hidden, rank, total) in [(37, 17, 4), (256, 32, 4), (256, 32, 17)] {
+        let core = GatedResidualCore {
+            num_branches: 4,
+            hidden_dim: hidden,
+            low_rank_dim: rank,
+            eps: 1.0e-6,
         };
-        let read = reference::read(reference::ReadInput {
-            core,
-            precision: reference::Precision::Bf16,
-            num_tokens: active,
-            residual: &residual,
-            weights,
-        });
-        let output = reference::write(reference::WriteInput {
-            core,
-            precision: reference::Precision::Bf16,
-            num_tokens: active,
-            residual: &residual,
-            normalized_residual: &read.normalized_residual,
-            hidden_state: &read.hidden_state,
-            weight: &write,
-        });
-        assert_close(&values(&fixture.output, active * wide), &output);
-        let final_read = reference::read(reference::ReadInput {
-            core,
-            precision: reference::Precision::Bf16,
-            num_tokens: active,
-            residual: &output,
-            weights,
-        });
-        assert_close(
-            &values(&fixture.final_hidden, active * core.hidden_dim),
-            &final_read.hidden_state,
+        let wide = core.residual_dim();
+        let mut replay = Replay::new(
+            "test-gr",
+            Fixture {
+                gr: GatedResidual::new(&device, core),
+                scratch: GatedResidualScratch::new(&device, core, total),
+                residual: fixture_buffer(&device, total * wide, 0.05, 11),
+                hidden: Buffer::new_zeroed_elements(&device, total * core.hidden_dim, Dtype::Bfloat16),
+                output: Buffer::new_zeroed_elements(&device, total * wide, Dtype::Bfloat16),
+                final_hidden: Buffer::new_zeroed_elements(&device, total * core.hidden_dim, Dtype::Bfloat16),
+                norm: fixture_buffer(&device, wide, 0.01, 7),
+                down: fixture_buffer(&device, wide * core.low_rank_dim, 0.005, 13),
+                up: fixture_buffer(&device, wide * core.low_rank_dim, 0.02, 19),
+                gate: Buffer::new_zeroed_elements(&device, total * core.num_branches, Dtype::Bfloat16),
+                write: fixture_buffer(&device, wide * core.num_branches, 0.02, 23),
+            },
         );
+        let (key, hit) = replay.record(&runtime, &(total as u32));
+        assert!(!hit);
+        for active in [1, total, total - 1, 2] {
+            assert!(replay.record(&runtime, &(total as u32)).1);
+            runtime
+                .submit_replay_with_arguments(
+                    replay.replay(&key),
+                    &ReplayArguments::new().with_u32(ACTIVE, active as u32),
+                )
+                .wait();
+            let fixture = replay.component();
+            let residual = values(&fixture.residual, active * wide);
+            let norm = values(&fixture.norm, wide);
+            let down = values(&fixture.down, wide * core.low_rank_dim);
+            let up = values(&fixture.up, wide * core.low_rank_dim);
+            let write = values(&fixture.write, wide * core.num_branches);
+            let weights = reference::ReadWeights {
+                norm: &norm,
+                down: &down,
+                up: &up,
+            };
+            let read = reference::read(reference::ReadInput {
+                core,
+                precision: reference::Precision::Bf16,
+                num_tokens: active,
+                residual: &residual,
+                weights,
+            });
+            let output = reference::write(reference::WriteInput {
+                core,
+                precision: reference::Precision::Bf16,
+                num_tokens: active,
+                residual: &residual,
+                normalized_residual: &read.normalized_residual,
+                hidden_state: &read.hidden_state,
+                weight: &write,
+            });
+            assert_close(&values(&fixture.output, active * wide), &output);
+            let final_read = reference::read(reference::ReadInput {
+                core,
+                precision: reference::Precision::Bf16,
+                num_tokens: active,
+                residual: &output,
+                weights,
+            });
+            assert_close(
+                &values(&fixture.final_hidden, active * core.hidden_dim),
+                &final_read.hidden_state,
+            );
+        }
+        assert!(!replay.record(&runtime, &2).1);
     }
-    assert!(!replay.record(&runtime, &2).1);
 }
 
 struct Fixture {
@@ -183,10 +185,18 @@ fn values(buffer: &Buffer, len: usize) -> Vec<f32> {
 
 fn assert_close(actual: &[f32], expected: &[f32]) {
     assert_eq!(actual.len(), expected.len());
-    for (index, (actual, expected)) in actual.iter().zip(expected).enumerate() {
-        assert!(
-            (actual - expected).abs() <= 0.002 + 0.02 * expected.abs(),
-            "index={index}, actual={actual}, expected={expected}"
-        );
+    // Match the GR backend: BF16 cancellation needs an absolute bound and a
+    // separate aggregate bound, rather than relative error near zero.
+    let mut max_error = 0.0_f32;
+    let mut error_sum = 0.0;
+    for (&actual, &expected) in actual.iter().zip(expected) {
+        let error = (actual - expected).abs();
+        max_error = max_error.max(error);
+        error_sum += error;
     }
+    let mean_error = error_sum / actual.len() as f32;
+    assert!(
+        max_error <= 0.03125 && mean_error <= 0.003125,
+        "max_error={max_error}, mean_error={mean_error}",
+    );
 }

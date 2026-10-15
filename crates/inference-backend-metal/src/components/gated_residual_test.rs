@@ -77,6 +77,153 @@ fn test_read_write_bucketing() {
 }
 
 #[test]
+fn test_tiled_read_write_bucketing() {
+    let device = Device::system_default();
+    let stream = Stream::new(&device);
+    // Small rows, matrix tile tails, and both row-tile crossovers use the CPU oracle.
+    for (hidden, rank, total) in [
+        (256, 32, 1),
+        (256, 32, 4),
+        (96, 24, 4),
+        (256, 32, 5),
+        (256, 32, 16),
+        (256, 32, 17),
+        (256, 32, 128),
+        (256, 32, 129),
+    ] {
+        let fixture = Fixture::new(&device, 4, hidden, rank, Dtype::Bfloat16, total);
+        let shape = Shape {
+            num_total_tokens: total as u32,
+        };
+        let mut builder = stream.create_replay_program();
+        builder.record(fixture.compute.read(
+            shape,
+            ReplayU32::Parameter(ACTIVE),
+            fixture.read_buffers(),
+            fixture.scratch(),
+            fixture.weights(),
+        ));
+        builder.record_with_barrier_before(fixture.compute.write(
+            shape,
+            ReplayU32::Parameter(ACTIVE),
+            fixture.write_buffers(&fixture.output),
+        ));
+        let replay = builder.build();
+        for active in [total, 1, total.saturating_sub(1).max(1)] {
+            let before = values(&fixture.output, total * 4 * hidden, Dtype::Bfloat16);
+            stream
+                .submit_replay_with_arguments(&replay, &ReplayArguments::new().with_u32(ACTIVE, active as u32))
+                .wait();
+            fixture.check(
+                &values(&fixture.residual, active * 4 * hidden, Dtype::Bfloat16),
+                &fixture.output,
+                active,
+            );
+            let after = values(&fixture.output, total * 4 * hidden, Dtype::Bfloat16);
+            assert_eq!(&after[active * 4 * hidden..], &before[active * 4 * hidden..]);
+        }
+    }
+}
+
+#[test]
+fn test_tiled_write_read_fusion() {
+    use crate::components::ReplayOp;
+    use crate::components::ReplayRecorder;
+
+    let device = Device::system_default();
+    let stream = Stream::new(&device);
+    for total in [1, 4, 5, 17, 129] {
+        // Reuse both hidden and gate outputs across reads, as a model layer chain does.
+        for in_place in [false, true] {
+            for with_gate in [false, true] {
+                let plain = Fixture::new(&device, 4, 256, 32, Dtype::Bfloat16, total);
+                let fused = Fixture::new(&device, 4, 256, 32, Dtype::Bfloat16, total);
+                let shape = Shape {
+                    num_total_tokens: total as u32,
+                };
+                let record = |fixture: &Fixture, fuse| {
+                    let output = if in_place { &fixture.residual } else { &fixture.output };
+                    let mut recorder = ReplayRecorder::new(stream.create_replay_program());
+                    recorder.record(ReplayOp::gated_residual_read(fixture.compute.read(
+                        shape,
+                        ReplayU32::Parameter(ACTIVE),
+                        fixture.read_buffers(),
+                        fixture.scratch(),
+                        fixture.weights(),
+                    )));
+                    let write = fixture.compute.write(
+                        shape,
+                        ReplayU32::Parameter(ACTIVE),
+                        WriteBuffers {
+                            hidden_state: &fixture.hidden_state,
+                            ..fixture.write_buffers(output)
+                        },
+                    );
+                    recorder.record_with_barrier_before(if fuse {
+                        ReplayOp::gated_residual_write(write)
+                    } else {
+                        ReplayOp::opaque(write)
+                    });
+                    recorder.record_with_barrier_before(ReplayOp::gated_residual_read(fixture.compute.read(
+                        shape,
+                        ReplayU32::Parameter(ACTIVE),
+                        ReadBuffers {
+                            residual: output,
+                            write_gate: if with_gate {
+                                fixture.read_buffers().write_gate
+                            } else {
+                                None
+                            },
+                            ..fixture.read_buffers()
+                        },
+                        fixture.scratch(),
+                        fixture.weights(),
+                    )));
+                    recorder.build()
+                };
+                let unfused = record(&plain, false);
+                let optimized = record(&fused, true);
+                assert_eq!(optimized.command_count() + 1, unfused.command_count());
+                for active in [total, 1] {
+                    let output = if in_place { &fused.residual } else { &fused.output };
+                    let before = values(output, total * 1024, Dtype::Bfloat16);
+                    let args = ReplayArguments::new().with_u32(ACTIVE, active as u32);
+                    stream.submit_replay_with_arguments(&unfused, &args).wait();
+                    stream.submit_replay_with_arguments(&optimized, &args).wait();
+                    let residual = values(output, total * 1024, Dtype::Bfloat16);
+                    let plain_output = if in_place { &plain.residual } else { &plain.output };
+                    assert_eq!(residual, values(plain_output, total * 1024, Dtype::Bfloat16));
+                    assert_eq!(&residual[active * 1024..], &before[active * 1024..]);
+                    let norm = values(&fused.norm, 1024, Dtype::Bfloat16);
+                    let down = values(&fused.down, 1024 * 32, Dtype::Bfloat16);
+                    let up = values(&fused.up, 1024 * 32, Dtype::Bfloat16);
+                    let expected = reference::read(reference::ReadInput {
+                        core: fused.core,
+                        precision: reference::Precision::Bf16,
+                        num_tokens: active,
+                        residual: &residual[..active * 1024],
+                        weights: reference::ReadWeights {
+                            norm: &norm,
+                            down: &down,
+                            up: &up,
+                        },
+                    });
+                    assert_eq!(
+                        values(&fused.hidden_state, total * 256, Dtype::Bfloat16),
+                        values(&plain.hidden_state, total * 256, Dtype::Bfloat16)
+                    );
+                    assert_close(
+                        &values(&fused.hidden_state, active * 256, Dtype::Bfloat16),
+                        &expected.hidden_state,
+                        Dtype::Bfloat16,
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn test_write_read_fusion() {
     use crate::components::ReplayOp;
     use crate::components::ReplayRecorder;
@@ -150,7 +297,7 @@ fn test_write_read_fusion() {
                     },
                     ReadScratch {
                         normalized_residual: &fixture.normalized_residual,
-                        low_rank: &next_low_rank,
+                        projection: &next_low_rank,
                     },
                     weights,
                 )));
@@ -158,8 +305,7 @@ fn test_write_read_fusion() {
             };
             let unfused_replay = record(&plain, false);
             let fused_replay = record(&fused, true);
-            assert_eq!(unfused_replay.command_count(), 7);
-            assert_eq!(fused_replay.command_count(), 6);
+            assert_eq!(fused_replay.command_count() + 1, unfused_replay.command_count());
             for active in [1, 4, 3, 2] {
                 let output = if in_place { &fused.residual } else { &fused.output };
                 let before_output = values(output, 4 * wide, dtype);
@@ -235,7 +381,7 @@ fn test_write_read_separate() {
             } else {
                 &fixture.normalized_residual
             },
-            low_rank: &fixture.low_rank,
+            projection: &fixture.projection,
         };
         recorder.record_with_barrier_before(ReplayOp::gated_residual_read(fixture.compute.read(
             shape,
@@ -300,6 +446,101 @@ fn test_write_read_separate() {
 }
 
 #[test]
+fn test_small_read_reuses_dead_residual() {
+    use crate::components::ReplayOp;
+    use crate::components::ReplayRecorder;
+
+    let device = Device::system_default();
+    let stream = Stream::new(&device);
+    // After a separate write, its old residual is dead. Either next-read scratch
+    // buffer may reuse it. A fused down must not overwrite it while peers read it.
+    for reuse_projection in [false, true] {
+        let fixture = Fixture::new(&device, 4, 256, 32, Dtype::Bfloat16, 4);
+        let residual = values(&fixture.residual, 4096, Dtype::Bfloat16);
+        let norm = values(&fixture.norm, 1024, Dtype::Bfloat16);
+        let down = values(&fixture.down, 1024 * 32, Dtype::Bfloat16);
+        let up = values(&fixture.up, 1024 * 32, Dtype::Bfloat16);
+        let write = values(&fixture.write_weight, 4 * 1024, Dtype::Bfloat16);
+        let module_output = values(&fixture.module_output, 4 * 256, Dtype::Bfloat16);
+        let weights = reference::ReadWeights {
+            norm: &norm,
+            down: &down,
+            up: &up,
+        };
+        let first = reference::read(reference::ReadInput {
+            core: fixture.core,
+            precision: reference::Precision::Bf16,
+            num_tokens: 4,
+            residual: &residual,
+            weights,
+        });
+        let written = reference::write(reference::WriteInput {
+            core: fixture.core,
+            precision: reference::Precision::Bf16,
+            num_tokens: 4,
+            residual: &residual,
+            normalized_residual: &first.normalized_residual,
+            hidden_state: &module_output,
+            weight: &write,
+        });
+        let expected = reference::read(reference::ReadInput {
+            core: fixture.core,
+            precision: reference::Precision::Bf16,
+            num_tokens: 4,
+            residual: &written,
+            weights,
+        });
+        let shape = Shape { num_total_tokens: 4 };
+        let mut recorder = ReplayRecorder::new(stream.create_replay_program());
+        recorder.record(ReplayOp::gated_residual_read(fixture.compute.read(
+            shape,
+            ReplayU32::Fixed(4),
+            fixture.read_buffers(),
+            fixture.scratch(),
+            fixture.weights(),
+        )));
+        recorder.record_with_barrier_before(ReplayOp::gated_residual_write(fixture.compute.write(
+            shape,
+            ReplayU32::Fixed(4),
+            fixture.write_buffers(&fixture.output),
+        )));
+        recorder.record_with_barrier_before(ReplayOp::gated_residual_read(fixture.compute.read(
+            shape,
+            ReplayU32::Fixed(4),
+            ReadBuffers {
+                residual: &fixture.output,
+                write_gate: None,
+                ..fixture.read_buffers()
+            },
+            ReadScratch {
+                normalized_residual: if reuse_projection {
+                    &fixture.normalized_residual
+                } else {
+                    &fixture.residual
+                },
+                projection: if reuse_projection {
+                    &fixture.residual
+                } else {
+                    &fixture.projection
+                },
+            },
+            fixture.weights(),
+        )));
+        stream.submit_replay(&recorder.build()).wait();
+        assert_close(
+            &values(&fixture.output, 4096, Dtype::Bfloat16),
+            &written,
+            Dtype::Bfloat16,
+        );
+        assert_close(
+            &values(&fixture.hidden_state, 1024, Dtype::Bfloat16),
+            &expected.hidden_state,
+            Dtype::Bfloat16,
+        );
+    }
+}
+
+#[test]
 fn test_scratch_reuse_before_write() {
     let device = Device::system_default();
     let stream = Stream::new(&device);
@@ -351,7 +592,7 @@ struct Fixture {
     residual: Buffer,
     hidden_state: Buffer,
     normalized_residual: Buffer,
-    low_rank: Buffer,
+    projection: Buffer,
     module_output: Buffer,
     output: Buffer,
     norm: Buffer,
@@ -370,23 +611,21 @@ impl Fixture {
             low_rank_dim: rank,
             eps: 1.0e-6,
         };
+        let config = Config {
+            num_branches: branches as u32,
+            hidden_dim: hidden as u32,
+            low_rank_dim: rank as u32,
+            eps: core.eps,
+            dtype,
+        };
         Self {
             core,
             dtype,
-            compute: Compute::new(
-                device,
-                Config {
-                    num_branches: branches as u32,
-                    hidden_dim: hidden as u32,
-                    low_rank_dim: rank as u32,
-                    eps: core.eps,
-                    dtype,
-                },
-            ),
+            compute: Compute::new(device, config),
             residual: fixture_buffer(device, tokens * wide, 0.03125, 11, dtype),
             hidden_state: Buffer::new_zeroed_elements(device, tokens * hidden, dtype),
             normalized_residual: Buffer::new_zeroed_elements(device, tokens * wide, dtype),
-            low_rank: Buffer::new_zeroed_elements(device, tokens * rank, dtype),
+            projection: Buffer::new_zeroed(device, config.projection_scratch_bytes(tokens)),
             module_output: fixture_buffer(device, tokens * hidden, 0.015625, 23, dtype),
             output: Buffer::new_zeroed_elements(device, tokens * wide, dtype),
             norm: fixture_buffer(device, wide, 0.0078125, 7, dtype),
@@ -411,7 +650,7 @@ impl Fixture {
     fn scratch(&self) -> ReadScratch<'_> {
         ReadScratch {
             normalized_residual: &self.normalized_residual,
-            low_rank: &self.low_rank,
+            projection: &self.projection,
         }
     }
 

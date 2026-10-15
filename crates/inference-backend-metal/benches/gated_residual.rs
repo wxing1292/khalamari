@@ -22,16 +22,14 @@ const RANK: u32 = 320;
 fn bench_gated_residual(c: &mut Criterion) {
     let device = Device::system_default();
     let stream = Stream::new(&device);
-    let compute = gated_residual::Compute::new(
-        &device,
-        gated_residual::Config {
-            num_branches: BRANCHES,
-            hidden_dim: HIDDEN,
-            low_rank_dim: RANK,
-            eps: 1.0e-6,
-            dtype: Dtype::Bfloat16,
-        },
-    );
+    let config = gated_residual::Config {
+        num_branches: BRANCHES,
+        hidden_dim: HIDDEN,
+        low_rank_dim: RANK,
+        eps: 1.0e-6,
+        dtype: Dtype::Bfloat16,
+    };
+    let compute = gated_residual::Compute::new(&device, config);
     let wide = (BRANCHES * HIDDEN) as usize;
     let norm = fixture_buffer(&device, wide, 0.002, 11);
     let down = fixture_buffer(&device, wide * RANK as usize, 0.0005, 13);
@@ -51,7 +49,7 @@ fn bench_gated_residual(c: &mut Criterion) {
         let residual = fixture_buffer(&device, tokens as usize * wide, 0.025, 7);
         let hidden = Buffer::new_zeroed_elements(&device, tokens as usize * HIDDEN as usize, Dtype::Bfloat16);
         let normalized = Buffer::new_zeroed_elements(&device, tokens as usize * wide, Dtype::Bfloat16);
-        let low_rank = Buffer::new_zeroed_elements(&device, tokens as usize * RANK as usize, Dtype::Bfloat16);
+        let projection = Buffer::new_zeroed(&device, config.projection_scratch_bytes(tokens as usize));
         let output = Buffer::new_zeroed_elements(&device, tokens as usize * wide, Dtype::Bfloat16);
         let gate = Buffer::new_zeroed_elements(&device, tokens as usize * BRANCHES as usize, Dtype::Bfloat16);
         let read_buffers = gated_residual::ReadBuffers {
@@ -64,7 +62,7 @@ fn bench_gated_residual(c: &mut Criterion) {
         };
         let scratch = gated_residual::ReadScratch {
             normalized_residual: &normalized,
-            low_rank: &low_rank,
+            projection: &projection,
         };
         let write_buffers = gated_residual::WriteBuffers {
             residual: &residual,
@@ -101,6 +99,7 @@ fn bench_gated_residual(c: &mut Criterion) {
                 },
             );
         }
+        let mut unfused_commands = 0;
         for fuse in [false, true] {
             let mut recorder = ReplayRecorder::new(stream.create_replay_program());
             for index in 0..NUM_INVOCATIONS {
@@ -151,7 +150,11 @@ fn bench_gated_residual(c: &mut Criterion) {
                 ReplayOp::opaque(read)
             });
             let replay = recorder.build();
-            assert_eq!(replay.command_count(), NUM_INVOCATIONS * if fuse { 3 } else { 4 } + 3);
+            if fuse {
+                assert_eq!(replay.command_count() + NUM_INVOCATIONS, unfused_commands);
+            } else {
+                unfused_commands = replay.command_count();
+            }
             let operation = if fuse { "chain_fused" } else { "chain_unfused" };
             group.bench_function(
                 format!(

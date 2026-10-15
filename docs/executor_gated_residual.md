@@ -13,7 +13,9 @@ The two operations record through the executor `Recorder`. They do not submit wo
 | Executor core | `crates/inference-executor-core/src/gated_residual/` | Semantic geometry and CPU references. |
 | Metal executor | `crates/inference-executor-metal/src/gated_residual/` | `GatedResidual`, typed read/write inputs, and reusable scratch ownership. |
 | Metal backend | `crates/inference-backend-metal/src/components/gated_residual.rs` | Buffer validation, compiled kernels, and dispatch recording. |
-| Metal shaders | `crates/inference-backend-metal/src/components/metal/gated_residual.metal` | Normalization, gated read, and weighted residual write. |
+| Metal shaders | `crates/inference-backend-metal/src/components/metal/gated_residual.metal` | General geometry, normalization, and residual write. |
+| Small-row shaders | `crates/inference-backend-metal/src/components/metal/gated_residual_small.metal` | Fused norm/down and gated read for up to four recorded token rows. |
+| Matrix shaders | `crates/inference-backend-metal/src/components/metal/gated_residual_matrix.metal` | BF16 matrix projections with weight reuse across token rows. |
 
 The module is independent of model layer order, runtime scheduling, page allocation, and cache lifecycle.
 Qwen3.8 model integration remains in [future work](future_work.md).
@@ -104,10 +106,10 @@ WRITE: broadcast a across H and y across C
 ```
 
 Shapes describe mathematical values. `d`, `u`, `w`, `G`, `NG`, and `update` stay inside kernels.
-Views and broadcasts do not allocate buffers. `N [T,C,H]` and `z [T,r]` are read scratch.
-Both projections from `N` execute in one dispatch.
+Views and broadcasts do not allocate buffers. `N [T,C,H]` and projection intermediates are read scratch.
+The down projection and write coefficient projection share a dispatch.
 Only `a`, `R`, and the component output must remain live for write.
-Read releases `N` and `z` for subsequent scratch use.
+Read releases both scratch buffers for subsequent use.
 
 The reference sources call these operations `mix` and `combine`.
 The local API uses `read` and `write`.
@@ -116,7 +118,8 @@ and [SGLang implementation](https://github.com/sgl-project/sglang/blob/954458567
 
 ## Numeric contract
 
-The executor uses BF16 inputs, weights, outputs, and scratch.
+The executor uses BF16 inputs, weights, outputs, and normalized residual scratch.
+Small-row projection partials use F32 scratch. Matrix low-rank activations use BF16 scratch.
 The backend also supports F32 for component use and numerical verification.
 Normalization, dot products, and channel sums accumulate in F32.
 
@@ -142,37 +145,145 @@ Write can overwrite its original residual in place.
 Its output must not alias the gate or component output.
 Each invocation validates buffer lengths against its recorded capacity.
 
-Scratch contains `[max_tokens,C,H]` normalized residual and `[max_tokens,r]` low-rank activations.
+Scratch contains `[max_tokens,C,H]` normalized residual and one projection buffer.
+`Config::projection_scratch_bytes(max_tokens)` sizes that buffer for all recorded shapes up to the capacity.
+The buffer holds either BF16 low-rank activations or F32 channel partials and saved write gates.
+For `C=4`, `H=2560`, `r=320`, capacity one needs 5200 projection bytes; capacity four needs 20800 bytes.
 Both scratch buffers can be reused after read completes.
 The write gate must remain unchanged until the paired write completes.
 A final read-only mixer binds `write_gate: None` and requires no write weights or gate output.
-This selects a read-only down-projection kernel at record time.
+This selects a read-only projection variant at record time.
 
-`num_total_tokens` fixes the recorded grid and required buffer capacity.
+`num_total_tokens` fixes the recorded grid, kernel selection, and required buffer capacity.
 `num_active_tokens` is a `ReplayU32` submission parameter or fixed value in `1..=num_total_tokens`.
-Inactive token threadgroups return before buffer access or barriers.
-Read and write use one static topology. They have no token-count kernel crossover.
+Inactive token groups return before buffer access or barriers. Partial matrix tiles mask inactive rows.
 The containing replay owner keys its program by total capacity and other static composition facts.
+Selection uses token capacity and geometry. Request roles such as prefill and decode do not select kernels.
 
-Read records three commands: channel normalization, down projection with SiLU and optional write coefficients, and up projection with gated reduction.
-Write records one command: weighted residual addition.
+### Projection selection
 
-The backend recorder fuses an adjacent write and the next read's channel normalization.
-The fused command stores both the updated residual and the next normalized residual.
-It rounds the residual to its storage dtype before RMSNorm, as the separate commands do.
-The next read supplies its own norm weights and epsilon. Its projection rank can differ.
-Fusion requires equal channel count, hidden dimension, dtype, total capacity, and active binding.
-The write output must be the next read input.
-The next normalized scratch must not alias the write gate or component output.
-The next norm weights must not alias the write output.
-These checks prevent cross-threadgroup races when the separate operations reuse dead inputs.
-Incompatible operations remain separate. This follows the existing residual-add/RMSNorm recorder contract.
+BF16 matrix projections support `C=4`, `H%32=0`, and `r%8=0`.
+The small-row path also requires `H%256=0` and `r%16=0`.
+Its normalized channel and low-rank SMEM allocations must each fit 32 KiB.
+Its read-only down grid must have at least `H/256` groups to store all normalized stripes.
+The backend establishes these capabilities during initialization.
+F32 and other geometries use the general scalar projection path.
+
+| Recorded token capacity | Eligible path | Token rows per matrix tile | Read commands |
+| --- | --- | ---: | ---: |
+| `1..=4` | Small-row fusion | N/A | 2 |
+| `5..=16` | Matrix | 8 | 3 |
+| `17..=128` | Matrix | 16 | 3 |
+| `129..` | Matrix | 32 | 3 |
+
+If small-row fusion is ineligible, matrix projections can also serve `1..=4`.
+These defaults come from relative measurements on an M3 Max. They are workload selections, not model identifiers.
+Checkpoint weights retain their original row-major layout.
+
+For `T=64`, `C=4`, `H=2560`, and `r=320`, the projection paths use this data flow.
+Normalization remains visible because both paths consume the same `N`.
 
 ```text
-read_i                        component       write_i + read_(i+1)
----------------------------   ---------       --------------------------------
-norm -> down/SiLU + a -> read -> y -> [weighted add + next norm] -> down -> read
-          kernel 2          kernel 3          one fused kernel
+Both paths:
+  R [64,4,2560] BF16 + norm [4,2560]
+      -> RMSNorm over H -> N [64,10240] BF16 in GMEM
+
+General scalar path:
+  down grid [81,64], 128 threads / 4 SIMDgroups per group
+    group [g,t], SIMDgroup s owns output row 4*g+s
+    for k in 10240 columns:
+        load N[t,k] and weight[row,k] from GMEM
+        register dot -> SIMD sum -> SiLU or write gate
+    write z[t,:] [320] and a[t,:] [4] BF16
+    weight rows are read again for each token t
+
+  read grid [640,64], 128 threads / 4 SIMDgroups per group
+    group [g,t], SIMDgroup s owns hidden column h=4*g+s
+    register mixed = 0
+    for c in 4 channels:
+        GMEM z[t,:] [320] and up[c,h,:] [320] -> register dot
+        SIMD sum -> sigmoid * N[t,c,h] -> mixed
+    write x[t,h] = mixed/4
+
+Matrix path, token tile = 16 rows:
+  down grid [41,4], 256 threads / 8 SIMDgroups per group
+    group [g,m] owns N[16*m:16*m+16,:] and projection rows [8*g,8*g+8)
+    SIMDgroup s owns K [1280*s,1280*s+1280)
+    register accum [2,8,8] FP32 = 0 per SIMDgroup
+    for k in its K range, step 8:
+        GMEM weight [8,8] -> registers once
+        for t in 2 token fragments:
+            GMEM N [8,8] -> registers
+            BF16 MMA -> accum[t]                 // reuse the weight fragment
+    SMEM partial [8,2,8,8] FP32 -> sum over 8 SIMDgroups
+        -> SiLU / write gate -> z [64,320], a [64,4] BF16 in GMEM
+
+  read grid [80,4], 128 threads / 4 SIMDgroups per group
+    group [g,m] owns tokens [16*m,16*m+16), hidden columns [32*g,32*g+32)
+    SIMDgroup s owns 8 hidden columns across all 4 channels
+    register accum [2,4,8,8] FP32 = 0 per SIMDgroup
+    for k in 320 rank columns, step 8:
+        GMEM z [2,8,8] -> registers
+        for output fragment in 4 fragments:
+            GMEM up [8,8] -> registers once
+            for t in 2 token fragments:
+                BF16 MMA -> accum[t,output]       // reuse z and weight fragments
+    sigmoid * N -> SIMD channel sum -> x [64,2560] BF16 in GMEM
+```
+
+The matrix path loads each weight tile for 16 token rows instead of one row.
+The down kernel partitions the long reduction across eight SIMDgroups and merges their partials in SMEM.
+The read kernel keeps its partials in registers and does not stage weights in SMEM.
+
+Small-row fusion removes a dispatch and exposes channel-level parallel work.
+For `T=1` with the same geometry, it uses this data flow:
+
+```text
+down grid [41,4,1], 256 threads / 8 SIMDgroups per group
+  group [g,c,0]:
+    R[0,c,:] [2560] -> register values[10] per thread
+    RMSNorm -> SMEM N_c [2560] BF16
+    SIMDgroup s reads down/write_weight[8*g+s,c,:] [2560]
+    register dot -> SIMD sum -> partial[c,0,8*g+s] FP32 in GMEM
+    group g<10 stores a disjoint 256-column stripe of N[0,c,:]
+
+read grid [160,1], 256 threads / 8 SIMDgroups per group
+  group [g,0]:
+    GMEM partial[:,0,:] [4,320] -> sum channels -> SiLU -> SMEM z [320] BF16
+    for each of 16 hidden columns h owned by the group:
+        four channels, four rank slices per channel
+        SMEM z and GMEM up[c,h,:] -> register dot -> SIMD rank sum
+        sigmoid * N[0,c,h] -> SIMD channel sum -> x[0,h] BF16 in GMEM
+  group g=0 also merges four write-gate columns -> a[0,:] [4] BF16
+```
+
+Norm work is repeated across the down output groups. This avoids a separate norm launch.
+The read groups reuse their local `z` across 16 hidden columns.
+
+### Adjacent write/read fusion
+
+Write alone records one weighted residual-add command.
+The backend recorder can fuse an adjacent write with the next read.
+For scalar and matrix projections, one command stores the updated residual and normalizes it.
+For small-row projections, down computes the updated values before norm but does not store the residual.
+It saves the old write gate in projection scratch. The read command then stores the updated residual.
+This barrier between commands lets every down group finish reading the old residual and component output.
+Both variants preserve the BF16 storage boundary before RMSNorm.
+
+The next read supplies its own norm weights, epsilon, and projection rank.
+Fusion requires equal channel count, hidden dimension, dtype, total capacity, and active binding.
+The write output must be the next read input.
+The backend rejects aliases that would overwrite live write inputs or next-read weights before their last use.
+For small rows, this includes projection-scratch reuse and deferred residual writes.
+Incompatible operations remain separate. These checks run when replay is recorded.
+
+```text
+Scalar / matrix:
+  read_i -> component y -> [weighted add + next norm] -> next down -> next read
+
+Small rows:
+  read_i -> component y -> [next norm + down, save old gate]
+                              -> [next read + deferred weighted add]
 ```
 
 Each compatible boundary removes one dispatch and one consumer barrier.
@@ -194,7 +305,9 @@ They cover non-aligned dimensions, checkpoint geometry, in-place write, and inac
 Fusion tests compare fused and separate commands, then check the next read against the CPU reference.
 They cover different next-read rank and epsilon.
 Two separate-operation execution cases cover different active counts and reuse of the component-output buffer as normalized scratch.
-A separate test reuses normalized and low-rank scratch before the paired write.
+A separate test reuses both scratch buffers before the paired write.
+Tiled tests cover token capacities `1`, `4`, `5`, `16`, `17`, `128`, and `129`, plus partial active rows.
+They compare small-row and matrix paths with the CPU reference and check fused versus separate execution.
 Replay tests use total capacity four and active counts `[1,4,3,2]`.
 The executor test composes read, write, and a final read with shared scratch through the production recorder.
 
@@ -214,7 +327,8 @@ The composition benchmark uses the read output directly as the write input and e
 The `read_write` case measures 32 independent pairs and retains the pre-fusion comparison workload.
 The chain cases record 32 dependent pairs and one final read, with shared scratch and a shared gate buffer.
 The first pair reads an immutable residual, so each submission starts from the same input.
-The raw chain uses 131 commands. Recorder fusion reduces this to 99 commands.
+Small-row chains use 98 commands before fusion and 66 after fusion.
+Scalar and matrix chains use 131 commands before fusion and 99 after fusion.
 `chain_unfused` and `chain_fused` compare identical arithmetic and outputs.
 Their amortized times include one thirty-second of the final read.
 Follow the shared [verification and performance rules](executor_benchmarks.md).

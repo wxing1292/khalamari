@@ -1,7 +1,6 @@
 use inference_backend_metal::components::gated_residual;
 use inference_backend_metal::metal::Buffer;
 use inference_backend_metal::metal::Device;
-use inference_backend_metal::metal::Dtype;
 use inference_backend_metal::metal::ReplayU32;
 use inference_executor_core::backend::recorder::Recorder;
 use inference_executor_core::gated_residual::core::GatedResidualCore;
@@ -56,13 +55,12 @@ use crate::gated_residual::scratch::GatedResidualScratch;
 ///
 /// Shapes describe the mathematical values. `d`, `u`, `w`, `G`, `NG`, and
 /// `update` stay inside kernels. Views and broadcasts do not allocate buffers.
-/// `N [T,C,H]` and `z [T,r]` are scratch and can be reused after read.
+/// `N [T,C,H]` and projection intermediates are scratch and can be reused after read.
 /// `R [T,C,H]` and `a [T,C]` remain live until write. `a` does not depend on `y`.
 ///
-/// The backend computes down/SiLU and the write gate in one dispatch.
-/// It fuses a compatible write with the next read's RMSNorm in one dispatch:
-/// `R' [T,C,H]` is stored, then normalized into `N_next [T,C,H]` scratch.
-/// The fused kernel preserves the BF16 storage boundary for `R'`.
+/// The backend selects projections by recorded token capacity and geometry.
+/// It fuses a compatible write with the next read and preserves BF16 boundaries.
+/// Scratch holds normalized residual and kernel-local projection intermediates.
 /// Qwen3.8 uses GR normalization in place of separate attention/MLP input RMSNorms.
 pub struct GatedResidual {
     compute: gated_residual::Compute,
@@ -89,21 +87,8 @@ pub struct WriteInput<'a> {
 
 impl GatedResidual {
     pub fn new(device: &Device, core: GatedResidualCore) -> Self {
-        core.validate();
         Self {
-            compute: gated_residual::Compute::new(
-                device,
-                gated_residual::Config {
-                    num_branches: core.num_branches.try_into().expect("GR branch count must fit u32"),
-                    hidden_dim: core.hidden_dim.try_into().expect("GR hidden dimension must fit u32"),
-                    low_rank_dim: core
-                        .low_rank_dim
-                        .try_into()
-                        .expect("GR low-rank dimension must fit u32"),
-                    eps: core.eps,
-                    dtype: Dtype::Bfloat16,
-                },
-            ),
+            compute: gated_residual::Compute::new(device, super::config(core)),
         }
     }
 
