@@ -39,6 +39,10 @@ pub use store::TrieNodeKey;
 pub use store::TrieNodeState;
 pub use store::TrieNodeStore;
 
+mod eviction;
+pub use eviction::EvictionEntry;
+pub use eviction::EvictionPolicy;
+
 mod s3_fifo;
-pub use s3_fifo::Eviction;
 pub use s3_fifo::S3FIFOClient;
+pub use s3_fifo::S3FIFOEntry;

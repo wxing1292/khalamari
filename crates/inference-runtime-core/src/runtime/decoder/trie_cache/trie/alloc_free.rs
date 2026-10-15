@@ -9,12 +9,13 @@ use crate::runtime::Token;
 use crate::runtime::decoder::BlockAnnotation;
 use crate::runtime::decoder::KVBlockPlacement;
 use crate::runtime::decoder::StateBlockPlacement;
+use crate::runtime::decoder::trie_cache::EvictionEntry;
 use crate::runtime::decoder::trie_cache::TrieNode;
 use crate::runtime::decoder::trie_cache::TrieNodeKey;
 use crate::runtime::decoder::trie_cache::trie::RNG;
 use crate::runtime::decoder::trie_cache::trie::Trie;
 
-impl<const P: usize> Trie<P> {
+impl<const P: usize, E: EvictionEntry> Trie<P, E> {
     pub fn alloc_trie_node(
         self: &Arc<Self>,
         parent_node_key: Option<TrieNodeKey>,
@@ -37,11 +38,11 @@ impl<const P: usize> Trie<P> {
             kv_placement,
             state_placement,
         ));
-        let eviction = self.s3_fifo.new_eviction(trie_node_key);
+        let eviction_entry = self.eviction_policy.new_entry(trie_node_key);
         self.trie_nodes
             .get_mut(trie_node_key)
             .expect("alloc_trie_node: inserted trie node must exist")
-            .set_eviction(eviction);
+            .set_eviction_entry(eviction_entry);
         self.num_pinned_trie_nodes.fetch_add(1, Ordering::SeqCst);
         trie_node_key
     }

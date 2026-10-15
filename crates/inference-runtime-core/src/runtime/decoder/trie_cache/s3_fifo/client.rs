@@ -1,5 +1,6 @@
 use std::cmp::max;
 use std::cmp::min;
+use std::fmt::Debug;
 use std::hash::Hash;
 use std::sync::Arc;
 use std::thread::JoinHandle;
@@ -8,11 +9,11 @@ use ahash::RandomState as AHashRandomState;
 use crossbeam_channel::Receiver;
 use crossbeam_channel::Sender;
 use dashmap::DashMap;
-use dashmap::Entry as DashEntry;
 
 use crate::channel::Shutdown;
+use crate::runtime::decoder::trie_cache::EvictionPolicy;
 use crate::runtime::decoder::trie_cache::s3_fifo::control::Control;
-use crate::runtime::decoder::trie_cache::s3_fifo::eviction::Eviction;
+use crate::runtime::decoder::trie_cache::s3_fifo::entry::S3FIFOEntry;
 use crate::runtime::decoder::trie_cache::s3_fifo::server::S3FIFOServer;
 
 #[derive(Debug)]
@@ -21,7 +22,7 @@ where
     K: Copy + Eq + Hash + Send + Sync + 'static,
 {
     control_sender: Sender<Control<K>>,
-    evictions: Arc<DashMap<K, Arc<Eviction<K>>, AHashRandomState>>,
+    evictions: Arc<DashMap<K, Arc<S3FIFOEntry<K>>, AHashRandomState>>,
     worker: Option<JoinHandle<()>>,
     shutdown: Shutdown,
 }
@@ -49,63 +50,67 @@ where
         }
     }
 
-    pub fn new_eviction(&self, key: K) -> Arc<Eviction<K>> {
-        Arc::new(Eviction::new(key, self.control_sender.clone(), self.shutdown.clone()))
+    fn send(&self, control: Control<K>) {
+        if let Err(error) = self.control_sender.send(control) {
+            if self.shutdown.is_shutdown() {
+                return;
+            }
+            panic!("send: S3FIFO worker must be running: {error}");
+        }
+    }
+}
+
+impl<K> EvictionPolicy<K> for S3FIFOClient<K>
+where
+    K: Copy + Debug + Eq + Hash + Send + Sync + 'static,
+{
+    type Entry = S3FIFOEntry<K>;
+
+    fn new_entry(&self, key: K) -> Arc<Self::Entry> {
+        Arc::new(S3FIFOEntry::new(
+            key,
+            Arc::downgrade(&self.evictions),
+            self.control_sender.clone(),
+            self.shutdown.clone(),
+        ))
     }
 
-    pub fn insert(&self, eviction: Arc<Eviction<K>>) {
-        debug_assert!(
-            !self.shutdown.is_shutdown(),
-            "insert: S3FIFO client must not receive entries after shutdown"
-        );
-        debug_assert!(eviction.is_pinned(), "insert: entry must start pinned");
-        debug_assert_eq!(1, eviction.count(), "insert: entry must start with count == 1");
-        match self.evictions.entry(eviction.key()) {
-            DashEntry::Vacant(entry) => {
-                entry.insert(eviction);
-            },
-            DashEntry::Occupied(_) => panic!("insert: key must not already have an eviction entry"),
+    fn evict_candidate(&self) -> Option<K> {
+        let (reply_sender, reply_receiver) = crossbeam_channel::bounded(0);
+        self.send(Control::EvictCandidate { reply: reply_sender });
+        match reply_receiver.recv() {
+            Ok(candidate) => candidate,
+            Err(_) if self.shutdown.is_shutdown() => None,
+            Err(error) => panic!("evict_candidate: S3FIFO worker must reply: {error}"),
         }
     }
 
-    pub fn evict_candidate(&self) -> Option<K> {
-        let (reply_sender, reply_receiver) = crossbeam_channel::bounded(0);
-        self.send(Control::EvictCandidate { reply: reply_sender });
-        reply_receiver
-            .recv()
-            .expect("evict_candidate: S3FIFO worker must reply")
-    }
-
-    pub fn reject_candidate(&self, key: K) {
+    fn reject_candidate(&self, key: K) {
         let (reply_sender, reply_receiver) = crossbeam_channel::bounded(0);
         self.send(Control::RejectCandidate {
             key,
             reply: reply_sender,
         });
-        reply_receiver
-            .recv()
-            .expect("reject_candidate: S3FIFO worker must reply");
+        if let Err(error) = reply_receiver.recv() {
+            if self.shutdown.is_shutdown() {
+                return;
+            }
+            panic!("reject_candidate: S3FIFO worker must reply: {error}");
+        }
     }
 
-    pub fn accept_candidate(&self, key: K) {
+    fn accept_candidate(&self, key: K) {
         let (reply_sender, reply_receiver) = crossbeam_channel::bounded(0);
         self.send(Control::AcceptCandidate {
             key,
             reply: reply_sender,
         });
-        reply_receiver
-            .recv()
-            .expect("accept_candidate: S3FIFO worker must reply");
-    }
-
-    fn send(&self, control: Control<K>) {
-        debug_assert!(
-            !self.shutdown.is_shutdown(),
-            "send: S3FIFO client must not receive controls after shutdown"
-        );
-        self.control_sender
-            .send(control)
-            .expect("send: S3FIFO worker must be running");
+        if let Err(error) = reply_receiver.recv() {
+            if self.shutdown.is_shutdown() {
+                return;
+            }
+            panic!("accept_candidate: S3FIFO worker must reply: {error}");
+        }
     }
 }
 
@@ -123,7 +128,7 @@ where
 
 fn s3_fifo_event_loop<K>(
     control_receiver: Receiver<Control<K>>,
-    evictions: Arc<DashMap<K, Arc<Eviction<K>>, AHashRandomState>>,
+    evictions: Arc<DashMap<K, Arc<S3FIFOEntry<K>>, AHashRandomState>>,
     shutdown: Shutdown,
     s_cap: usize,
     m_cap: usize,

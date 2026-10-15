@@ -1,4 +1,3 @@
-use std::marker::PhantomData;
 use std::ops::Deref;
 use std::ops::DerefMut;
 use std::sync::Arc;
@@ -150,8 +149,6 @@ where
     _guard: MutexGuard<'a, DenseSlotMap<K::LocalKey, V>>,
     key: K,
     value: *const V,
-
-    _phantom_key: PhantomData<K>,
 }
 
 impl<'a, K, V> DataStoreValueRef<'a, K, V>
@@ -165,8 +162,6 @@ where
 
             key,
             value,
-
-            _phantom_key: PhantomData,
         }
     }
 
@@ -199,8 +194,6 @@ where
     _guard: MutexGuard<'a, DenseSlotMap<K::LocalKey, V>>,
     key: K,
     value: *mut V,
-
-    _phantom_key: PhantomData<K>,
 }
 
 impl<'a, K, V> DataStoreValueMut<'a, K, V>
@@ -214,8 +207,6 @@ where
 
             key,
             value,
-
-            _phantom_key: PhantomData,
         }
     }
 

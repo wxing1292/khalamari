@@ -6,14 +6,15 @@ use crossbeam_channel::Sender;
 use dashmap::DashMap;
 
 use super::control::Control;
-use super::eviction::Eviction;
+use super::entry::S3FIFOEntry;
 use super::queue::Queue;
 use super::server::S3FIFOServer;
 use crate::channel::Shutdown;
+use crate::runtime::decoder::trie_cache::EvictionEntry;
 
 type Key = u8;
 
-type Evictions = Arc<DashMap<Key, Arc<Eviction<Key>>, AHashRandomState>>;
+type Evictions = Arc<DashMap<Key, Arc<S3FIFOEntry<Key>>, AHashRandomState>>;
 
 struct ServerHarness {
     server: S3FIFOServer<Key>,
@@ -38,8 +39,13 @@ fn insert(
     evictions: &Evictions,
     sender: &Sender<Control<Key>>,
     key: Key,
-) -> Arc<Eviction<Key>> {
-    let eviction = Arc::new(Eviction::new(key, sender.clone(), Shutdown::new()));
+) -> Arc<S3FIFOEntry<Key>> {
+    let eviction = Arc::new(S3FIFOEntry::new(
+        key,
+        Arc::downgrade(evictions),
+        sender.clone(),
+        Shutdown::new(),
+    ));
     assert!(evictions.insert(key, eviction.clone()).is_none());
     server.re_evaluate(key);
     eviction
@@ -59,12 +65,12 @@ fn re_evaluate(server: &mut S3FIFOServer<Key>, receiver: &Receiver<Control<Key>>
     server.re_evaluate(key);
 }
 
-fn unpin(server: &mut S3FIFOServer<Key>, receiver: &Receiver<Control<Key>>, eviction: &Eviction<Key>) {
+fn unpin(server: &mut S3FIFOServer<Key>, receiver: &Receiver<Control<Key>>, eviction: &S3FIFOEntry<Key>) {
     eviction.unpin();
     re_evaluate(server, receiver, eviction.key());
 }
 
-fn promote_to_m(server: &mut S3FIFOServer<Key>, receiver: &Receiver<Control<Key>>, eviction: &Eviction<Key>) {
+fn promote_to_m(server: &mut S3FIFOServer<Key>, receiver: &Receiver<Control<Key>>, eviction: &S3FIFOEntry<Key>) {
     unpin(server, receiver, eviction);
     eviction.touch();
     assert_eq!(None, server.next_candidate(Queue::S));
@@ -100,11 +106,11 @@ fn test_insert_inc_dec_count_remove() {
         ..
     } = new_server();
     let eviction = insert(&mut server, &evictions, &sender, 1);
-    eviction.inc_count();
+    eviction.touch();
     eviction.touch();
     assert_eq!(3, eviction.count());
     assert!(eviction.dec_count());
-    eviction.untouch();
+    assert!(eviction.dec_count());
     assert_eq!(1, eviction.count());
 
     server.remove(1);

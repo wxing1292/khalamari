@@ -1,10 +1,11 @@
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
+use crate::runtime::decoder::trie_cache::EvictionEntry;
 use crate::runtime::decoder::trie_cache::TrieNodeKey;
 use crate::runtime::decoder::trie_cache::trie::Trie;
 
-impl<const P: usize> Trie<P> {
+impl<const P: usize, E: EvictionEntry> Trie<P, E> {
     pub fn try_external_pin_by_key(self: &Arc<Self>, trie_node_key: TrieNodeKey) -> Option<u32> {
         let mut trie_node = self.trie_nodes.get_mut(trie_node_key)?;
         let exteral_pin_count = trie_node.try_external_pin();
@@ -12,7 +13,7 @@ impl<const P: usize> Trie<P> {
             if exteral_pin_count == Some(1) && trie_node.child_pin_count() == 0 && trie_node.is_child_empty() {
                 Some(
                     trie_node
-                        .eviction()
+                        .eviction_entry()
                         .expect("try_external_pin_by_key: unpinned trie node must have an eviction entry")
                         .clone(),
                 )
@@ -39,7 +40,7 @@ impl<const P: usize> Trie<P> {
             if exteral_pin_count == Some(1) && trie_node.child_pin_count() == 0 && trie_node.is_child_empty() {
                 Some(
                     trie_node
-                        .eviction()
+                        .eviction_entry()
                         .expect("external_pin_by_key: unpinned trie node must have an eviction entry")
                         .clone(),
                 )
@@ -66,16 +67,16 @@ impl<const P: usize> Trie<P> {
             if external_pin_count == 0 && trie_node.child_pin_count() == 0 && trie_node.is_child_empty() {
                 (
                     trie_node
-                        .eviction()
+                        .eviction_entry()
                         .expect("external_unpin_by_key: trie node must have an eviction entry")
                         .clone(),
-                    trie_node.register_eviction(),
+                    trie_node.register_eviction_entry(),
                 )
             } else {
                 return external_pin_count;
             };
         if let Some(eviction) = register_eviction {
-            self.s3_fifo.insert(eviction);
+            eviction.register();
         }
         unpin_eviction.unpin();
         drop(trie_node);
@@ -90,7 +91,7 @@ impl<const P: usize> Trie<P> {
             if trie_node.external_pin_count() == 0 && child_pin_count == Some(1) && trie_node.is_child_empty() {
                 Some(
                     trie_node
-                        .eviction()
+                        .eviction_entry()
                         .expect("try_child_pin_by_key: unpinned trie node must have an eviction entry")
                         .clone(),
                 )
@@ -117,7 +118,7 @@ impl<const P: usize> Trie<P> {
             if trie_node.external_pin_count() == 0 && child_pin_count == Some(1) && trie_node.is_child_empty() {
                 Some(
                     trie_node
-                        .eviction()
+                        .eviction_entry()
                         .expect("child_pin_by_key: unpinned trie node must have an eviction entry")
                         .clone(),
                 )
@@ -144,16 +145,16 @@ impl<const P: usize> Trie<P> {
             if trie_node.external_pin_count() == 0 && child_pin_count == 0 && trie_node.is_child_empty() {
                 (
                     trie_node
-                        .eviction()
+                        .eviction_entry()
                         .expect("child_unpin_by_key: trie node must have an eviction entry")
                         .clone(),
-                    trie_node.register_eviction(),
+                    trie_node.register_eviction_entry(),
                 )
             } else {
                 return child_pin_count;
             };
         if let Some(eviction) = register_eviction {
-            self.s3_fifo.insert(eviction);
+            eviction.register();
         }
         unpin_eviction.unpin();
         drop(trie_node);

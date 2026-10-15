@@ -13,39 +13,46 @@ use crate::runtime::decoder::trie_cache::CommitMultiLaneMutableBlockResult;
 use crate::runtime::decoder::trie_cache::CommitMultiLaneSemiImmutableBlockResult;
 use crate::runtime::decoder::trie_cache::CommitSingleLaneMutableBlockResult;
 use crate::runtime::decoder::trie_cache::CommitSingleLaneSemiImmutableBlockResult;
+use crate::runtime::decoder::trie_cache::EvictionEntry;
 use crate::runtime::decoder::trie_cache::ImmutableBlock;
 use crate::runtime::decoder::trie_cache::MultiLaneBlockCache;
 use crate::runtime::decoder::trie_cache::MutableBlock;
 use crate::runtime::decoder::trie_cache::ReserveMultiLaneSemiImmutableBlockResult;
 use crate::runtime::decoder::trie_cache::ReserveSingleLaneSemiImmutableBlockResult;
+use crate::runtime::decoder::trie_cache::S3FIFOEntry;
 use crate::runtime::decoder::trie_cache::SemiImmutableBlock;
 use crate::runtime::decoder::trie_cache::SingleLaneBlockCache;
 use crate::runtime::decoder::trie_cache::SingleLaneTrieBlockCache;
 use crate::runtime::decoder::trie_cache::TrieNodeKey;
 
-pub struct MultiLaneTrieBlockCache<const P: usize, const L: usize, KVA, SA>
+pub struct MultiLaneTrieBlockCache<const P: usize, const L: usize, KVA, SA, E = S3FIFOEntry<TrieNodeKey>>
 where
     KVA: KVBlockAllocator,
     SA: StateBlockAllocator,
+    E: EvictionEntry,
 {
-    block_cache_vec: [Arc<SingleLaneTrieBlockCache<P, KVA, SA>>; L],
+    block_cache_vec: [Arc<SingleLaneTrieBlockCache<P, KVA, SA, E>>; L],
 }
 
-impl<const P: usize, const L: usize, KVA, SA> MultiLaneTrieBlockCache<P, L, KVA, SA>
+impl<const P: usize, const L: usize, KVA, SA, E> MultiLaneTrieBlockCache<P, L, KVA, SA, E>
 where
     KVA: KVBlockAllocator,
     SA: StateBlockAllocator,
+    E: EvictionEntry,
 {
-    pub fn new(block_cache_vec: [Arc<SingleLaneTrieBlockCache<P, KVA, SA>>; L]) -> Self {
+    pub fn new(block_cache_vec: [Arc<SingleLaneTrieBlockCache<P, KVA, SA, E>>; L]) -> Self {
         Self { block_cache_vec }
     }
 }
 
-impl<const P: usize, const L: usize, KVA, SA> MultiLaneBlockCache<P, L> for MultiLaneTrieBlockCache<P, L, KVA, SA>
+impl<const P: usize, const L: usize, KVA, SA, E> MultiLaneBlockCache<P, L> for MultiLaneTrieBlockCache<P, L, KVA, SA, E>
 where
     KVA: KVBlockAllocator,
     SA: StateBlockAllocator,
+    E: EvictionEntry,
 {
+    type Entry = E;
+
     fn try_evict(&self) -> bool {
         self.block_cache_vec
             .iter()
@@ -57,7 +64,13 @@ where
         let mut block_vec: [MaybeUninit<MutableBlock<N>>; L] = new_uninit_array();
 
         for (lane, cache) in self.block_cache_vec.iter().enumerate() {
-            match cache.alloc_mutable_block::<N>() {
+            let result = loop {
+                match cache.alloc_mutable_block::<N>() {
+                    AllocateSingleLaneMutableBlockResult::ResourceLimitExceeded if self.try_evict() => {},
+                    result => break result,
+                }
+            };
+            match result {
                 AllocateSingleLaneMutableBlockResult::Mutable { block } => {
                     block_vec[lane].write(block);
                 },
@@ -86,8 +99,8 @@ where
         &self,
         parent_trie_node_key_vec: [Option<TrieNodeKey>; L],
         block_vec: [MutableBlock<N>; L],
-    ) -> CommitMultiLaneMutableBlockResult<P, L> {
-        let mut output_block_vec: [MaybeUninit<ImmutableBlock<P>>; L] = new_uninit_array();
+    ) -> CommitMultiLaneMutableBlockResult<P, L, E> {
+        let mut output_block_vec: [MaybeUninit<ImmutableBlock<P, E>>; L] = new_uninit_array();
         let mut collision = false;
 
         for (lane, (parent_trie_node_key, (block, cache))) in parent_trie_node_key_vec
@@ -121,10 +134,10 @@ where
     fn reserve_semi_immutable_block<const N: usize>(
         &self,
         input_block_metadata_vec: [BlockMetadata<N>; L],
-    ) -> ReserveMultiLaneSemiImmutableBlockResult<N, P, L> {
+    ) -> ReserveMultiLaneSemiImmutableBlockResult<N, P, L, E> {
         let mut output_block_metadata_vec: Vec<(usize, BlockMetadata<N>)> = Vec::with_capacity(L);
         let mut waits: Vec<(usize, EventListener)> = Vec::with_capacity(L);
-        let mut immutable_blocks: Vec<(usize, BlockMetadata<N>, ImmutableBlock<P>)> = Vec::with_capacity(L);
+        let mut immutable_blocks: Vec<(usize, BlockMetadata<N>, ImmutableBlock<P, E>)> = Vec::with_capacity(L);
         let mut semi_immutable_blocks: Vec<(usize, BlockMetadata<N>, SemiImmutableBlock<N>)> = Vec::with_capacity(L);
 
         let mut iter = input_block_metadata_vec
@@ -132,7 +145,13 @@ where
             .zip(self.block_cache_vec.iter())
             .enumerate();
         for (lane, (block_metadata, cache)) in iter.by_ref() {
-            match cache.reserve_semi_immutable_block(block_metadata.clone()) {
+            let result = loop {
+                match cache.reserve_semi_immutable_block(block_metadata.clone()) {
+                    ReserveSingleLaneSemiImmutableBlockResult::ResourceLimitExceeded if self.try_evict() => {},
+                    result => break result,
+                }
+            };
+            match result {
                 ReserveSingleLaneSemiImmutableBlockResult::SemiImmutable { block } => {
                     semi_immutable_blocks.push((lane, block_metadata, block));
                 },
@@ -187,7 +206,7 @@ where
             }
         } else if immutable_blocks.len() == L {
             debug_assert!(immutable_blocks.windows(2).all(|w| w[0].0 < w[1].0));
-            let block_vec: [ImmutableBlock<P>; L] = immutable_blocks
+            let block_vec: [ImmutableBlock<P, E>; L] = immutable_blocks
                 .into_iter()
                 .map(|(_, _, block)| block)
                 .collect::<Vec<_>>()
@@ -243,8 +262,8 @@ where
     fn commit_semi_immutable_block<const N: usize>(
         &self,
         block_vec: [SemiImmutableBlock<N>; L],
-    ) -> CommitMultiLaneSemiImmutableBlockResult<P, L> {
-        let mut output_block_vec: [MaybeUninit<ImmutableBlock<P>>; L] = new_uninit_array();
+    ) -> CommitMultiLaneSemiImmutableBlockResult<P, L, E> {
+        let mut output_block_vec: [MaybeUninit<ImmutableBlock<P, E>>; L] = new_uninit_array();
         let mut collision = false;
 
         for (lane, (block, cache)) in block_vec.into_iter().zip(self.block_cache_vec.iter()).enumerate() {

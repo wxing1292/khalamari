@@ -2,23 +2,27 @@ use std::sync::Arc;
 
 use crate::runtime::decoder::trie_cache::DataStoreValueMut;
 use crate::runtime::decoder::trie_cache::DataStoreValueRef;
+use crate::runtime::decoder::trie_cache::EvictionEntry;
 use crate::runtime::decoder::trie_cache::TrieEdge;
 use crate::runtime::decoder::trie_cache::TrieNode;
 use crate::runtime::decoder::trie_cache::TrieNodeKey;
 use crate::runtime::decoder::trie_cache::TryEvictByKeyResult;
 use crate::runtime::decoder::trie_cache::trie::Trie;
 
-impl<const P: usize> Trie<P> {
+impl<const P: usize, E: EvictionEntry> Trie<P, E> {
     pub fn peek_ref_by_key(
         self: &Arc<Self>,
         trie_node_key: TrieNodeKey,
-    ) -> DataStoreValueRef<'_, TrieNodeKey, TrieNode> {
+    ) -> DataStoreValueRef<'_, TrieNodeKey, TrieNode<E>> {
         self.trie_nodes
             .get_ref(trie_node_key)
             .expect("peek_ref_by_key: trie node must exist")
     }
 
-    pub fn peek_by_key(self: &Arc<Self>, trie_node_key: TrieNodeKey) -> DataStoreValueMut<'_, TrieNodeKey, TrieNode> {
+    pub fn peek_by_key(
+        self: &Arc<Self>,
+        trie_node_key: TrieNodeKey,
+    ) -> DataStoreValueMut<'_, TrieNodeKey, TrieNode<E>> {
         self.trie_nodes
             .get_mut(trie_node_key)
             .expect("peek_by_key: trie node must exist")

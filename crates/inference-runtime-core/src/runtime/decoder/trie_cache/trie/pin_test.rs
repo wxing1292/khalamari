@@ -30,14 +30,14 @@ fn test_external_pin_unpin_by_key() {
         1,
     );
     assert_eq!(1, trie.num_pinned_trie_node());
-    assert!(trie.s3_fifo().evict_candidate().is_none());
+    assert!(trie.eviction_policy().evict_candidate().is_none());
 
     assert_eq!(Some(2), trie.external_pin_by_key(trie_node_key));
     assert_eq!(1, trie.external_unpin_by_key(trie_node_key));
 
     assert_eq!(0, trie.external_unpin_by_key(trie_node_key));
     assert_eq!(0, trie.num_pinned_trie_node());
-    assert_eq!(trie_node_key, trie.s3_fifo().evict_candidate().unwrap());
+    assert_eq!(trie_node_key, trie.eviction_policy().evict_candidate().unwrap());
 
     assert_eq!(TryEvictByKeyResult::Success, trie.try_evict_by_key(trie_node_key));
     assert!(trie.trie_nodes.get_mut(trie_node_key).is_none());
@@ -74,14 +74,14 @@ fn test_child_pin_unpin_by_key() {
     trie.child_pin_by_key(trie_node_key);
     trie.external_unpin_by_key(trie_node_key);
     assert_eq!(1, trie.num_pinned_trie_node());
-    assert!(trie.s3_fifo().evict_candidate().is_none());
+    assert!(trie.eviction_policy().evict_candidate().is_none());
 
     assert_eq!(Some(2), trie.child_pin_by_key(trie_node_key));
     assert_eq!(1, trie.child_unpin_by_key(trie_node_key));
 
     assert_eq!(0, trie.child_unpin_by_key(trie_node_key));
     assert_eq!(0, trie.num_pinned_trie_node());
-    assert_eq!(trie_node_key, trie.s3_fifo().evict_candidate().unwrap());
+    assert_eq!(trie_node_key, trie.eviction_policy().evict_candidate().unwrap());
 
     assert_eq!(TryEvictByKeyResult::Success, trie.try_evict_by_key(trie_node_key));
     assert!(trie.trie_nodes.get_mut(trie_node_key).is_none());

@@ -20,11 +20,14 @@ use crate::runtime::decoder::trie_cache::AllocateSingleLaneMutableBlockResult;
 use crate::runtime::decoder::trie_cache::BlockMetadata;
 use crate::runtime::decoder::trie_cache::CommitSingleLaneMutableBlockResult;
 use crate::runtime::decoder::trie_cache::CommitSingleLaneSemiImmutableBlockResult;
+use crate::runtime::decoder::trie_cache::EvictionEntry;
+use crate::runtime::decoder::trie_cache::EvictionPolicy;
 use crate::runtime::decoder::trie_cache::ImmutableBlock;
 use crate::runtime::decoder::trie_cache::InsertNodeResult;
 use crate::runtime::decoder::trie_cache::MutableBlock;
 use crate::runtime::decoder::trie_cache::ReserveSingleLaneSemiImmutableBlockResult;
 use crate::runtime::decoder::trie_cache::S3FIFOClient;
+use crate::runtime::decoder::trie_cache::S3FIFOEntry;
 use crate::runtime::decoder::trie_cache::SemiImmutableBlock;
 use crate::runtime::decoder::trie_cache::SingleLaneBlockCache;
 use crate::runtime::decoder::trie_cache::Trie;
@@ -35,15 +38,16 @@ use crate::runtime::decoder::trie_cache::TryEvictByKeyResult;
 use crate::runtime::decoder::trie_cache::cache::Reservation;
 use crate::runtime::decoder::trie_cache::cache::ReservationKey;
 
-pub struct SingleLaneTrieBlockCache<const P: usize, KVA, SA>
+pub struct SingleLaneTrieBlockCache<const P: usize, KVA, SA, E = S3FIFOEntry<TrieNodeKey>>
 where
     KVA: KVBlockAllocator,
     SA: StateBlockAllocator,
+    E: EvictionEntry,
 {
     kv_allocator: KVA,
     state_allocator: SA,
-    trie: Arc<Trie<P>>,
-    s3_fifo: Arc<S3FIFOClient<TrieNodeKey>>,
+    trie: Arc<Trie<P, E>>,
+    eviction_policy: Arc<dyn EvictionPolicy<TrieNodeKey, Entry = E>>,
     reservations: DashMap<ReservationKey, Reservation, AHashRandomState>,
 
     num_mutable_blocks: AtomicUsize,
@@ -56,14 +60,32 @@ where
     SA: StateBlockAllocator,
 {
     pub fn new(kv_allocator: KVA, state_allocator: SA, capacity: usize, shutdown: Shutdown) -> Self {
-        let s3_fifo = Arc::new(S3FIFOClient::new(capacity, shutdown));
-        let trie = Arc::new(Trie::new(s3_fifo.clone()));
+        Self::with_eviction_policy(
+            kv_allocator,
+            state_allocator,
+            Arc::new(S3FIFOClient::new(capacity, shutdown)),
+        )
+    }
+}
+
+impl<const P: usize, KVA, SA, E> SingleLaneTrieBlockCache<P, KVA, SA, E>
+where
+    KVA: KVBlockAllocator,
+    SA: StateBlockAllocator,
+    E: EvictionEntry,
+{
+    pub fn with_eviction_policy(
+        kv_allocator: KVA,
+        state_allocator: SA,
+        eviction_policy: Arc<dyn EvictionPolicy<TrieNodeKey, Entry = E>>,
+    ) -> Self {
+        let trie = Arc::new(Trie::new(eviction_policy.clone()));
 
         Self {
             kv_allocator,
             state_allocator,
             trie,
-            s3_fifo,
+            eviction_policy,
             reservations: DashMap::with_hasher(AHashRandomState::new()),
             num_mutable_blocks: AtomicUsize::new(0),
             num_semi_immutable_blocks: AtomicUsize::new(0),
@@ -73,19 +95,19 @@ where
     fn evict_one_immutable_block(&self) -> bool {
         let budget = self.trie.node_count().max(1);
         for _ in 0..budget {
-            let Some(trie_node_key) = self.s3_fifo.evict_candidate() else {
+            let Some(trie_node_key) = self.eviction_policy.evict_candidate() else {
                 return false;
             };
             match self.trie.try_evict_by_key(trie_node_key) {
                 TryEvictByKeyResult::Success => {
-                    self.s3_fifo.accept_candidate(trie_node_key);
+                    self.eviction_policy.accept_candidate(trie_node_key);
                     return true;
                 },
                 TryEvictByKeyResult::Missing => {
                     panic!("evict_one_immutable_block: candidate trie node must exist");
                 },
                 TryEvictByKeyResult::Rejected => {
-                    self.s3_fifo.reject_candidate(trie_node_key);
+                    self.eviction_policy.reject_candidate(trie_node_key);
                 },
             }
         }
@@ -96,7 +118,7 @@ where
         &self,
         parent_trie_node_key: Option<TrieNodeKey>,
         trie_edge: &TrieEdge,
-    ) -> Option<ImmutableBlock<P>> {
+    ) -> Option<ImmutableBlock<P, E>> {
         let trie_node_key = self.trie.peek_by_parent(parent_trie_node_key, trie_edge)?.key();
         // TODO optimize perf here, should not release & acquire lock again
         if self.trie.try_external_pin_by_key(trie_node_key).is_none() {
@@ -106,7 +128,7 @@ where
         }
         self.trie
             .peek_ref_by_key(trie_node_key)
-            .eviction()
+            .eviction_entry()
             .expect("try_get_immutable_block: unpinned trie node must have an eviction entry")
             .touch();
         Some(ImmutableBlock::new(
@@ -135,11 +157,14 @@ where
     }
 }
 
-impl<const P: usize, KVA, SA> SingleLaneBlockCache<P> for SingleLaneTrieBlockCache<P, KVA, SA>
+impl<const P: usize, KVA, SA, E> SingleLaneBlockCache<P> for SingleLaneTrieBlockCache<P, KVA, SA, E>
 where
     KVA: KVBlockAllocator,
     SA: StateBlockAllocator,
+    E: EvictionEntry,
 {
+    type Entry = E;
+
     fn try_evict(&self) -> bool {
         self.evict_one_immutable_block()
     }
@@ -182,7 +207,7 @@ where
         &self,
         parent_trie_node_key: Option<TrieNodeKey>,
         block: MutableBlock<N>,
-    ) -> CommitSingleLaneMutableBlockResult<P> {
+    ) -> CommitSingleLaneMutableBlockResult<P, E> {
         let (annotations, tokens, scheduled_token_index, ready_token_index, kv_placement, state_placement) =
             block.into_inner();
         self.num_mutable_blocks.fetch_sub(1, Ordering::SeqCst);
@@ -222,7 +247,7 @@ where
                 );
                 self.trie
                     .peek_ref_by_key(collision_trie_node_key)
-                    .eviction()
+                    .eviction_entry()
                     .expect("commit_mutable_block: collision trie node must have an eviction entry")
                     .touch();
                 self.trie.free_trie_node(trie_node_key, 1);
@@ -240,7 +265,7 @@ where
     fn reserve_semi_immutable_block<const N: usize>(
         &self,
         block_metadata: BlockMetadata<N>,
-    ) -> ReserveSingleLaneSemiImmutableBlockResult<N, P> {
+    ) -> ReserveSingleLaneSemiImmutableBlockResult<N, P, E> {
         let (parent_trie_node_key, annotations, trie_node_tokens) = block_metadata.into_inner();
         let trie_edge = TrieEdge::new(annotations, trie_node_tokens);
         if let Some(block) = self.try_get_immutable_block(parent_trie_node_key, &trie_edge) {
@@ -318,7 +343,7 @@ where
     fn commit_semi_immutable_block<const N: usize>(
         &self,
         block: SemiImmutableBlock<N>,
-    ) -> CommitSingleLaneSemiImmutableBlockResult<P> {
+    ) -> CommitSingleLaneSemiImmutableBlockResult<P, E> {
         let (
             parent_trie_node_key,
             annotations,
@@ -364,7 +389,7 @@ where
                 );
                 self.trie
                     .peek_ref_by_key(collision_trie_node_key)
-                    .eviction()
+                    .eviction_entry()
                     .expect("commit_semi_immutable_block: collision trie node must have an eviction entry")
                     .touch();
                 self.trie.free_trie_node(trie_node_key, 1);

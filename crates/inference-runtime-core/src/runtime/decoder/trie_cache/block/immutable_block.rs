@@ -3,20 +3,21 @@ use std::sync::Arc;
 use crate::runtime::Token;
 use crate::runtime::decoder::BlockAnnotation;
 use crate::runtime::decoder::trie_cache::DataStoreValueRef;
+use crate::runtime::decoder::trie_cache::EvictionEntry;
 use crate::runtime::decoder::trie_cache::Trie;
 use crate::runtime::decoder::trie_cache::TrieNode;
 use crate::runtime::decoder::trie_cache::TrieNodeKey;
 use crate::runtime::decoder::trie_cache::block::DecoderBlock;
 
 #[derive(Debug)]
-pub struct ImmutableBlock<const P: usize> {
-    trie: Arc<Trie<P>>,
+pub struct ImmutableBlock<const P: usize, E: EvictionEntry> {
+    trie: Arc<Trie<P, E>>,
     trie_node_key: TrieNodeKey,
     tokens: Arc<[Token]>,
 }
 
-impl<const P: usize> ImmutableBlock<P> {
-    pub fn new(trie: Arc<Trie<P>>, trie_node_key: TrieNodeKey, tokens: Arc<[Token]>) -> Self {
+impl<const P: usize, E: EvictionEntry> ImmutableBlock<P, E> {
+    pub fn new(trie: Arc<Trie<P, E>>, trie_node_key: TrieNodeKey, tokens: Arc<[Token]>) -> Self {
         Self {
             trie,
             trie_node_key,
@@ -28,7 +29,7 @@ impl<const P: usize> ImmutableBlock<P> {
         self.trie_node_key
     }
 
-    pub fn trie_node_ref(&self) -> DataStoreValueRef<'_, TrieNodeKey, TrieNode> {
+    pub fn trie_node_ref(&self) -> DataStoreValueRef<'_, TrieNodeKey, TrieNode<E>> {
         self.trie.peek_ref_by_key(self.trie_node_key)
     }
 
@@ -41,13 +42,13 @@ impl<const P: usize> ImmutableBlock<P> {
     }
 }
 
-impl<const P: usize> Drop for ImmutableBlock<P> {
+impl<const P: usize, E: EvictionEntry> Drop for ImmutableBlock<P, E> {
     fn drop(&mut self) {
         self.trie.external_unpin_by_key(self.trie_node_key);
     }
 }
 
-impl<const P: usize> DecoderBlock for ImmutableBlock<P> {
+impl<const P: usize, E: EvictionEntry> DecoderBlock for ImmutableBlock<P, E> {
     fn cached_tokens(&self) -> &[Token] {
         self.tokens.as_ref()
     }

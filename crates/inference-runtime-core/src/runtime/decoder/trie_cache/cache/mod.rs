@@ -21,3 +21,6 @@ pub use multi_lane_impl::MultiLaneTrieBlockCache;
 mod reservation;
 pub use reservation::Reservation;
 pub use reservation::ReservationKey;
+
+#[cfg(test)]
+mod eviction_policy_test;

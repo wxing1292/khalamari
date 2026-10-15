@@ -170,9 +170,9 @@ fn test_insert_peek_replace_peek_remove_peek_by_parent_w_parent() {
     );
     assert_eq!(0, trie.external_unpin_by_key(parent_trie_node_key));
     assert_eq!(0, trie.num_pinned_trie_node());
-    let evict_candidate = trie.s3_fifo().evict_candidate().unwrap();
+    let evict_candidate = trie.eviction_policy().evict_candidate().unwrap();
     assert_eq!(parent_trie_node_key, evict_candidate);
-    trie.s3_fifo().reject_candidate(evict_candidate);
+    trie.eviction_policy().reject_candidate(evict_candidate);
 
     let edge = new_edge(2, &[2, 3]);
     let from_trie_node_key = trie.alloc_trie_node(
@@ -185,7 +185,7 @@ fn test_insert_peek_replace_peek_remove_peek_by_parent_w_parent() {
     );
     trie.insert_by_parent(Some(parent_trie_node_key), &edge, from_trie_node_key);
     assert_eq!(2, trie.num_pinned_trie_node());
-    assert!(trie.s3_fifo().evict_candidate().is_none());
+    assert!(trie.eviction_policy().evict_candidate().is_none());
 
     let trie_node = trie.peek_by_parent(Some(parent_trie_node_key), &edge).unwrap();
     assert_eq!(from_trie_node_key, trie_node.key());
@@ -207,9 +207,9 @@ fn test_insert_peek_replace_peek_remove_peek_by_parent_w_parent() {
 
     trie.remove_by_parent(Some(parent_trie_node_key), &edge, to_trie_node_key);
     assert_eq!(2, trie.num_pinned_trie_node());
-    let evict_candidate = trie.s3_fifo().evict_candidate().unwrap();
+    let evict_candidate = trie.eviction_policy().evict_candidate().unwrap();
     assert_eq!(parent_trie_node_key, evict_candidate);
-    trie.s3_fifo().reject_candidate(evict_candidate);
+    trie.eviction_policy().reject_candidate(evict_candidate);
 
     assert!(trie.peek_by_parent(Some(parent_trie_node_key), &edge).is_none());
     let parent_trie_node = trie.peek_by_key(parent_trie_node_key);

@@ -383,9 +383,9 @@ request's `TrieDecoderBlocks`:
                     │ unpinned leaf candidates              │
                     v                                       │
 ┌──────────────────────────────────────┐                    │
-│ S3FIFO                               │                    │
-│ S queue + M queue + ghost history    │                    │
-│ select/reject/commit eviction        │                    │
+│ EvictionPolicy (default: S3FIFO)      │                    │
+│ select and reserve candidates        │                    │
+│ accept/reject after trie decision    │                    │
 └───────────────────┬──────────────────┘                    │
                     │ successful eviction                   │
                     └──────────────────────┬────────────────┘
@@ -412,7 +412,27 @@ Thus, Qwen3.5 uses `L = num_spec_tokens + 1`.
 Mutable and semi-immutable blocks are request-local lifecycle objects. Trie nodes represent immutable identity. Pin
 counts protect reusable nodes from eviction. S3FIFO tracks eligible unpinned leaves.
 
+The cache and trie use `EvictionPolicy` for candidate selection and resolution.
+The policy declares its concrete handle as `EvictionPolicy::Entry: EvictionEntry`.
+`EvictionPolicy::new_entry` creates an unregistered pinned entry.
+Each node holds `Arc<E>` for that entry type and uses static dispatch for registration, eligibility transitions, and reuse notifications.
+The policy object remains `Arc<dyn EvictionPolicy<TrieNodeKey, Entry = E>>`.
+The trie owns pin counts, checks eviction safety, and releases nodes and pages.
+
+S3FIFO implements the policy with S and M queues.
+Its associated entry type is `S3FIFOEntry`.
+`SingleLaneTrieBlockCache::new` selects S3FIFO.
+`SingleLaneTrieBlockCache::with_eviction_policy` accepts another policy without changing the trie or page allocators.
+The cache traits pass the associated entry type to `TrieDecoderBlocks` through its existing cache parameter.
+
+[`s3_fifo/entry.rs`](../crates/inference-runtime-core/src/runtime/decoder/trie_cache/s3_fifo/entry.rs) owns the concrete `S3FIFOEntry` notification handle.
+[`s3_fifo/queue_entry.rs`](../crates/inference-runtime-core/src/runtime/decoder/trie_cache/s3_fifo/queue_entry.rs) owns the worker's queue links and candidate state.
+
 The trie stores logical identity and ownership links. Physical allocators own page IDs and backing storage.
+
+All cache lanes allocate page IDs from one shared allocator.
+If a per-lane allocation or reservation exhausts the pool, `MultiLaneTrieBlockCache` tries eviction across all lanes and retries the operation.
+It reports `ResourceLimitExceeded` only when the operation fails and no lane can evict a block.
 
 ## Page and cache model
 

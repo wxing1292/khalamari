@@ -7,19 +7,19 @@ use dashmap::DashMap;
 use intrusive_collections::LinkedList;
 
 use crate::channel::Shutdown;
-use crate::runtime::decoder::trie_cache::s3_fifo::entry::Entry;
-use crate::runtime::decoder::trie_cache::s3_fifo::entry::EntryLink;
-use crate::runtime::decoder::trie_cache::s3_fifo::eviction::Eviction;
+use crate::runtime::decoder::trie_cache::s3_fifo::entry::S3FIFOEntry;
 use crate::runtime::decoder::trie_cache::s3_fifo::queue::Queue;
+use crate::runtime::decoder::trie_cache::s3_fifo::queue_entry::QueueEntry;
+use crate::runtime::decoder::trie_cache::s3_fifo::queue_entry::QueueEntryLink;
 
 pub struct S3FIFOServer<K>
 where
     K: Copy + Eq + Hash + Send + Sync + 'static,
 {
-    entries: AHashMap<K, Arc<Entry<K>>>,
-    evictions: Arc<DashMap<K, Arc<Eviction<K>>, AHashRandomState>>,
-    small: LinkedList<EntryLink<K>>,
-    main: LinkedList<EntryLink<K>>,
+    entries: AHashMap<K, Arc<QueueEntry<K>>>,
+    evictions: Arc<DashMap<K, Arc<S3FIFOEntry<K>>, AHashRandomState>>,
+    small: LinkedList<QueueEntryLink<K>>,
+    main: LinkedList<QueueEntryLink<K>>,
     num_small_entries: usize,
     num_main_entries: usize,
     shutdown: Shutdown,
@@ -29,12 +29,12 @@ impl<K> S3FIFOServer<K>
 where
     K: Copy + Eq + Hash + Send + Sync + 'static,
 {
-    pub fn new(evictions: Arc<DashMap<K, Arc<Eviction<K>>, AHashRandomState>>, shutdown: Shutdown) -> Self {
+    pub fn new(evictions: Arc<DashMap<K, Arc<S3FIFOEntry<K>>, AHashRandomState>>, shutdown: Shutdown) -> Self {
         Self {
             entries: AHashMap::with_hasher(AHashRandomState::new()),
             evictions,
-            small: LinkedList::new(EntryLink::new()),
-            main: LinkedList::new(EntryLink::new()),
+            small: LinkedList::new(QueueEntryLink::new()),
+            main: LinkedList::new(QueueEntryLink::new()),
             num_small_entries: 0,
             num_main_entries: 0,
             shutdown,
@@ -45,17 +45,17 @@ where
         &self.shutdown
     }
 
-    pub fn entry(&self, key: K) -> Option<Arc<Entry<K>>> {
+    pub fn entry(&self, key: K) -> Option<Arc<QueueEntry<K>>> {
         self.entries.get(&key).cloned()
     }
 
-    fn ensure_entry(&mut self, key: K) -> Option<Arc<Entry<K>>> {
+    fn ensure_entry(&mut self, key: K) -> Option<Arc<QueueEntry<K>>> {
         if let Some(entry) = self.entry(key) {
             return Some(entry);
         }
         let eviction = self.evictions.get(&key)?.clone();
-        let entry = Arc::new(Entry {
-            eviction,
+        let entry = Arc::new(QueueEntry {
+            eviction_entry: eviction,
             queue_link: intrusive_collections::LinkedListLink::new(),
             queue: std::cell::Cell::new(Queue::S),
             is_candidate: std::cell::Cell::new(false),
@@ -68,7 +68,7 @@ where
         Some(entry)
     }
 
-    pub fn list_mut(&mut self, queue: Queue) -> &mut LinkedList<EntryLink<K>> {
+    pub fn list_mut(&mut self, queue: Queue) -> &mut LinkedList<QueueEntryLink<K>> {
         match queue {
             Queue::S => &mut self.small,
             Queue::M => &mut self.main,
@@ -98,7 +98,7 @@ where
         *num_entries -= 1;
     }
 
-    pub fn attach(&mut self, entry: Arc<Entry<K>>) {
+    pub fn attach(&mut self, entry: Arc<QueueEntry<K>>) {
         assert!(
             !entry.queue_link.is_linked(),
             "attach: entry must be detached before queue insertion"
@@ -112,7 +112,7 @@ where
         self.increment_num_entries(queue);
     }
 
-    pub fn detach(&mut self, entry: &Arc<Entry<K>>) {
+    pub fn detach(&mut self, entry: &Arc<QueueEntry<K>>) {
         assert!(entry.queue_link.is_linked(), "detach: entry must be attached");
         let queue = entry.queue.get();
         let removed = unsafe {
@@ -147,7 +147,7 @@ where
         if entry.is_candidate.get() {
             return;
         }
-        match (entry.eviction.is_pinned(), entry.queue_link.is_linked()) {
+        match (entry.eviction_entry.is_pinned(), entry.queue_link.is_linked()) {
             (true, true) => self.detach(&entry),
             (false, false) => self.attach(entry),
             _ => {},
@@ -167,19 +167,19 @@ where
                 "next_candidate: popped entry must be detached"
             );
 
-            if queue == Queue::S && 1 < entry.eviction.count() {
-                entry.eviction.reset_count();
+            if queue == Queue::S && 1 < entry.eviction_entry.count() {
+                entry.eviction_entry.reset_count();
                 entry.queue.set(Queue::M);
-                if !entry.eviction.is_pinned() {
+                if !entry.eviction_entry.is_pinned() {
                     self.attach(entry);
                 }
-            } else if queue == Queue::M && entry.eviction.dec_count() {
-                if !entry.eviction.is_pinned() {
+            } else if queue == Queue::M && entry.eviction_entry.dec_count() {
+                if !entry.eviction_entry.is_pinned() {
                     self.attach(entry);
                 }
-            } else if !entry.eviction.is_pinned() {
+            } else if !entry.eviction_entry.is_pinned() {
                 entry.is_candidate.set(true);
-                return Some(entry.eviction.key());
+                return Some(entry.eviction_entry.key());
             }
         }
         None
@@ -211,7 +211,7 @@ where
             "accept_candidate: entry must be the outstanding candidate"
         );
         debug_assert!(
-            !entry.eviction.is_pinned(),
+            !entry.eviction_entry.is_pinned(),
             "accept_candidate: candidate must not be pinned"
         );
         self.remove(key);

@@ -9,7 +9,7 @@ use crate::runtime::Token;
 use crate::runtime::decoder::BlockAnnotation;
 use crate::runtime::decoder::KVBlockPlacement;
 use crate::runtime::decoder::StateBlockPlacement;
-use crate::runtime::decoder::trie_cache::Eviction;
+use crate::runtime::decoder::trie_cache::EvictionEntry;
 use crate::runtime::decoder::trie_cache::TrieEdge;
 use crate::runtime::decoder::trie_cache::store::DataKey;
 use crate::runtime::decoder::trie_cache::store::DataValue;
@@ -49,7 +49,7 @@ pub enum TrieNodeState {
 }
 
 #[derive(Debug)]
-pub struct TrieNode {
+pub struct TrieNode<E: EvictionEntry> {
     partition_key: u32,
     state: TrieNodeState,
 
@@ -61,11 +61,11 @@ pub struct TrieNode {
     tokens: Arc<[Token]>,
     kv_placement: KVBlockPlacement,
     state_placement: StateBlockPlacement,
-    eviction: Option<Arc<Eviction<TrieNodeKey>>>,
-    is_eviction_registered: bool,
+    eviction_entry: Option<Arc<E>>,
+    is_eviction_entry_registered: bool,
 }
 
-impl TrieNode {
+impl<E: EvictionEntry> TrieNode<E> {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         partition_key: u32,
@@ -89,8 +89,8 @@ impl TrieNode {
             tokens,
             kv_placement,
             state_placement,
-            eviction: None,
-            is_eviction_registered: false,
+            eviction_entry: None,
+            is_eviction_entry_registered: false,
         }
     }
 
@@ -230,26 +230,26 @@ impl TrieNode {
         &self.state_placement
     }
 
-    pub fn eviction(&self) -> Option<&Arc<Eviction<TrieNodeKey>>> {
-        self.eviction.as_ref()
+    pub fn eviction_entry(&self) -> Option<&Arc<E>> {
+        self.eviction_entry.as_ref()
     }
 
-    pub fn set_eviction(&mut self, eviction: Arc<Eviction<TrieNodeKey>>) {
+    pub fn set_eviction_entry(&mut self, eviction_entry: Arc<E>) {
         assert!(
-            self.eviction.is_none(),
-            "set_eviction: trie node must not already have an eviction entry"
+            self.eviction_entry.is_none(),
+            "set_eviction_entry: trie node must not already have an eviction entry"
         );
-        self.eviction = Some(eviction);
+        self.eviction_entry = Some(eviction_entry);
     }
 
-    pub fn register_eviction(&mut self) -> Option<Arc<Eviction<TrieNodeKey>>> {
-        if self.is_eviction_registered {
+    pub fn register_eviction_entry(&mut self) -> Option<Arc<E>> {
+        if self.is_eviction_entry_registered {
             return None;
         }
-        self.is_eviction_registered = true;
+        self.is_eviction_entry_registered = true;
         Some(
-            self.eviction()
-                .expect("register_eviction: trie node must have an eviction entry")
+            self.eviction_entry()
+                .expect("register_eviction_entry: trie node must have an eviction entry")
                 .clone(),
         )
     }
@@ -280,10 +280,10 @@ impl TrieNode {
     }
 }
 
-impl DataValue for TrieNode {
+impl<E: EvictionEntry> DataValue for TrieNode<E> {
     fn partition_key(&self) -> u32 {
         self.partition_key
     }
 }
 
-pub type TrieNodeStore<const P: usize> = PartitionedDataStore<P, TrieNodeKey, TrieNode>;
+pub type TrieNodeStore<const P: usize, E> = PartitionedDataStore<P, TrieNodeKey, TrieNode<E>>;

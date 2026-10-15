@@ -7,7 +7,8 @@ use ahash::RandomState as AHashRandomState;
 use dashmap::DashMap;
 use rand::rngs::SmallRng;
 
-use crate::runtime::decoder::trie_cache::S3FIFOClient;
+use crate::runtime::decoder::trie_cache::EvictionEntry;
+use crate::runtime::decoder::trie_cache::EvictionPolicy;
 use crate::runtime::decoder::trie_cache::TrieNodeKey;
 use crate::runtime::decoder::trie_cache::TrieNodeStore;
 
@@ -38,35 +39,35 @@ thread_local! {
 }
 
 #[derive(Debug)]
-pub struct Trie<const P: usize> {
+pub struct Trie<const P: usize, E: EvictionEntry> {
     trie_roots: DashMap<TrieEdge, TrieNodeKey, AHashRandomState>,
-    trie_nodes: TrieNodeStore<P>,
-    s3_fifo: Arc<S3FIFOClient<TrieNodeKey>>,
+    trie_nodes: TrieNodeStore<P, E>,
+    eviction_policy: Arc<dyn EvictionPolicy<TrieNodeKey, Entry = E>>,
     num_pinned_trie_nodes: AtomicUsize,
 }
 
-impl<const P: usize> Trie<P> {
-    pub fn new(s3_fifo: Arc<S3FIFOClient<TrieNodeKey>>) -> Self {
+impl<const P: usize, E: EvictionEntry> Trie<P, E> {
+    pub fn new(eviction_policy: Arc<dyn EvictionPolicy<TrieNodeKey, Entry = E>>) -> Self {
         Self {
             trie_roots: DashMap::with_hasher(AHashRandomState::new()),
             trie_nodes: TrieNodeStore::new(),
-            s3_fifo,
+            eviction_policy,
             num_pinned_trie_nodes: AtomicUsize::new(0),
         }
     }
 
-    pub fn s3_fifo(&self) -> Arc<S3FIFOClient<TrieNodeKey>> {
-        self.s3_fifo.clone()
+    pub fn eviction_policy(&self) -> Arc<dyn EvictionPolicy<TrieNodeKey, Entry = E>> {
+        self.eviction_policy.clone()
     }
 
-    fn register_eviction_by_key(&self, trie_node_key: TrieNodeKey) {
-        let eviction = self
+    fn register_eviction_entry_by_key(&self, trie_node_key: TrieNodeKey) {
+        let eviction_entry = self
             .trie_nodes
             .get_mut(trie_node_key)
-            .expect("register_eviction_by_key: trie node must exist")
-            .register_eviction();
-        if let Some(eviction) = eviction {
-            self.s3_fifo.insert(eviction);
+            .expect("register_eviction_entry_by_key: trie node must exist")
+            .register_eviction_entry();
+        if let Some(eviction_entry) = eviction_entry {
+            eviction_entry.register();
         }
     }
 

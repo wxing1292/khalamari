@@ -4,18 +4,19 @@ use std::sync::atomic::Ordering;
 use dashmap::Entry as DashEntry;
 
 use crate::runtime::decoder::trie_cache::DataStoreValueMut;
+use crate::runtime::decoder::trie_cache::EvictionEntry;
 use crate::runtime::decoder::trie_cache::InsertNodeResult;
 use crate::runtime::decoder::trie_cache::TrieEdge;
 use crate::runtime::decoder::trie_cache::TrieNode;
 use crate::runtime::decoder::trie_cache::TrieNodeKey;
 use crate::runtime::decoder::trie_cache::trie::Trie;
 
-impl<const P: usize> Trie<P> {
+impl<const P: usize, E: EvictionEntry> Trie<P, E> {
     pub fn peek_by_parent(
         self: &Arc<Self>,
         parent_trie_node_key: Option<TrieNodeKey>,
         trie_edge: &TrieEdge,
-    ) -> Option<DataStoreValueMut<'_, TrieNodeKey, TrieNode>> {
+    ) -> Option<DataStoreValueMut<'_, TrieNodeKey, TrieNode<E>>> {
         let trie_node_key = if let Some(parent_trie_node_key) = parent_trie_node_key {
             self.trie_nodes
                 .get_mut(parent_trie_node_key)
@@ -57,7 +58,7 @@ impl<const P: usize> Trie<P> {
                         let pin_eviction = if !parent_trie_node.is_pinned() {
                             Some(
                                 parent_trie_node
-                                    .eviction()
+                                    .eviction_entry()
                                     .expect("insert_by_parent: unpinned parent must have an eviction entry")
                                     .clone(),
                             )
@@ -86,7 +87,7 @@ impl<const P: usize> Trie<P> {
             if let Some(collision_trie_node_key) = collision_trie_node_key {
                 if self.try_external_pin_by_key(collision_trie_node_key).is_none() {
                     if self.replace_by_parent(parent_trie_node_key, trie_edge, collision_trie_node_key, trie_node_key) {
-                        self.register_eviction_by_key(trie_node_key);
+                        self.register_eviction_entry_by_key(trie_node_key);
                         return InsertNodeResult::Success { trie_node_key };
                     } else {
                         continue;
@@ -97,7 +98,7 @@ impl<const P: usize> Trie<P> {
                     };
                 }
             } else {
-                self.register_eviction_by_key(trie_node_key);
+                self.register_eviction_entry_by_key(trie_node_key);
                 return InsertNodeResult::Success { trie_node_key };
             }
         }
@@ -163,7 +164,7 @@ impl<const P: usize> Trie<P> {
                     debug_assert_eq!(removed_trie_node_key, trie_node_key);
                     let unpin_eviction = if !parent_trie_node.is_pinned() {
                         parent_trie_node
-                            .eviction()
+                            .eviction_entry()
                             .expect("remove_by_parent: formerly unpinned parent must have an eviction entry")
                             .clone()
                     } else {

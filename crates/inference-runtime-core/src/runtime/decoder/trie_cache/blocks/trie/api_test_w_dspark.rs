@@ -63,6 +63,11 @@ type TestMultiLaneTrieKVBlockCache =
 type TestTrieBlocks =
     TrieDecoderBlocks<NUM_TOKEN_PER_BLOCK, NUM_TRIE_PARTITION, NUM_CACHE_LANE, TestMultiLaneTrieKVBlockCache>;
 
+type TestImmutableBlock = ImmutableBlock<
+    NUM_TRIE_PARTITION,
+    <TestMultiLaneTrieKVBlockCache as MultiLaneBlockCache<NUM_TRIE_PARTITION, NUM_CACHE_LANE>>::Entry,
+>;
+
 #[test]
 fn test_init_block_once_half_block_success_w_dspark() {
     let total_tokens = token_vec([1, 2]);
@@ -1307,9 +1312,9 @@ fn initialize_block_cache(max_kv_pages: usize) -> Arc<TestMultiLaneTrieKVBlockCa
 fn insert_immutable_block(
     block_cache: &TestMultiLaneTrieKVBlockCache,
     block_index: usize,
-    parent_immutable_block_vec: Option<&[ImmutableBlock<NUM_TOKEN_PER_BLOCK>; NUM_CACHE_LANE]>,
+    parent_immutable_block_vec: Option<&[TestImmutableBlock; NUM_CACHE_LANE]>,
     total_tokens: Vec<Token>,
-) -> [ImmutableBlock<NUM_TOKEN_PER_BLOCK>; NUM_CACHE_LANE] {
+) -> [TestImmutableBlock; NUM_CACHE_LANE] {
     let block_metadata_vec = block_metadata_vec(block_index, parent_immutable_block_vec, total_tokens);
     let parent_trie_node_key_vec: [Option<_>; NUM_CACHE_LANE] =
         std::array::from_fn(|lane| block_metadata_vec[lane].parent_trie_node_key());
@@ -1337,7 +1342,7 @@ fn insert_immutable_block_with_annotations(
     block_cache: &TestMultiLaneTrieKVBlockCache,
     total_tokens: Vec<Token>,
     annotations: [SmallVec<[BlockAnnotation; 1]>; NUM_CACHE_LANE],
-) -> [ImmutableBlock<NUM_TOKEN_PER_BLOCK>; NUM_CACHE_LANE] {
+) -> [TestImmutableBlock; NUM_CACHE_LANE] {
     assert!(NUM_TOKEN_PER_BLOCK <= total_tokens.len());
     let block_metadata_vec: [BlockMetadata<NUM_TOKEN_PER_BLOCK>; NUM_CACHE_LANE] = [BlockMetadata::new(
         None,
@@ -1366,7 +1371,7 @@ fn insert_immutable_block_with_annotations(
 fn reserve_semi_immutable_block(
     block_cache: &TestMultiLaneTrieKVBlockCache,
     block_index: usize,
-    parent_immutable_block_vec: Option<&[ImmutableBlock<NUM_TOKEN_PER_BLOCK>; NUM_CACHE_LANE]>,
+    parent_immutable_block_vec: Option<&[TestImmutableBlock; NUM_CACHE_LANE]>,
     total_tokens: Vec<Token>,
 ) -> [crate::runtime::decoder::trie_cache::SemiImmutableBlock<NUM_TOKEN_PER_BLOCK>; NUM_CACHE_LANE] {
     let block_metadata_vec = block_metadata_vec(block_index, parent_immutable_block_vec, total_tokens);
@@ -1380,7 +1385,7 @@ fn reserve_semi_immutable_block(
 
 fn block_metadata_vec(
     block_index: usize,
-    parent_immutable_block_vec: Option<&[ImmutableBlock<NUM_TOKEN_PER_BLOCK>; NUM_CACHE_LANE]>,
+    parent_immutable_block_vec: Option<&[TestImmutableBlock; NUM_CACHE_LANE]>,
     total_tokens: Vec<Token>,
 ) -> [BlockMetadata<NUM_TOKEN_PER_BLOCK>; NUM_CACHE_LANE] {
     assert_eq!(NUM_TOKEN_PER_BLOCK, total_tokens.len());
@@ -1437,7 +1442,7 @@ fn assert_semi_immutable_annotations(
 }
 
 fn assert_immutable_annotations<const NUM_BLOCK: usize>(
-    block_vec: &[ImmutableBlock<NUM_TOKEN_PER_BLOCK>; NUM_BLOCK],
+    block_vec: &[TestImmutableBlock; NUM_BLOCK],
     expected_annotations: [Vec<BlockAnnotation>; NUM_BLOCK],
 ) {
     assert_eq!(

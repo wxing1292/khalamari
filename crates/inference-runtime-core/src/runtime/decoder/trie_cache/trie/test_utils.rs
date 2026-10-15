@@ -13,13 +13,15 @@ use crate::runtime::decoder::KVBlockPlacement;
 use crate::runtime::decoder::ResourceSegment;
 use crate::runtime::decoder::StateBlockPlacement;
 use crate::runtime::decoder::trie_cache::S3FIFOClient;
+use crate::runtime::decoder::trie_cache::S3FIFOEntry;
 use crate::runtime::decoder::trie_cache::Trie;
 use crate::runtime::decoder::trie_cache::TrieEdge;
+use crate::runtime::decoder::trie_cache::TrieNodeKey;
 use crate::runtime::resource::ResourceID;
 
 pub const TEST_PARTITIONS: usize = 4;
 
-pub fn new_trie() -> Arc<Trie<TEST_PARTITIONS>> {
+pub fn new_trie() -> Arc<Trie<TEST_PARTITIONS, S3FIFOEntry<TrieNodeKey>>> {
     Arc::new(Trie::new(Arc::new(S3FIFOClient::new(32, Shutdown::new()))))
 }
 

@@ -32,7 +32,7 @@ where
     resources: AHashMap<ResourceID, Resource>,
     resource_placements: Vec<ResourcePlacement>,
 
-    immutable_blocks: Vec<[ImmutableBlock<P>; L]>,
+    immutable_blocks: Vec<[ImmutableBlock<P, BC::Entry>; L]>,
     semi_immutable_blocks: VecDeque<[SemiImmutableBlock<N>; L]>,
     mutable_blocks: VecDeque<[MutableBlock<N>; L]>,
 
