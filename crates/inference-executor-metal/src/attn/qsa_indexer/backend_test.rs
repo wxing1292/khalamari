@@ -4,8 +4,8 @@ use inference_backend_metal::components::qsa_indexer::Shape;
 use inference_backend_metal::metal::ReplayArguments;
 use inference_backend_metal::metal::ReplayParameterKey;
 use inference_backend_metal::metal::Stream;
+use inference_executor_core::attn::qsa_indexer::reference;
 use inference_executor_core::attn::qsa_indexer::reference::Precision;
-use inference_executor_core::attn::qsa_indexer::reference::{self};
 use inference_executor_core::mlp::dense::reference::QuantizedAffineReferenceShape;
 use inference_executor_core::mlp::dense::reference::quantized_affine_reference;
 
@@ -17,6 +17,106 @@ use crate::replay::Replay;
 use crate::replay::ReplayComponent;
 
 const ACTIVE: ReplayParameterKey = ReplayParameterKey::new("test.indexer.num_active_tokens");
+const ACTIVE_SCORE_TASKS: ReplayParameterKey = ReplayParameterKey::new("test.indexer.num_active_score_task_templates");
+
+#[test]
+fn test_update_success() {
+    let device = Device::system_default();
+    let core = QSAIndexerCore {
+        hidden_dim: 512,
+        num_q_heads: 4,
+        head_dim: 128,
+        compress_ratio: 4,
+        top_k: 512,
+        rope_dim: 64,
+        rope_theta: 10_000_000.0,
+        norm_eps: 1e-6,
+    };
+    let layout = CacheLayout {
+        num_req_slots: 2,
+        num_pages_per_request: 257,
+        num_state_slots: 128,
+        page_bytes: 32_768,
+    };
+    let metadata = QSAIndexerMetadataBuffers::new(&device, core, layout, 64);
+    let shape = Shape {
+        num_total_tokens: 64,
+        num_total_sparse_queries: 64,
+        num_total_request_sparse_queries: 64,
+        num_total_groups: 32_784,
+        num_total_score_task_templates: 64,
+    };
+    let requests = [
+        QSAIndexerRequest {
+            req_slot: 0,
+            token_index: 131_072,
+            num_tokens: 32,
+            group_start: 0,
+            src_state_slot: 0,
+        },
+        QSAIndexerRequest {
+            req_slot: 1,
+            token_index: 131_072,
+            num_tokens: 32,
+            group_start: 0,
+            src_state_slot: 1,
+        },
+    ];
+    let dst_slots: Vec<_> = (2..66).collect();
+    let active = metadata.update(&requests, &dst_slots, shape);
+    assert_eq!(active.num_active_tokens, 64);
+    assert_eq!(active.num_active_score_task_templates, 2);
+    let tasks = metadata.score_task_templates().read_typed::<u32>(0, 4);
+    assert_eq!(tasks, [0, 32, 32, 32]);
+
+    let mixed_requests = [
+        QSAIndexerRequest {
+            num_tokens: 33,
+            ..requests[0]
+        },
+        QSAIndexerRequest {
+            num_tokens: 9,
+            ..requests[1]
+        },
+    ];
+    let active = metadata.update(&mixed_requests, &dst_slots[..42], shape);
+    assert_eq!(active.num_active_score_task_templates, 4);
+    assert_eq!(
+        metadata.score_task_templates().read_typed::<u32>(0, 8),
+        [0, 32, 32, 1, 33, 8, 41, 1]
+    );
+
+    let single_request = [QSAIndexerRequest {
+        req_slot: 0,
+        token_index: 4096,
+        num_tokens: 64,
+        group_start: 0,
+        src_state_slot: 0,
+    }];
+    let dst_slots: Vec<_> = (1..65).collect();
+    let active = metadata.update(&single_request, &dst_slots, shape);
+    assert_eq!(active.num_active_score_task_templates, 2);
+    assert_eq!(metadata.score_task_templates().read_typed::<u32>(0, 4), [0, 32, 32, 32]);
+
+    // Four input tokens cross the dense budget. Only the final query needs an index.
+    let crossing = [QSAIndexerRequest {
+        token_index: 2048,
+        num_tokens: 4,
+        ..single_request[0]
+    }];
+    let active = metadata.update(
+        &crossing,
+        &[1, 2, 3, 4],
+        Shape {
+            num_total_sparse_queries: 1,
+            num_total_request_sparse_queries: 1,
+            ..shape
+        },
+    );
+    assert_eq!(active.num_active_tokens, 4);
+    assert_eq!(active.num_active_score_task_templates, 1);
+    assert_eq!(metadata.score_task_templates().read_typed::<u32>(0, 2), [3, 1]);
+}
 
 #[test]
 fn test_replay_restore() {
@@ -50,7 +150,10 @@ fn test_replay_restore() {
     };
     let shape = Shape {
         num_total_tokens: 4,
+        num_total_sparse_queries: 4,
+        num_total_request_sparse_queries: 4,
         num_total_groups: 514,
+        num_total_score_task_templates: 4,
     };
     let scratch = component.new_scratch(&device, shape.num_total_tokens, shape.num_total_groups);
     let metadata = QSAIndexerMetadataBuffers::new(&device, core, layout, 4);
@@ -86,6 +189,7 @@ fn test_replay_restore() {
             ..shape
         },
         num_active_tokens: ReplayU32::Parameter(ACTIVE),
+        num_active_score_task_templates: ReplayU32::Parameter(ACTIVE_SCORE_TASKS),
         hidden_state: &hidden,
         batch_metadata: &metadata,
         cache: QSAIndexerCacheBindings {
@@ -133,7 +237,7 @@ fn test_replay_restore() {
         k_norm: &norm_values,
     });
     for (iteration, active) in [1_u32, 4, 3, 2].into_iter().enumerate() {
-        metadata.update(
+        let metadata_active = metadata.update(
             &[QSAIndexerRequest {
                 req_slot: 0,
                 token_index: 1,
@@ -144,6 +248,7 @@ fn test_replay_restore() {
             &(1..=active).collect::<Vec<_>>(),
             input.shape,
         );
+        assert_eq!(metadata_active.num_active_score_task_templates, 0);
         let before_states = values(&states);
         let (key, hit) = replay.record(&runtime, &input);
         assert_eq!(hit, iteration != 0);
@@ -172,6 +277,9 @@ fn test_replay_restore() {
         &Input {
             shape: Shape {
                 num_total_tokens: 2,
+                num_total_sparse_queries: 2,
+                num_total_request_sparse_queries: 2,
+                num_total_score_task_templates: 2,
                 ..input.shape
             },
             ..input
@@ -184,7 +292,7 @@ fn test_replay_restore() {
     // Restore its earlier raw state without copying or overwriting the source slot.
     let continued_hidden = fixture_values(4 * core.hidden_dim, 29);
     hidden.write_typed(0, &bits(&continued_hidden));
-    metadata.update(
+    let metadata_active = metadata.update(
         &[QSAIndexerRequest {
             req_slot: 0,
             token_index: 2,
@@ -195,6 +303,7 @@ fn test_replay_restore() {
         &[5, 6, 7],
         input.shape,
     );
+    assert_eq!(metadata_active.num_active_score_task_templates, 0);
     let restored_source = values(&states)[core.state_dim()..2 * core.state_dim()].to_vec();
     let (key, hit) = replay.record(&runtime, &input);
     assert!(hit);
@@ -257,14 +366,20 @@ fn test_replay_restore() {
     }
     states.write_typed(2 * core.state_dim(), &bits(&other_history[2048 * core.head_dim..]));
     let destinations = [8, 9, 10, 11];
-    assert_eq!(metadata.update(&requests, &destinations, shape), 4);
+    let metadata_active = metadata.update(&requests, &destinations, shape);
+    assert_eq!(metadata_active.num_active_tokens, 4);
     let mut expected_pages = values(&pages);
     let mut expected_states = values(&states);
     let input = Input { shape, ..input };
     let (key, hit) = replay.record(&runtime, &input);
     assert!(!hit);
     runtime
-        .submit_replay_with_arguments(replay.replay(&key), &ReplayArguments::new().with_u32(ACTIVE, 4))
+        .submit_replay_with_arguments(
+            replay.replay(&key),
+            &ReplayArguments::new()
+                .with_u32(ACTIVE, 4)
+                .with_u32(ACTIVE_SCORE_TASKS, metadata_active.num_active_score_task_templates),
+        )
         .wait();
     let queries = values(scratch.q());
     let ids = ids.read_typed::<u32>(0, 4 * core.top_k);
@@ -322,6 +437,7 @@ fn test_replay_restore() {
 struct Input<'a> {
     shape: Shape,
     num_active_tokens: ReplayU32,
+    num_active_score_task_templates: ReplayU32,
     hidden_state: &'a Buffer,
     batch_metadata: &'a QSAIndexerMetadataBuffers,
     cache: QSAIndexerCacheBindings<'a>,
@@ -359,6 +475,7 @@ impl ReplayComponent for TestIndexer {
             QSAIndexerSelectInput {
                 shape: input.shape,
                 num_active_tokens: input.num_active_tokens,
+                num_active_score_task_templates: input.num_active_score_task_templates,
                 batch_metadata: input.batch_metadata,
                 pages: input.cache.pages,
                 page_ids: input.cache.page_ids,

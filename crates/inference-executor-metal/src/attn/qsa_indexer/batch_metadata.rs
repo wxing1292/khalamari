@@ -1,10 +1,13 @@
 use std::collections::HashSet;
 
 use inference_backend_metal::components::qsa_indexer::CacheLayout;
+use inference_backend_metal::components::qsa_indexer::ScoreGeometry;
+use inference_backend_metal::components::qsa_indexer::ScoreTaskTemplate;
 use inference_backend_metal::components::qsa_indexer::Shape;
 use inference_backend_metal::components::qsa_indexer::Token;
 use inference_backend_metal::metal::Buffer;
 use inference_backend_metal::metal::Device;
+use inference_backend_metal::metal::Dtype;
 use inference_executor_core::attn::qsa_indexer::core::QSAIndexerCore;
 
 /// One contiguous query segment for one request. Complete groups use logical IDs.
@@ -18,9 +21,19 @@ pub struct QSAIndexerRequest {
 
 pub struct QSAIndexerMetadataBuffers {
     tokens: Buffer,
+    score_task_templates: Buffer,
     compress_ratio: u32,
+    num_q_heads: u32,
+    head_dim: u32,
+    top_k: u32,
     layout: CacheLayout,
     groups_per_page: u32,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct QSAIndexerMetadataActive {
+    pub num_active_tokens: u32,
+    pub num_active_score_task_templates: u32,
 }
 
 impl QSAIndexerMetadataBuffers {
@@ -42,10 +55,25 @@ impl QSAIndexerMetadataBuffers {
                     .checked_mul(size_of::<Token>())
                     .expect("QSA indexer metadata capacity must fit usize"),
             ),
+            score_task_templates: Buffer::new_zeroed(
+                device,
+                (max_tokens as usize)
+                    .checked_mul(size_of::<ScoreTaskTemplate>())
+                    .expect("QSA indexer score-task capacity must fit usize"),
+            ),
             compress_ratio: core
                 .compress_ratio
                 .try_into()
                 .expect("QSA indexer compression ratio must fit u32"),
+            num_q_heads: core
+                .num_q_heads
+                .try_into()
+                .expect("QSA indexer head count must fit u32"),
+            head_dim: core
+                .head_dim
+                .try_into()
+                .expect("QSA indexer head dimension must fit u32"),
+            top_k: core.top_k.try_into().expect("QSA indexer top-k must fit u32"),
         }
     }
 
@@ -57,12 +85,28 @@ impl QSAIndexerMetadataBuffers {
         &self.tokens
     }
 
+    pub fn score_task_templates(&self) -> &Buffer {
+        &self.score_task_templates
+    }
+
     /// Establishes batch addressing and state-version invariants before GPU submission.
     /// The caller separately supplies valid physical pages for each visible logical group.
-    pub fn update(&self, requests: &[QSAIndexerRequest], dst_state_slots: &[u32], shape: Shape) -> u32 {
+    pub fn update(
+        &self,
+        requests: &[QSAIndexerRequest],
+        dst_state_slots: &[u32],
+        shape: Shape,
+    ) -> QSAIndexerMetadataActive {
         let layout = self.layout;
         assert!(shape.num_total_tokens > 0 && shape.num_total_groups > 0);
+        assert!(
+            shape.num_total_score_task_templates > 0 && shape.num_total_score_task_templates <= shape.num_total_tokens
+        );
         assert!(shape.num_total_tokens as usize <= self.tokens.len_bytes() / size_of::<Token>());
+        assert!(
+            shape.num_total_score_task_templates as usize
+                <= self.score_task_templates.len_bytes() / size_of::<ScoreTaskTemplate>()
+        );
         let num_tokens: u32 = requests
             .iter()
             .try_fold(0_u32, |count, request| count.checked_add(request.num_tokens))
@@ -82,9 +126,13 @@ impl QSAIndexerMetadataBuffers {
                 "QSA indexer candidate states require distinct slots"
             );
         }
+        let geometry = ScoreGeometry::for_shape(self.num_q_heads, self.head_dim, Dtype::Bfloat16, shape, layout);
         let mut req_slots = HashSet::new();
         let mut tokens = Vec::with_capacity(num_tokens as usize * size_of::<Token>() / size_of::<u32>());
-        let mut flat_token = 0;
+        let mut score_tasks =
+            Vec::with_capacity(shape.num_total_score_task_templates as usize * size_of::<ScoreTaskTemplate>() / 4);
+        let mut num_sparse_queries = 0;
+        let mut flat_token = 0_u32;
         for request in requests {
             assert!(request.num_tokens > 0);
             assert!(request.req_slot < layout.num_req_slots && request.src_state_slot < layout.num_state_slots);
@@ -98,10 +146,18 @@ impl QSAIndexerMetadataBuffers {
                 .expect("QSA indexer token interval must fit u32");
             let group_end = token_end / self.compress_ratio;
             assert!(request.group_start <= request.token_index / self.compress_ratio);
-            assert!(group_end - request.group_start <= shape.num_total_groups);
+            let last_visible_groups = group_end - request.group_start;
+            assert!(last_visible_groups <= shape.num_total_groups);
             assert!((group_end as u64) <= (layout.num_pages_per_request as u64) * (self.groups_per_page as u64));
             let batch_start = flat_token;
+            let mut sparse_query_start = None;
+            let mut sparse_query_count = 0_u32;
             for position in request.token_index..token_end {
+                let visible_groups = (position + 1) / self.compress_ratio - request.group_start;
+                if visible_groups > self.top_k {
+                    sparse_query_start.get_or_insert(flat_token);
+                    sparse_query_count += 1;
+                }
                 tokens.extend_from_slice(
                     &Token {
                         batch_start,
@@ -115,8 +171,32 @@ impl QSAIndexerMetadataBuffers {
                 );
                 flat_token += 1;
             }
+            assert!(sparse_query_count <= shape.num_total_request_sparse_queries);
+            num_sparse_queries += sparse_query_count;
+            if let Some(mut query_start) = sparse_query_start {
+                let task_width = geometry.num_queries_per_task(sparse_query_count);
+                while sparse_query_count > 0 {
+                    let task_queries = sparse_query_count.min(task_width);
+                    score_tasks.extend_from_slice(
+                        &ScoreTaskTemplate {
+                            query_start,
+                            num_queries: task_queries,
+                        }
+                        .to_array(),
+                    );
+                    query_start += task_queries;
+                    sparse_query_count -= task_queries;
+                }
+            }
         }
+        assert!(num_sparse_queries <= shape.num_total_sparse_queries);
+        let num_active_score_task_templates = (score_tasks.len() / 2) as u32;
+        assert!(num_active_score_task_templates <= shape.num_total_score_task_templates);
         self.tokens.write_typed(0, &tokens);
-        num_tokens
+        self.score_task_templates.write_typed(0, &score_tasks);
+        QSAIndexerMetadataActive {
+            num_active_tokens: num_tokens,
+            num_active_score_task_templates,
+        }
     }
 }

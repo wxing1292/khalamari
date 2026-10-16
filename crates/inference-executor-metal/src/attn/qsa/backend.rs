@@ -7,6 +7,8 @@ use inference_backend_metal::components::rms_norm_rope::RopeScaling;
 use inference_backend_metal::metal::Buffer;
 use inference_backend_metal::metal::Device;
 use inference_backend_metal::metal::Dtype;
+use inference_backend_metal::metal::ReplayArguments;
+use inference_backend_metal::metal::ReplayParameterKey;
 use inference_backend_metal::metal::ReplayU32;
 use inference_backend_metal::operators::affine_quantized;
 use inference_executor_core::attn::GQACore;
@@ -111,8 +113,50 @@ pub struct QSAInput<'a> {
     pub indexer_cache: QSAIndexerCacheBindings<'a>,
     pub weights: QSAWeights<'a>,
     pub scratch: QSAScratchBindings<'a>,
-    pub active: QSASDPAReplay,
+    pub active: QSAReplay,
 }
+
+/// Submission counts for the two independently prepared QSA components.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct QSAActive {
+    pub sdpa: QSASDPAActive,
+    pub num_active_score_task_templates: u32,
+}
+
+impl QSAActive {
+    pub fn fixed_replay(self) -> QSAReplay {
+        QSAReplay {
+            sdpa: self.sdpa.fixed_replay(),
+            num_active_score_task_templates: ReplayU32::Fixed(self.num_active_score_task_templates),
+        }
+    }
+
+    pub fn add_replay_arguments(self, arguments: &mut ReplayArguments) {
+        self.sdpa.add_replay_arguments(arguments);
+        arguments.set_u32(
+            QSA_NUM_ACTIVE_SCORE_TASK_TEMPLATES,
+            self.num_active_score_task_templates,
+        );
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct QSAReplay {
+    pub sdpa: QSASDPAReplay,
+    pub num_active_score_task_templates: ReplayU32,
+}
+
+impl QSAReplay {
+    pub fn parameters() -> Self {
+        Self {
+            sdpa: QSASDPAReplay::parameters(),
+            num_active_score_task_templates: ReplayU32::Parameter(QSA_NUM_ACTIVE_SCORE_TASK_TEMPLATES),
+        }
+    }
+}
+
+const QSA_NUM_ACTIVE_SCORE_TASK_TEMPLATES: ReplayParameterKey =
+    ReplayParameterKey::new("qsa.num_active_score_task_templates");
 
 pub type QSAOutput<'a> = &'a Buffer;
 
@@ -231,7 +275,7 @@ impl QSA {
         requests: &[QSAIndexerRequest],
         dst_state_slots: &[u32],
         scratch: &QSAScratch,
-    ) -> QSASDPAActive {
+    ) -> QSAActive {
         let sdpa_requests: Vec<_> = requests
             .iter()
             .map(|request| {
@@ -244,9 +288,12 @@ impl QSA {
             })
             .collect();
         let active = sdpa_metadata.update(&sdpa_requests);
-        let num_active_indexer_tokens = indexer_metadata.update(requests, dst_state_slots, scratch.indexer_shape());
-        assert_eq!(active.num_active_tokens, num_active_indexer_tokens);
-        active
+        let indexer_active = indexer_metadata.update(requests, dst_state_slots, scratch.indexer_shape());
+        assert_eq!(active.num_active_tokens, indexer_active.num_active_tokens);
+        QSAActive {
+            sdpa: active,
+            num_active_score_task_templates: indexer_active.num_active_score_task_templates,
+        }
     }
 
     fn validate_input(&self, input: &QSAInput<'_>) {
@@ -271,7 +318,7 @@ impl ReplayLayer for QSA {
         self.validate_input(&input);
         let shape = input.batch_metadata.shape();
         let scratch = input.scratch;
-        let active_tokens = input.active.num_active_tokens;
+        let active_tokens = input.active.sdpa.num_active_tokens;
         let qgkv = self.qgkv.invoke(
             shape.num_total_tokens,
             active_tokens,
@@ -359,6 +406,7 @@ impl ReplayLayer for QSA {
         self.indexer.select(
             recorder,
             QSAIndexerSelectInput {
+                num_active_score_task_templates: input.active.num_active_score_task_templates,
                 shape: scratch.indexer_shape,
                 num_active_tokens: active_tokens,
                 batch_metadata: input.indexer_metadata,
@@ -380,7 +428,7 @@ impl ReplayLayer for QSA {
                 scratch: scratch.sdpa,
                 page_table_index: input.page_table_index,
             },
-            input.active,
+            input.active.sdpa,
         );
         let gate = self.gate.invoke(
             backend_activation_gate::Shape {

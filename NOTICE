@@ -46,3 +46,15 @@ https://github.com/youssofal/mtplx
 
 See licenses/omlx-Apache-2.0.txt. The PSI adaptation adds stacked gate/up
 bindings, a compile-time SwiGLU epilogue, and submission-time active rows.
+
+The QSA indexer Steel scoring kernels adapt oMLX commit
+d6b2b92b11ebcbf4a4c1f002b0d590a3117212a8 (Apache-2.0),
+Copyright © 2026 Apple Inc. See licenses/omlx-Apache-2.0.txt.
+The psi implementation adds paged keys and request-local score task templates.
+
+The QSA indexer vector scoring and sampled exact radix selection adapt
+TensorFold 0.6.6, kernels/qwen/flash_next/v1/attention.py and block_select.py:
+https://github.com/ashhart/TensorFold
+Copyright 2026 TensorFold contributors (Apache-2.0).
+See licenses/tensorfold-Apache-2.0.txt. The psi implementation uses paged keys,
+existing token metadata, replay capacities, and chronological logical group IDs.

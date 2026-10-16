@@ -19,7 +19,7 @@ pub struct QSAIndexerMetalConfig {
 }
 
 /// Independent indexer. The caller owns pages, state versions, weights, and scratch.
-/// `T` counts query tokens, `Hq` indexer heads, `D` head dimensions, and `G` tokens per group.
+/// `T` counts query tokens, `Hq` indexer heads, `D` head dimensions, and `G` score columns.
 ///
 /// ```text
 /// Projection:
@@ -28,16 +28,16 @@ pub struct QSAIndexerMetalConfig {
 ///                     `--> raw K [T,D]
 ///
 /// Key preparation:
-///   raw K [T,D] + source carry [R,G-1,D]
-///     |-- mean over G -- norm/RoPE --> paged keys [Nc,D]
-///     `-- incomplete groups --------> candidate carry [T,G-1,D]
+///   raw K [T,D] + source carry [R,ratio-1,D]
+///     |-- mean over ratio -- norm/RoPE --> paged keys [cached_groups,D]
+///     `-- incomplete groups ------------> candidate carry [T,ratio-1,D]
 ///
 /// Selection:
-///   Q [T,Hq,D] + paged keys [Nc,D] --> scores [T,Ng]
+///   Q [T,Hq,D] + paged keys [cached_groups,D] --> scores [T,G]
 ///     --> per-query causal top-k --> group IDs [T,K] for sparse queries
 /// ```
 /// `H` is the hidden dimension, `R` counts requests, and `K` is the group budget.
-/// `Nc` counts cached keys per request. `Ng` is a score capacity; each query has its own visible group range.
+/// `ratio` is the compression ratio. Each query has its own visible group range within `G` score columns.
 /// State-slot and page-table bindings replace the logical state/cache shapes above.
 /// Selected groups are shared across the main attention heads. No main K/V is read here.
 /// Preparation updates keys and carry for every active token. Selection writes only
@@ -80,6 +80,7 @@ pub struct QSAIndexerPrepareInput<'a> {
 pub struct QSAIndexerSelectInput<'a> {
     pub shape: qsa_indexer::Shape,
     pub num_active_tokens: ReplayU32,
+    pub num_active_score_task_templates: ReplayU32,
     pub batch_metadata: &'a QSAIndexerMetadataBuffers,
     pub pages: &'a Buffer,
     pub page_ids: &'a Buffer,
@@ -145,15 +146,7 @@ impl QSAIndexer {
     }
 
     pub fn new_scratch(&self, device: &Device, max_tokens: u32, max_groups: u32) -> QSAIndexerScratch {
-        QSAIndexerScratch::new(
-            device,
-            self.core,
-            &self.compute,
-            qsa_indexer::Shape {
-                num_total_tokens: max_tokens,
-                num_total_groups: max_groups,
-            },
-        )
+        QSAIndexerScratch::new(device, self.core, max_tokens, max_groups)
     }
 
     pub fn replay_token_topology_boundaries(&self) -> Box<[u32]> {
@@ -210,14 +203,16 @@ impl QSAIndexer {
             input.shape,
             input.batch_metadata.layout(),
             input.num_active_tokens,
+            input.num_active_score_task_templates,
             qsa_indexer::SelectBuffers {
                 q: input.scratch.q(),
                 tokens: input.batch_metadata.tokens(),
+                score_task_templates: input.batch_metadata.score_task_templates(),
                 pages: input.pages,
                 page_ids: input.page_ids,
                 group_ids: input.group_ids,
             },
-            input.scratch.selection(),
+            input.scratch.scores(),
         )));
         input.group_ids
     }

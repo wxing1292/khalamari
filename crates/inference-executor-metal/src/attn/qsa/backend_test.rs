@@ -27,11 +27,11 @@ use super::QSA;
 use super::QSAInput;
 use super::QSAKVCacheBindings;
 use super::QSAMetalConfig;
+use super::QSAReplay;
 use super::QSAReplayTopology;
 use super::QSAWeights;
 use crate::attn::qsa::batch_metadata::QSASDPAMetadataBuffers;
 use crate::attn::qsa::sdpa::QSASDPAConfig;
-use crate::attn::qsa::sdpa::QSASDPAReplay;
 use crate::attn::qsa::sdpa::QSASDPAShape;
 use crate::attn::qsa_indexer::backend::QSAIndexerCacheBindings;
 use crate::attn::qsa_indexer::batch_metadata::QSAIndexerMetadataBuffers;
@@ -79,6 +79,9 @@ fn test_replay_bucketing() {
     };
     let indexer_shape = QSAIndexerShape {
         num_total_tokens: sdpa_shape.num_total_tokens,
+        num_total_sparse_queries: sdpa_shape.num_total_tokens,
+        num_total_request_sparse_queries: sdpa_shape.num_total_tokens,
+        num_total_score_task_templates: sdpa_shape.num_total_tokens,
         num_total_groups: INDEX_GROUP_CAPACITY,
     };
     let indexer_layout = CacheLayout {
@@ -187,9 +190,9 @@ fn test_replay_bucketing() {
             );
             assert_eq!(
                 (
-                    active.num_active_tokens,
-                    active.num_active_dense_queries,
-                    active.num_active_sparse_queries,
+                    active.sdpa.num_active_tokens,
+                    active.sdpa.num_active_dense_queries,
+                    active.sdpa.num_active_sparse_queries,
                 ),
                 *expected_active
             );
@@ -211,7 +214,7 @@ fn test_replay_bucketing() {
                 },
                 weights: weights.bindings(),
                 scratch: scratch_bindings,
-                active: QSASDPAReplay::parameters(),
+                active: QSAReplay::parameters(),
             };
             let reference = reference_qsa(QSAReferenceInput {
                 main_core: &main_core,
@@ -283,7 +286,7 @@ fn test_replay_bucketing() {
             assert_sparse_group_ids(scratch_bindings.selected_group_ids, requests, &reference.indexer_rows);
             assert_eq!(key.num_total_tokens, sdpa_shape.num_total_tokens);
             assert_eq!(key.num_total_sparse_queries, sdpa_shape.num_total_sparse_queries);
-            assert_eq!(key.indexer_num_total_groups, indexer_shape.num_total_groups);
+            assert_eq!(key.indexer_shape.num_total_groups, indexer_shape.num_total_groups);
             assert_candidate_states(
                 &cache.indexer_states,
                 &before_states,
@@ -327,7 +330,7 @@ impl ReplayComponent for TestQSA {
         QSAReplayKey {
             num_total_tokens: input.batch_metadata.shape().num_total_tokens,
             num_total_sparse_queries: input.batch_metadata.shape().num_total_sparse_queries,
-            indexer_num_total_groups: input.scratch.indexer_shape.num_total_groups,
+            indexer_shape: input.scratch.indexer_shape,
             topology: self.0.replay_topology(input.batch_metadata.shape().num_total_tokens),
         }
     }
@@ -341,7 +344,7 @@ impl ReplayComponent for TestQSA {
 struct QSAReplayKey {
     num_total_tokens: u32,
     num_total_sparse_queries: u32,
-    indexer_num_total_groups: u32,
+    indexer_shape: QSAIndexerShape,
     topology: QSAReplayTopology,
 }
 

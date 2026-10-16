@@ -45,7 +45,7 @@ For each executor component, include one-layer production forward perf and confi
 Backend Criterion targets:
 
 ```text
-dense_mlp  sparse_mlp  moe  gqa_split_kv  gqa_bidi_block_sdpa  gdn_attn  gdn_state_io
+dense_mlp  sparse_mlp  moe  gqa_split_kv  gqa_bidi_block_sdpa  qsa_indexer  gdn_attn  gdn_state_io
 embedding  unembedding  norm  gated_residual  affine_quantized_matmul  matmul_bf16  buffer_io
 ```
 
@@ -66,6 +66,9 @@ Real-weight targets accept the model paths that their production owner needs.
 These targets share `--iters`, `--warmup-iters`, and `--runs`.
 
 Production `src` must not gain benchmark-only state, feature paths, or environment controls.
+
+The [QSA indexer guide](executor_qsa_indexer.md#benchmarks) separates the production replay benchmark from
+the cross-framework scorer study. Its [result snapshot](qsa_indexer_performance.json) preserves the measured candidate medians and source identity.
 
 For the Qwen3x GPU-prepared DSpark path or the Qwen3.5 DFlash2 path, compare a baseline commit or binary with the
 current commit or binary.

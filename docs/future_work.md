@@ -62,6 +62,40 @@ Revisit high-throughput long Prefill after the current Decode work.
 Select changes from end-to-end TTFT and prompt throughput.
 Preserve ragged batches, mixed Prefill/Decode, and cache/state lifecycle.
 
+### QSA indexer score follow-up
+
+The [indexer guide](executor_qsa_indexer.md#score-study-2026-10-16) records the completed prefill study and current BM32 policy.
+The study does not measure production Metal ICB composition or a complete framework indexer.
+
+Remaining work:
+
+- Measure the updated production path against the recorded baseline. Include mixed requests and flat final templates beside BM32 head-loop tasks.
+- Run the deferred small-Q matrix: requests 1/2/4, Q tokens 1/2/3/4/5/6/7/8/12/16, context 0/1K/2K/4K/8K/16K/32K/64K.
+- Keep existing SIMD/flat choices for small Q until that matrix supports a change.
+- Compare the production sampled/full radix policy separately from the study's common full256 selector.
+- Include producer layout or repacking costs before changing token-major Q or paged K.
+- Inspect compiler register allocation before attributing resident-Q losses to spills. Source-level payload is not measured occupancy.
+
+The runner retains 29 score variants. Use a new output directory after measurement-source or environment changes.
+Plan and report modes do not use the GPU. GPU workers must run serially.
+The default has no time limit. Every worker validates scores and selected IDs against CPU math before timing.
+Any new system swap stops the run. Repeat the same command to retry the affected case and skip completed cases.
+
+```sh
+python3 scripts/qsa_indexer_score_matrix.py --mode plan --suite small-q
+
+caffeinate -i python3 scripts/qsa_indexer_score_matrix.py --mode run --suite small-q \
+  --python /path/to/mlx-and-tensorfold/bin/python \
+  --out target/perf/qsa-indexer-score-small-q
+
+python3 scripts/qsa_indexer_score_matrix.py --mode report \
+  --out target/perf/qsa-indexer-score-small-q
+```
+
+`identity.json` records source hashes, Git state, device, package versions, and command.
+Each case retains raw samples, correctness records, generated shaders, memory observations, and completion status.
+The report excludes interrupted attempts. `summary.csv` and `selection.json` retain medians and fitted shape thresholds.
+
 ## Multimodal Input
 
 - Measure resource-level early unload: peak arena bytes, rematerialization, and repeated audio/image/video placements.

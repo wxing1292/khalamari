@@ -1470,6 +1470,8 @@ Debug in this order:
 
 ## QSA SDPA
 
+The [QSA indexer](executor_qsa_indexer.md) owns pooled-key preparation, score selection, and indexer replay metadata.
+
 `attn::qsa::sdpa::QSASDPA` consumes prepared BF16 Q and an FP8 page cache.
 It supports 24 Q heads, two KV heads, head dimension 256, and 32 KiB pages.
 One page stores both K/V planes and both KV heads for 32 tokens.

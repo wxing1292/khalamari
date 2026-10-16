@@ -37,7 +37,7 @@ pub struct Output {
     pub keys: Vec<f32>,
     pub raw_keys: Vec<f32>,
     pub scores: Vec<Vec<f32>>,
-    /// Select all in group order when the range fits. Otherwise sort by score, then group ID.
+    /// Chronological IDs. Higher scores win; lower group IDs win cutoff ties.
     pub group_ids: Vec<Vec<u32>>,
 }
 
@@ -102,6 +102,7 @@ pub fn projected_indexer(input: Input<'_>) -> Output {
             });
         }
         ids.truncate(core.top_k);
+        ids.sort_unstable();
         scores.push(row);
         group_ids.push(ids);
     }
