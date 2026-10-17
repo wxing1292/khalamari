@@ -24,7 +24,8 @@ const TASK_TEMPLATE_FIELDS: usize = 3;
 /// bound. Sparse selected IDs stay indexed by original query row.
 pub struct QSASDPAMetadataBuffers {
     config: QSASDPAConfig,
-    shape: QSASDPAShape,
+    capacity: QSASDPAShape,
+    shape: Cell<QSASDPAShape>,
     req_slots: Buffer,
     query_positions: Buffer,
     dense_query_rows: Buffer,
@@ -36,7 +37,7 @@ pub struct QSASDPAMetadataBuffers {
     dense_variant: backend_sdpa::ExecutionVariant,
     dense_selector: Selector,
     dense_policy: GQAReplayBucketPolicy,
-    sparse_split_count: u32,
+    sparse_split_count: Cell<u32>,
 }
 
 impl QSASDPAMetadataBuffers {
@@ -68,7 +69,8 @@ impl QSASDPAMetadataBuffers {
             .collect::<Vec<_>>();
         let buffers = Self {
             config,
-            shape,
+            capacity: shape,
+            shape: Cell::new(shape),
             req_slots: Buffer::new_zeroed_elements(device, shape.num_total_tokens as usize, Dtype::Uint32),
             query_positions: Buffer::new_zeroed_elements(device, shape.num_total_tokens as usize, Dtype::Uint32),
             dense_query_rows: Buffer::new_zeroed_elements(device, shape.num_total_tokens as usize, Dtype::Uint32),
@@ -103,14 +105,14 @@ impl QSASDPAMetadataBuffers {
                 dense_map_tasks,
             ),
             dense_policy: GQAReplayBucketPolicy::new(shape.num_total_tokens, shape.num_total_tokens, &[]),
-            sparse_split_count,
+            sparse_split_count: Cell::new(sparse_split_count),
         };
         buffers.sparse_cu_partial_outputs.write_typed(0, &sparse_offsets);
         buffers
     }
 
     pub fn shape(&self) -> QSASDPAShape {
-        self.shape
+        self.shape.get()
     }
 
     pub fn config(&self) -> QSASDPAConfig {
@@ -118,7 +120,7 @@ impl QSASDPAMetadataBuffers {
     }
 
     pub fn sparse_split_count(&self) -> u32 {
-        self.sparse_split_count
+        self.sparse_split_count.get()
     }
 
     pub fn req_slots(&self) -> &Buffer {
@@ -161,9 +163,24 @@ impl QSASDPAMetadataBuffers {
 
     /// Rebuilds active row partitions and the existing dense GQA selection.
     pub fn update(&self, requests: &[QSASDPARequest]) -> QSASDPAActive {
+        self.update_with_shape(requests, self.shape())
+    }
+
+    /// Reuses initialized buffers for a smaller record-time shape.
+    pub fn update_with_shape(&self, requests: &[QSASDPARequest], shape: QSASDPAShape) -> QSASDPAActive {
+        shape.validate();
+        assert!(shape.num_total_tokens <= self.capacity.num_total_tokens);
+        assert!(shape.num_total_sparse_queries <= self.capacity.num_total_sparse_queries);
+        self.shape.set(shape);
+        let splits = inference_backend_metal::components::qsa_sparse_gqa::Compute::selected_split_count(
+            shape.num_total_sparse_queries,
+        );
+        self.sparse_split_count.set(splits);
+        let offsets: Vec<u32> = (0..=shape.num_total_sparse_queries).map(|q| q * splits).collect();
+        self.sparse_cu_partial_outputs.write_typed(0, &offsets);
         let plan = build_plan(
             self.config,
-            self.shape,
+            shape,
             &self.dense_selector,
             &self.dense_policy,
             self.dense_variant,

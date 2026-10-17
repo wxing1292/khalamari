@@ -4,6 +4,15 @@ This document owns the executor verification ladder, benchmark surfaces, metrics
 evidence requirements. Component math and source layouts remain in the matching `executor_*.md`.
 [`service.md`](service.md) contains the service lifecycle and end-to-end commands.
 
+## Qwen4x correctness
+
+Run `bash scripts/qwen4x_validate.sh` for the serial fixed/random CPU-reference and GPU lifecycle suite.
+The script saves complete logs, commit, dirty state, and hardware under `target/validation/qwen4x`.
+An optional checkpoint argument captures the first eight or all Main layers.
+The capture checks finite output and does not establish cross-framework numerical parity.
+See [Qwen4x verification](executor_qwen4x.md#verification).
+This script does not measure performance.
+
 ## Verification ladder
 
 Use the smallest production owner that can prove the changed contract, then compose upward:

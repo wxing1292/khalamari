@@ -175,6 +175,15 @@ impl Compute {
         Selector::select(self.config, num_total_tokens, shards)
     }
 
+    /// Geometry-level boundaries. Table format can remove a resident path, but cannot add another boundary.
+    pub fn lookup_token_topology_boundaries(&self) -> Box<[u32]> {
+        if self.config.supports_resident_lookup() {
+            Box::new([Selector::H1_CAPACITY + 1])
+        } else {
+            Box::new([])
+        }
+    }
+
     /// First capacity where the recorded lookup topology changes for this table layout.
     pub fn lookup_topology_boundaries(&self, shards: &[Shard<'_>]) -> Box<[u32]> {
         assert!(!shards.is_empty());
@@ -224,7 +233,7 @@ impl Compute {
         ids: &'a Buffer,
         output: &'a Buffer,
         scale: f32,
-        shards: &'a [Shard<'a>],
+        shards: &[Shard<'a>],
     ) -> LookupInvocation<'a> {
         validate_active(num_total_tokens, num_active_tokens);
         assert_u32_index_domain(
@@ -274,7 +283,7 @@ impl Compute {
             ids,
             output,
             scale,
-            shards,
+            shards: shards.to_vec(),
         }
     }
 }
@@ -316,7 +325,7 @@ pub struct LookupInvocation<'a> {
     ids: &'a Buffer,
     output: &'a Buffer,
     scale: f32,
-    shards: &'a [Shard<'a>],
+    shards: Vec<Shard<'a>>,
 }
 impl Operator for LookupInvocation<'_> {
     fn record(self, recorder: &CommandRecorder<'_>) {
@@ -326,7 +335,7 @@ impl Operator for LookupInvocation<'_> {
         }
         // Shard intervals are disjoint. Every selected ID has exactly one writer.
         recorder.record_disjoint_buffers(&[self.output], || {
-            for shard in self.shards {
+            for shard in &self.shards {
                 let weight = match shard.weights {
                     TableWeights::Bf16(weight) => {
                         recorder.set_kernel(&self.compute.lookup_bf16);

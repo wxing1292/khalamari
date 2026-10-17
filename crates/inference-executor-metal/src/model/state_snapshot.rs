@@ -57,6 +57,8 @@ pub enum StateSnapshotFile {
     MTPGQARequestPageTable,
     DSparkGQARequestPageTable,
     DFlash2GQARequestPageTable,
+    Qwen4xAuxState,
+    Qwen4xRequestState,
 }
 
 impl StateSnapshotFile {
@@ -70,19 +72,22 @@ impl StateSnapshotFile {
             Self::MTPGQARequestPageTable => "mtp-gqa-request-page-table",
             Self::DSparkGQARequestPageTable => "dspark-gqa-request-page-table",
             Self::DFlash2GQARequestPageTable => "dflash2-gqa-request-page-table",
+            Self::Qwen4xAuxState => "qwen4x-aux-state",
+            Self::Qwen4xRequestState => "qwen4x-request-state",
         }
     }
 
     fn kind(self) -> StateSnapshotFileKind {
         match self {
-            Self::MainGDNRequestStateTable => StateSnapshotFileKind::Metadata,
+            Self::MainGDNRequestStateTable | Self::Qwen4xRequestState => StateSnapshotFileKind::Metadata,
             Self::PageArena
             | Self::MainGQARequestPageTable
             | Self::MainGDNRecurrentState
             | Self::MainGDNConvState
             | Self::MTPGQARequestPageTable
             | Self::DSparkGQARequestPageTable
-            | Self::DFlash2GQARequestPageTable => StateSnapshotFileKind::Buffer,
+            | Self::DFlash2GQARequestPageTable
+            | Self::Qwen4xAuxState => StateSnapshotFileKind::Buffer,
         }
     }
 }

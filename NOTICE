@@ -65,3 +65,7 @@ See licenses/omlx-Apache-2.0.txt. The psi implementation uses caller-owned
 metadata, resident table groups, and capacity-selected Metal replay kernels.
 The grouped resident lookup also follows the eight-table design in TensorFold
 0.6.6 (Apache-2.0). See licenses/tensorfold-Apache-2.0.txt.
+
+The PLE baseline follows the same oMLX arithmetic. The psi implementation
+separates preparation, application, and accepted-prefix state commit through
+caller-owned Metal replay.

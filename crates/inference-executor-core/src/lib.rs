@@ -4,6 +4,7 @@ pub mod checkpoint;
 pub mod def;
 pub mod gated_residual;
 pub mod ngram_embedding;
+pub mod ple;
 pub mod model;
 pub mod mlp;
 pub mod reference;

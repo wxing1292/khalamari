@@ -104,7 +104,12 @@ Both: no shared memory or reduction. No table data is reused across heads.
 The selector records H4 for this capacity. Submission can reduce the active count without changing that choice.
 ```
 
-`lookup_topology` exposes the selected kind. `lookup_topology_boundaries` returns `[257]` for eligible resident tables and `[]` otherwise.
+`lookup_topology` exposes the selected kind.
+`lookup_topology_boundaries` returns `[257]` for eligible resident tables and `[]` otherwise.
+`lookup_token_topology_boundaries` exposes possible geometry boundaries before checkpoint buffers are loaded.
+The model can build its replay bucket policy before it loads table storage.
+Lookup recording owns a copy of the small shard descriptor list.
+The table buffers retain their caller-owned lifetime.
 The replay key must contain total capacity, selected topology, table layout, and other record-time binding facts.
 `num_active_tokens` is a submission parameter. Inactive token threadblocks return before reading IDs or writing output.
 A capacity of 512 with one active token keeps H4. It does not change the recorded program to H1.

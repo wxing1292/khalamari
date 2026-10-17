@@ -7,6 +7,9 @@ Qwen3.5 supports separate Vanilla, reusable-layer MTP, fixed-block DSpark, and D
 The `v3_x` directories contain version-neutral leaf components, utilities, and the Qwen3x DSpark and DFlash2 models.
 Each model owns its structural contracts and execution graph.
 
+Qwen4x has an independent [Main-only executor](executor_qwen4x.md).
+It reuses the generic leaf components and keeps its GR, QSA, and PLE graph in `v4_x`.
+
 ## Numerical checkpoints
 
 Set `PSI_QWEN35_CHECK_FINITE=1` before starting the process to enable numerical checkpoints.

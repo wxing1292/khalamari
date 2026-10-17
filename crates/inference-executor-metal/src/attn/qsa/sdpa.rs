@@ -61,7 +61,7 @@ impl QSASDPAConfig {
 
 /// Static replay capacity. Sparse capacity is independent of total token
 /// capacity because dense-prefix rows do not use SplitKV.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct QSASDPAShape {
     pub num_total_tokens: u32,
     pub num_total_sparse_queries: u32,
@@ -202,18 +202,31 @@ impl QSASDPA {
             num_total_tokens: shape.num_total_tokens,
             num_total_sdpa_map_task_templates: shape.num_total_tokens,
         };
-        let sparse_splits = qsa_sparse_gqa::Compute::selected_split_count(shape.num_total_sparse_queries);
-        let sparse_shape = sliced_kv::Shape {
-            num_total_tokens: shape.num_total_sparse_queries,
-            num_total_sdpa_map_task_templates: shape
-                .num_total_sparse_queries
-                .checked_mul(sparse_splits)
-                .expect("QSA sparse task capacity must fit u32"),
+        let partial_count = |queries: u32| {
+            queries
+                .checked_mul(qsa_sparse_gqa::Compute::selected_split_count(queries))
+                .expect("QSA sparse task capacity must fit u32")
         };
-        let sparse_partials = (sparse_splits > 1).then(|| {
-            let mut sparse_partial_config = dense_sliced_kv_config(self.config);
-            sparse_partial_config.dtype = Dtype::Float32;
-            sliced_kv::Scratch::new(&self.device, sparse_partial_config, sparse_shape)
+        let sparse_queries = std::iter::once(shape.num_total_sparse_queries)
+            .chain(
+                qsa_sparse_gqa::Compute::topology_boundaries()
+                    .iter()
+                    .map(|&b| b - 1)
+                    .filter(|&q| q <= shape.num_total_sparse_queries),
+            )
+            .filter(|&q| qsa_sparse_gqa::Compute::selected_split_count(q) > 1)
+            .max_by_key(|&q| partial_count(q));
+        let sparse_partials = sparse_queries.map(|queries| {
+            let mut partial_config = dense_sliced_kv_config(self.config);
+            partial_config.dtype = Dtype::Float32;
+            sliced_kv::Scratch::new(
+                &self.device,
+                partial_config,
+                sliced_kv::Shape {
+                    num_total_tokens: queries,
+                    num_total_sdpa_map_task_templates: partial_count(queries),
+                },
+            )
         });
         QSASDPAScratch {
             shape,
@@ -232,7 +245,8 @@ impl QSASDPA {
     {
         let shape = input.metadata.shape();
         assert_eq!(input.metadata.config(), self.config);
-        assert_eq!(input.scratch.shape, shape);
+        assert!(shape.num_total_tokens <= input.scratch.shape.num_total_tokens);
+        assert!(shape.num_total_sparse_queries <= input.scratch.shape.num_total_sparse_queries);
         let sparse_split_count = input.metadata.sparse_split_count();
         let metadata_active = input.metadata.active();
         validate_replay(active, metadata_active);

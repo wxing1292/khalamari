@@ -203,13 +203,18 @@ fn test_sparse_replay_success() {
     let sdpa = QSASDPA::new(&device, config);
     let mut replay = Replay::new("test QSA SIMD/MMA", TestQSASDPA(sdpa));
     let mut recorded_keys = HashSet::new();
+    // One persistent allocation must cover both SplitKV and S=1 recordings.
+    let max_shape = QSASDPAShape {
+        num_total_tokens: 515,
+        num_total_sparse_queries: 513,
+    };
+    let scratch = replay.component().0.new_scratch(max_shape);
+    let metadata = QSASDPAMetadataBuffers::new(&device, config, max_shape);
     for (capacity, num_active) in [(1, 1), (2, 2), (4, 3), (8, 5), (128, 8), (513, 4)] {
         let shape = QSASDPAShape {
             num_total_tokens: capacity + 2,
             num_total_sparse_queries: capacity,
         };
-        let scratch = replay.component().0.new_scratch(shape);
-        let metadata = QSASDPAMetadataBuffers::new(&device, config, shape);
         let q_values = fixture_q((capacity + 2) as usize, 0xED91_14AF ^ capacity);
         let q = Buffer::from_slice(&device, &q_values);
         let groups = fixture_selected_groups((capacity + 2) as usize, GROUP_START);
@@ -280,7 +285,7 @@ impl TestBindings<'_> {
         recorded_keys: &mut HashSet<(u32, u32)>,
         requests: &[QSASDPARequest],
     ) -> QSASDPAActive {
-        let active = self.metadata.update(requests);
+        let active = self.metadata.update_with_shape(requests, self.shape);
         active.validate(self.shape);
         let expected = reference_outputs(self.config, self.cache, self.q_values, self.selected_groups, requests);
         let before = self

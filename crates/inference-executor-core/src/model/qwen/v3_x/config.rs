@@ -104,9 +104,9 @@ fn normalize_qwen_name(name: &str) -> String {
     normalized.to_string()
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct RopeParameters {
-    #[serde(default)]
+    #[serde(default, alias = "type")]
     pub rope_type: Option<String>,
     #[serde(default)]
     pub rope_theta: Option<f32>,

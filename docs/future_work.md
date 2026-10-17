@@ -4,6 +4,16 @@ This file tracks unresolved implementation work and bounded investigations.
 Current behavior and completed designs belong in the [owning documents](README.md).
 [Engineering conventions](engineering_conventions.md) own shared optimization, validation, and replay rules.
 
+## Qwen4x integration
+
+- Run `bash scripts/qwen4x_validate.sh` when the GPU is available. Check fixed/random first8 parity, mixed requests, chunked decode, prefix restore, and selected hibernation.
+- Compare real first8 hidden states with oMLX or TensorFold. Then validate full Main and the external HTTP service path.
+- Finish and optimize PLE after wiring validation. Compare grouped norm, gate, convolution, and projection paths through the production component.
+- Evaluate overlap of token-only n-gram lookup and PLE preparation with layer 0. The current schedule is serial.
+- Discuss runtime cache-block sizing separately after wiring. Compare the current 2048-token block, 32 KiB physical pages, and QSA four-token groups. The executor owns their mapping.
+- Keep MTP, external speculative acceptance, vision, and SSD offload outside this integration. Define retained QSA carry and PLE history before adding speculation.
+
+
 ## Agent Integration
 
 - Separate turn interruption from session shutdown in the Pi provider. Its `AbortSignal` currently closes the complete generation stream.
@@ -98,7 +108,7 @@ The report excludes interrupted attempts. `summary.csv` and `selection.json` ret
 
 ## N-gram embedding
 
-- Wire [resident n-gram embedding](executor_ngram_embedding.md) through the checkpoint/table loader and model owner. Preserve global row IDs when loading final groups directly from checkpoint shards.
+- Validate the [Qwen4x resident table loader](executor_qwen4x.md#checkpoint-boundary) against a real checkpoint. It preserves global row IDs and loads checkpoint shards into final resident groups.
 - Validate checkpoint-sized cache/TLB behavior and production component latency after loading. Keep active counts, recorded capacities, and lookup topology distinct in replay keys.
 
 ## Multimodal Input

@@ -25,6 +25,8 @@ pub mod dynamic_grouped_conv;
 
 pub mod embedding;
 pub mod ngram_embedding;
+pub mod ple;
+pub mod state_pages;
 pub mod layer_norm;
 pub mod resource_embed;
 

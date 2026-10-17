@@ -1470,6 +1470,12 @@ Debug in this order:
 
 ## QSA SDPA
 
+Qwen4x reuses stable QSA metadata buffers across record-time capacities with `update_with_shape`.
+The scratch owner allocates the peak SplitKV partial count across every supported capacity below its limit.
+A maximum-capacity S=1 path therefore does not exclude smaller SplitKV recordings.
+See [Qwen4x replay](executor_qwen4x.md#replay-and-reusable-storage) for model ownership.
+
+
 The [QSA indexer](executor_qsa_indexer.md) owns pooled-key preparation, score selection, and indexer replay metadata.
 
 `attn::qsa::sdpa::QSASDPA` consumes prepared BF16 Q and an FP8 page cache.

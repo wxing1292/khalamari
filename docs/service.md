@@ -262,6 +262,19 @@ cargo run --release --bin qwen3 -- \
   --hf-model-dir "$PWD/models/Qwen3-14B-4bit"
 ```
 
+Qwen4x Main-only startup with a compatible affine checkpoint:
+
+```sh
+cargo run --release -p inference-runtime-service --bin qwen4x -- \
+  --hf-model-dir /path/to/Qwen4x-affine
+```
+
+`qwen4x` uses the shared hybrid-server CLI and 2048-token logical cache blocks.
+It rejects speculative model flags and resource inputs.
+The executor owns the main KV, index K, and auxiliary-state page layout.
+The complete resident n-gram table must fit memory.
+See [Qwen4x](executor_qwen4x.md) for composition and validation limits.
+
 Qwen3-ASR startup:
 
 ```sh

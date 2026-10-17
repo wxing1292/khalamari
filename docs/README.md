@@ -30,12 +30,13 @@ The Qwen guide owns whole-model composition. The other guides own the named comp
 
 | Component or lifecycle | Guide |
 | --- | --- |
-| Qwen model composition | [Qwen executor](executor_qwen.md) |
+| Qwen model composition | [Qwen executor](executor_qwen.md), [Qwen4x](executor_qwen4x.md) |
 | Embedding, normalization, and unembedding | [Model primitives](executor_model_primitives.md) |
 | GQA / QSA | [GQA](executor_gqa.md), [QSA SDPA](executor_gqa.md#qsa-sdpa), [QSA indexer](executor_qsa_indexer.md), [kernel selection](gqa_sdpa_selection.md) |
 | Gated DeltaNet | [GDN](executor_gdn.md) |
 | Gated residual | [GR](executor_gated_residual.md) |
 | N-gram embedding | [N-gram embedding](executor_ngram_embedding.md) |
+| PLE | [Per-layer embedding](executor_ple.md) |
 | Dense MLP | [Dense MLP](executor_dense_mlp.md) |
 | MoE | [MoE](executor_moe.md) |
 | Sampling and rejection sampling | [Sampling](executor_sampling.md) |
