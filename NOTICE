@@ -58,3 +58,10 @@ https://github.com/ashhart/TensorFold
 Copyright 2026 TensorFold contributors (Apache-2.0).
 See licenses/tensorfold-Apache-2.0.txt. The psi implementation uses paged keys,
 existing token metadata, replay capacities, and chronological logical group IDs.
+
+The n-gram embedding follows hash parameter construction and arithmetic in
+oMLX commit 64bf5d1ba6336b45955c00f7fe0e46acd5c85095 (Apache-2.0).
+See licenses/omlx-Apache-2.0.txt. The psi implementation uses caller-owned
+metadata, resident table groups, and capacity-selected Metal replay kernels.
+The grouped resident lookup also follows the eight-table design in TensorFold
+0.6.6 (Apache-2.0). See licenses/tensorfold-Apache-2.0.txt.

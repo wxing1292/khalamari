@@ -1,0 +1,1115 @@
+{
+  "scope": "Observed warm resident benchmark prototypes. Production integration retains arithmetic and launch geometry, adds active-count binding, and records row starts as constants. No new production performance run is claimed.",
+  "machine": {
+    "machdep.cpu.brand_string": "Apple M3 Max",
+    "hw.memsize": "51539607552"
+  },
+  "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
+  "peers": {
+    "omlx": "64bf5d1ba6336b45955c00f7fe0e46acd5c85095",
+    "tensorfold": "cb2ebf0540f42604e2759b2ddef497861e928248",
+    "versions": {
+      "mlx": "0.32.4",
+      "numpy": "2.5.4"
+    }
+  },
+  "table": {
+    "rows": 16001906,
+    "bytes": 1600190600,
+    "heads": 16,
+    "head_dim": 160,
+    "bits": 4,
+    "group_size": 32,
+    "resident_groups": 8,
+    "checkpoint_shards": 128
+  },
+  "selection": {
+    "num_total_tokens_le": 256,
+    "small": "ResidentH1",
+    "large": "ResidentH4",
+    "grid": "X",
+    "fitted_cutoff": 288,
+    "training_cost_increase_percent": 0.0252
+  },
+  "crossover": {
+    "commit": "1f32600f1002ce35ca48eb5d0c49732912c151ed",
+    "dirty": true,
+    "identity_key": "1b6bbb9e5c4d32082dcc57a4af6a32fd398f8ed058bb492cdc4b55fa4d7dc192",
+    "command": [
+      "scripts/ple_compare.py",
+      "--suite",
+      "crossover",
+      "--mode",
+      "run",
+      "--tensorfold-dir",
+      "/private/tmp/psi-dec-ple-resident-20261016/tensorfold/src/tensorfold/kernels/qwen/flash_next/v1",
+      "--table-dir",
+      "target/perf/ple-resident-small/weights/h2560_e2560_v1000000_s128",
+      "--out",
+      "target/perf/ple-lookup-crossover"
+    ],
+    "metric": "wall latency per submission in microseconds; medians and ratios use held-out rounds 8..16",
+    "warmups": 10,
+    "iters": 100,
+    "rounds": 16,
+    "validation_checks": 144,
+    "timing_workers": 2176,
+    "timing_swap_delta": 0,
+    "preflight_swapins": 4,
+    "policy": {
+      "cutoff": 288,
+      "cutoff_interval": {
+        "start": 288,
+        "end": 320
+      },
+      "training_over_h1": 0.9968301736437767,
+      "training_cutoffs": [
+        {
+          "cutoff": 0,
+          "over_h1": 1.0110756448157685
+        },
+        {
+          "cutoff": 1,
+          "over_h1": 1.0091751962364472
+        },
+        {
+          "cutoff": 2,
+          "over_h1": 1.0083660787356967
+        },
+        {
+          "cutoff": 3,
+          "over_h1": 1.007392147441818
+        },
+        {
+          "cutoff": 4,
+          "over_h1": 1.0063949595798574
+        },
+        {
+          "cutoff": 5,
+          "over_h1": 1.0053806378033603
+        },
+        {
+          "cutoff": 6,
+          "over_h1": 1.0051455681416934
+        },
+        {
+          "cutoff": 7,
+          "over_h1": 1.0035139362938823
+        },
+        {
+          "cutoff": 8,
+          "over_h1": 1.0025379933506007
+        },
+        {
+          "cutoff": 12,
+          "over_h1": 1.0008123324631921
+        },
+        {
+          "cutoff": 16,
+          "over_h1": 1.0001198457785185
+        },
+        {
+          "cutoff": 24,
+          "over_h1": 0.9996997042287575
+        },
+        {
+          "cutoff": 32,
+          "over_h1": 0.9991319470149101
+        },
+        {
+          "cutoff": 48,
+          "over_h1": 0.9976600432691404
+        },
+        {
+          "cutoff": 64,
+          "over_h1": 0.9977009651617604
+        },
+        {
+          "cutoff": 80,
+          "over_h1": 0.9972613557415146
+        },
+        {
+          "cutoff": 96,
+          "over_h1": 0.9971857515523287
+        },
+        {
+          "cutoff": 112,
+          "over_h1": 0.9969857743043695
+        },
+        {
+          "cutoff": 128,
+          "over_h1": 0.9971260355597594
+        },
+        {
+          "cutoff": 144,
+          "over_h1": 0.9971287265803109
+        },
+        {
+          "cutoff": 160,
+          "over_h1": 0.9973195285941495
+        },
+        {
+          "cutoff": 176,
+          "over_h1": 0.9972711572710597
+        },
+        {
+          "cutoff": 192,
+          "over_h1": 0.9971075966984596
+        },
+        {
+          "cutoff": 208,
+          "over_h1": 0.997139172676466
+        },
+        {
+          "cutoff": 224,
+          "over_h1": 0.9970421117380144
+        },
+        {
+          "cutoff": 240,
+          "over_h1": 0.9969664265291498
+        },
+        {
+          "cutoff": 256,
+          "over_h1": 0.9970813495392202
+        },
+        {
+          "cutoff": 288,
+          "over_h1": 0.9968301736437767
+        },
+        {
+          "cutoff": 320,
+          "over_h1": 0.9970065830659129
+        },
+        {
+          "cutoff": 384,
+          "over_h1": 0.9972964540843466
+        },
+        {
+          "cutoff": 448,
+          "over_h1": 0.9976279837312
+        },
+        {
+          "cutoff": 512,
+          "over_h1": 0.997979649994522
+        },
+        {
+          "cutoff": 768,
+          "over_h1": 0.9985637111007916
+        },
+        {
+          "cutoff": 1024,
+          "over_h1": 0.9989223397774476
+        },
+        {
+          "cutoff": 2048,
+          "over_h1": 1.0
+        }
+      ],
+      "validation_policy_over": {
+        "psidec_h1": 0.9970121242105896,
+        "psidec_h4": 0.9880260602965593,
+        "tensorfold": 1.0107075782953632
+      },
+      "cases": [
+        {
+          "case": "r1_q1_h4096_s128",
+          "total_tokens": 1,
+          "requests": 1,
+          "tokens": 1,
+          "arm": "psidec_h1",
+          "training_h4_over_h1": 1.0660578282783282,
+          "validation_h4_over_h1": 1.0388873364461944,
+          "h4_wins": 3,
+          "us": {
+            "psidec_h1": 215.518955,
+            "psidec_h4": 224.28770999999998,
+            "tensorfold": 223.16854
+          },
+          "policy_over": {
+            "psidec_h1": 1.0,
+            "psidec_h4": 0.9627750037687033,
+            "tensorfold": 0.9957195392098306
+          }
+        },
+        {
+          "case": "r1_q2_h4096_s128",
+          "total_tokens": 2,
+          "requests": 1,
+          "tokens": 2,
+          "arm": "psidec_h1",
+          "training_h4_over_h1": 1.0276460661029803,
+          "validation_h4_over_h1": 1.0390701132986186,
+          "h4_wins": 1,
+          "us": {
+            "psidec_h1": 218.64249999999998,
+            "psidec_h4": 229.60708,
+            "tensorfold": 221.28333500000002
+          },
+          "policy_over": {
+            "psidec_h1": 1.0,
+            "psidec_h4": 0.9624020597232417,
+            "tensorfold": 0.9910534243665932
+          }
+        },
+        {
+          "case": "r1_q3_h4096_s128",
+          "total_tokens": 3,
+          "requests": 1,
+          "tokens": 3,
+          "arm": "psidec_h1",
+          "training_h4_over_h1": 1.0334004784786144,
+          "validation_h4_over_h1": 1.02993828660754,
+          "h4_wins": 2,
+          "us": {
+            "psidec_h1": 220.18334,
+            "psidec_h4": 228.49813,
+            "tensorfold": 222.912505
+          },
+          "policy_over": {
+            "psidec_h1": 1.0,
+            "psidec_h4": 0.9709325748746882,
+            "tensorfold": 0.9880915910987347
+          }
+        },
+        {
+          "case": "r1_q4_h4096_s128",
+          "total_tokens": 4,
+          "requests": 1,
+          "tokens": 4,
+          "arm": "psidec_h1",
+          "training_h4_over_h1": 1.0342455963111985,
+          "validation_h4_over_h1": 1.0396745390440199,
+          "h4_wins": 1,
+          "us": {
+            "psidec_h1": 219.42833000000002,
+            "psidec_h4": 230.65916499999997,
+            "tensorfold": 223.18291
+          },
+          "policy_over": {
+            "psidec_h1": 1.0,
+            "psidec_h4": 0.9618411880505005,
+            "tensorfold": 0.9718112508646874
+          }
+        },
+        {
+          "case": "r1_q5_h4096_s128",
+          "total_tokens": 5,
+          "requests": 1,
+          "tokens": 5,
+          "arm": "psidec_h1",
+          "training_h4_over_h1": 1.0348795878171124,
+          "validation_h4_over_h1": 1.030743587989311,
+          "h4_wins": 1,
+          "us": {
+            "psidec_h1": 224.58604,
+            "psidec_h4": 231.11813,
+            "tensorfold": 221.16728999999998
+          },
+          "policy_over": {
+            "psidec_h1": 1.0,
+            "psidec_h4": 0.9702252158599496,
+            "tensorfold": 1.0108885548173594
+          }
+        },
+        {
+          "case": "r1_q6_h4096_s128",
+          "total_tokens": 6,
+          "requests": 1,
+          "tokens": 6,
+          "arm": "psidec_h1",
+          "training_h4_over_h1": 1.007982213449438,
+          "validation_h4_over_h1": 1.0436064400842309,
+          "h4_wins": 0,
+          "us": {
+            "psidec_h1": 216.06646,
+            "psidec_h4": 229.62458500000002,
+            "tensorfold": 222.05479
+          },
+          "policy_over": {
+            "psidec_h1": 1.0,
+            "psidec_h4": 0.9582346236183108,
+            "tensorfold": 0.9746283026258102
+          }
+        },
+        {
+          "case": "r1_q7_h4096_s128",
+          "total_tokens": 7,
+          "requests": 1,
+          "tokens": 7,
+          "arm": "psidec_h1",
+          "training_h4_over_h1": 1.0567903421131986,
+          "validation_h4_over_h1": 1.0422393644922057,
+          "h4_wins": 0,
+          "us": {
+            "psidec_h1": 215.084995,
+            "psidec_h4": 230.95771000000002,
+            "tensorfold": 222.4125
+          },
+          "policy_over": {
+            "psidec_h1": 1.0,
+            "psidec_h4": 0.9594988421560722,
+            "tensorfold": 0.9725532064210822
+          }
+        },
+        {
+          "case": "r1_q8_h4096_s128",
+          "total_tokens": 8,
+          "requests": 1,
+          "tokens": 8,
+          "arm": "psidec_h1",
+          "training_h4_over_h1": 1.0336352502913764,
+          "validation_h4_over_h1": 1.0229827108323903,
+          "h4_wins": 0,
+          "us": {
+            "psidec_h1": 225.710625,
+            "psidec_h4": 230.85083500000002,
+            "tensorfold": 222.83770499999997
+          },
+          "policy_over": {
+            "psidec_h1": 1.0,
+            "psidec_h4": 0.9775387831118388,
+            "tensorfold": 1.0158467872843187
+          }
+        },
+        {
+          "case": "r1_q12_h4096_s128",
+          "total_tokens": 12,
+          "requests": 1,
+          "tokens": 12,
+          "arm": "psidec_h1",
+          "training_h4_over_h1": 1.060323831712048,
+          "validation_h4_over_h1": 1.052676889820411,
+          "h4_wins": 2,
+          "us": {
+            "psidec_h1": 219.42271,
+            "psidec_h4": 231.34083500000003,
+            "tensorfold": 224.53771
+          },
+          "policy_over": {
+            "psidec_h1": 1.0,
+            "psidec_h4": 0.950219596078395,
+            "tensorfold": 0.9792050890558228
+          }
+        },
+        {
+          "case": "r1_q16_h4096_s128",
+          "total_tokens": 16,
+          "requests": 1,
+          "tokens": 16,
+          "arm": "psidec_h1",
+          "training_h4_over_h1": 1.0238126792601883,
+          "validation_h4_over_h1": 1.0229207657982604,
+          "h4_wins": 2,
+          "us": {
+            "psidec_h1": 224.823335,
+            "psidec_h4": 227.900205,
+            "tensorfold": 221.59083500000003
+          },
+          "policy_over": {
+            "psidec_h1": 1.0,
+            "psidec_h4": 0.9777505842233016,
+            "tensorfold": 1.0125796758247598
+          }
+        },
+        {
+          "case": "r1_q24_h4096_s128",
+          "total_tokens": 24,
+          "requests": 1,
+          "tokens": 24,
+          "arm": "psidec_h1",
+          "training_h4_over_h1": 1.0143886359075283,
+          "validation_h4_over_h1": 1.0255308917448038,
+          "h4_wins": 2,
+          "us": {
+            "psidec_h1": 226.02833499999997,
+            "psidec_h4": 231.104375,
+            "tensorfold": 224.165835
+          },
+          "policy_over": {
+            "psidec_h1": 1.0,
+            "psidec_h4": 0.9752022975203177,
+            "tensorfold": 0.9988512183625111
+          }
+        },
+        {
+          "case": "r1_q32_h4096_s128",
+          "total_tokens": 32,
+          "requests": 1,
+          "tokens": 32,
+          "arm": "psidec_h1",
+          "training_h4_over_h1": 1.0195027711094942,
+          "validation_h4_over_h1": 1.016149129315075,
+          "h4_wins": 2,
+          "us": {
+            "psidec_h1": 229.04271,
+            "psidec_h4": 231.188335,
+            "tensorfold": 224.156875
+          },
+          "policy_over": {
+            "psidec_h1": 1.0,
+            "psidec_h4": 0.984109555808296,
+            "tensorfold": 1.011635164080238
+          }
+        },
+        {
+          "case": "r1_q48_h4096_s128",
+          "total_tokens": 48,
+          "requests": 1,
+          "tokens": 48,
+          "arm": "psidec_h1",
+          "training_h4_over_h1": 1.0514026579226368,
+          "validation_h4_over_h1": 1.005452666612361,
+          "h4_wins": 3,
+          "us": {
+            "psidec_h1": 229.43812499999999,
+            "psidec_h4": 230.63416999999998,
+            "tensorfold": 224.287915
+          },
+          "policy_over": {
+            "psidec_h1": 1.0,
+            "psidec_h4": 0.9945811783805933,
+            "tensorfold": 1.0246258763798486
+          }
+        },
+        {
+          "case": "r1_q64_h4096_s128",
+          "total_tokens": 64,
+          "requests": 1,
+          "tokens": 64,
+          "arm": "psidec_h1",
+          "training_h4_over_h1": 0.9986063929039571,
+          "validation_h4_over_h1": 0.9867576449198612,
+          "h4_wins": 4,
+          "us": {
+            "psidec_h1": 229.904375,
+            "psidec_h4": 227.399375,
+            "tensorfold": 225.25146
+          },
+          "policy_over": {
+            "psidec_h1": 1.0,
+            "psidec_h4": 1.0139747404973636,
+            "tensorfold": 1.008461741981932
+          }
+        },
+        {
+          "case": "r1_q80_h4096_s128",
+          "total_tokens": 80,
+          "requests": 1,
+          "tokens": 80,
+          "arm": "psidec_h1",
+          "training_h4_over_h1": 1.0150972939323133,
+          "validation_h4_over_h1": 1.002894907220717,
+          "h4_wins": 2,
+          "us": {
+            "psidec_h1": 234.73645499999998,
+            "psidec_h4": 234.69687499999998,
+            "tensorfold": 225.72666499999997
+          },
+          "policy_over": {
+            "psidec_h1": 1.0,
+            "psidec_h4": 0.997114625864679,
+            "tensorfold": 1.0416990130486337
+          }
+        },
+        {
+          "case": "r1_q96_h4096_s128",
+          "total_tokens": 96,
+          "requests": 1,
+          "tokens": 96,
+          "arm": "psidec_h1",
+          "training_h4_over_h1": 1.0025810244005353,
+          "validation_h4_over_h1": 1.0061935634123804,
+          "h4_wins": 3,
+          "us": {
+            "psidec_h1": 234.401255,
+            "psidec_h4": 235.53312499999998,
+            "tensorfold": 227.263755
+          },
+          "policy_over": {
+            "psidec_h1": 1.0,
+            "psidec_h4": 0.9938574040626159,
+            "tensorfold": 1.0331983129784068
+          }
+        },
+        {
+          "case": "r1_q112_h4096_s128",
+          "total_tokens": 112,
+          "requests": 1,
+          "tokens": 112,
+          "arm": "psidec_h1",
+          "training_h4_over_h1": 1.0068424019177122,
+          "validation_h4_over_h1": 1.0100756851239154,
+          "h4_wins": 1,
+          "us": {
+            "psidec_h1": 236.02479499999998,
+            "psidec_h4": 237.882295,
+            "tensorfold": 231.221455
+          },
+          "policy_over": {
+            "psidec_h1": 1.0,
+            "psidec_h4": 0.9900249176882634,
+            "tensorfold": 1.0182997173242854
+          }
+        },
+        {
+          "case": "r1_q128_h4096_s128",
+          "total_tokens": 128,
+          "requests": 1,
+          "tokens": 128,
+          "arm": "psidec_h1",
+          "training_h4_over_h1": 0.9952284559661657,
+          "validation_h4_over_h1": 0.9970284252957422,
+          "h4_wins": 5,
+          "us": {
+            "psidec_h1": 236.224585,
+            "psidec_h4": 236.821665,
+            "tensorfold": 230.869165
+          },
+          "policy_over": {
+            "psidec_h1": 1.0,
+            "psidec_h4": 1.002987688150497,
+            "tensorfold": 1.014449488350552
+          }
+        },
+        {
+          "case": "r1_q144_h4096_s128",
+          "total_tokens": 144,
+          "requests": 1,
+          "tokens": 144,
+          "arm": "psidec_h1",
+          "training_h4_over_h1": 0.9999082459243223,
+          "validation_h4_over_h1": 0.9971042207650747,
+          "h4_wins": 6,
+          "us": {
+            "psidec_h1": 239.04499499999997,
+            "psidec_h4": 238.06542000000002,
+            "tensorfold": 230.45166999999998
+          },
+          "policy_over": {
+            "psidec_h1": 1.0,
+            "psidec_h4": 1.0029041907880787,
+            "tensorfold": 1.0345513289487247
+          }
+        },
+        {
+          "case": "r1_q160_h4096_s128",
+          "total_tokens": 160,
+          "requests": 1,
+          "tokens": 160,
+          "arm": "psidec_h1",
+          "training_h4_over_h1": 0.9935157873806458,
+          "validation_h4_over_h1": 0.9925129355394797,
+          "h4_wins": 6,
+          "us": {
+            "psidec_h1": 239.81625,
+            "psidec_h4": 239.208955,
+            "tensorfold": 231.00687499999998
+          },
+          "policy_over": {
+            "psidec_h1": 1.0,
+            "psidec_h4": 1.007545240644626,
+            "tensorfold": 1.0478115454369041
+          }
+        },
+        {
+          "case": "r1_q176_h4096_s128",
+          "total_tokens": 176,
+          "requests": 1,
+          "tokens": 176,
+          "arm": "psidec_h1",
+          "training_h4_over_h1": 1.0016504456840423,
+          "validation_h4_over_h1": 1.002981391350742,
+          "h4_wins": 3,
+          "us": {
+            "psidec_h1": 240.571665,
+            "psidec_h4": 242.16666500000002,
+            "tensorfold": 231.654585
+          },
+          "policy_over": {
+            "psidec_h1": 1.0,
+            "psidec_h4": 0.9970340895899137,
+            "tensorfold": 1.0363638816166074
+          }
+        },
+        {
+          "case": "r1_q192_h4096_s128",
+          "total_tokens": 192,
+          "requests": 1,
+          "tokens": 192,
+          "arm": "psidec_h1",
+          "training_h4_over_h1": 1.0055923125016804,
+          "validation_h4_over_h1": 1.0055611134109557,
+          "h4_wins": 2,
+          "us": {
+            "psidec_h1": 240.82103999999998,
+            "psidec_h4": 241.99895999999998,
+            "tensorfold": 231.205415
+          },
+          "policy_over": {
+            "psidec_h1": 1.0,
+            "psidec_h4": 0.9944696526995234,
+            "tensorfold": 1.0398823301469333
+          }
+        },
+        {
+          "case": "r1_q208_h4096_s128",
+          "total_tokens": 208,
+          "requests": 1,
+          "tokens": 208,
+          "arm": "psidec_h1",
+          "training_h4_over_h1": 0.9989238989646572,
+          "validation_h4_over_h1": 1.0115230565556725,
+          "h4_wins": 2,
+          "us": {
+            "psidec_h1": 239.993125,
+            "psidec_h4": 242.473545,
+            "tensorfold": 234.424165
+          },
+          "policy_over": {
+            "psidec_h1": 1.0,
+            "psidec_h4": 0.9886112421271598,
+            "tensorfold": 1.0163558047366834
+          }
+        },
+        {
+          "case": "r1_q224_h4096_s128",
+          "total_tokens": 224,
+          "requests": 1,
+          "tokens": 224,
+          "arm": "psidec_h1",
+          "training_h4_over_h1": 1.0033151841222834,
+          "validation_h4_over_h1": 1.0008913728481381,
+          "h4_wins": 4,
+          "us": {
+            "psidec_h1": 242.48812500000003,
+            "psidec_h4": 242.599375,
+            "tensorfold": 233.61604
+          },
+          "policy_over": {
+            "psidec_h1": 1.0,
+            "psidec_h4": 0.9991272306401094,
+            "tensorfold": 1.021715246709201
+          }
+        },
+        {
+          "case": "r1_q240_h4096_s128",
+          "total_tokens": 240,
+          "requests": 1,
+          "tokens": 240,
+          "arm": "psidec_h1",
+          "training_h4_over_h1": 1.0025843628947073,
+          "validation_h4_over_h1": 0.9976752778664693,
+          "h4_wins": 5,
+          "us": {
+            "psidec_h1": 243.306665,
+            "psidec_h4": 242.98417,
+            "tensorfold": 232.24041499999998
+          },
+          "policy_over": {
+            "psidec_h1": 1.0,
+            "psidec_h4": 1.0023341333448248,
+            "tensorfold": 1.0474769878940728
+          }
+        },
+        {
+          "case": "r1_q256_h4096_s128",
+          "total_tokens": 256,
+          "requests": 1,
+          "tokens": 256,
+          "arm": "psidec_h1",
+          "training_h4_over_h1": 0.9960886235720013,
+          "validation_h4_over_h1": 0.998493320357303,
+          "h4_wins": 4,
+          "us": {
+            "psidec_h1": 244.37042,
+            "psidec_h4": 244.65979500000003,
+            "tensorfold": 239.26270999999997
+          },
+          "policy_over": {
+            "psidec_h1": 1.0,
+            "psidec_h4": 1.0015291211092865,
+            "tensorfold": 1.023956202192898
+          }
+        },
+        {
+          "case": "r1_q288_h4096_s128",
+          "total_tokens": 288,
+          "requests": 1,
+          "tokens": 288,
+          "arm": "psidec_h1",
+          "training_h4_over_h1": 1.00860285126717,
+          "validation_h4_over_h1": 0.999051559674101,
+          "h4_wins": 5,
+          "us": {
+            "psidec_h1": 246.76999999999998,
+            "psidec_h4": 246.63063,
+            "tensorfold": 240.779585
+          },
+          "policy_over": {
+            "psidec_h1": 1.0,
+            "psidec_h4": 1.0009501494457296,
+            "tensorfold": 1.0266466557442022
+          }
+        },
+        {
+          "case": "r1_q320_h4096_s128",
+          "total_tokens": 320,
+          "requests": 1,
+          "tokens": 320,
+          "arm": "psidec_h4",
+          "training_h4_over_h1": 0.9940016018336593,
+          "validation_h4_over_h1": 0.9976080629622557,
+          "h4_wins": 5,
+          "us": {
+            "psidec_h1": 247.53312499999998,
+            "psidec_h4": 247.42541999999997,
+            "tensorfold": 237.477085
+          },
+          "policy_over": {
+            "psidec_h1": 0.9976080629622557,
+            "psidec_h4": 1.0,
+            "tensorfold": 1.0358159677124426
+          }
+        },
+        {
+          "case": "r1_q384_h4096_s128",
+          "total_tokens": 384,
+          "requests": 1,
+          "tokens": 384,
+          "arm": "psidec_h4",
+          "training_h4_over_h1": 0.9901649154867026,
+          "validation_h4_over_h1": 0.9928409998859768,
+          "h4_wins": 5,
+          "us": {
+            "psidec_h1": 250.54646,
+            "psidec_h4": 248.82021,
+            "tensorfold": 250.417295
+          },
+          "policy_over": {
+            "psidec_h1": 0.9928409998859768,
+            "psidec_h4": 1.0,
+            "tensorfold": 0.9905820559384126
+          }
+        },
+        {
+          "case": "r1_q448_h4096_s128",
+          "total_tokens": 448,
+          "requests": 1,
+          "tokens": 448,
+          "arm": "psidec_h4",
+          "training_h4_over_h1": 0.9887629261460174,
+          "validation_h4_over_h1": 0.990977393241619,
+          "h4_wins": 7,
+          "us": {
+            "psidec_h1": 253.760625,
+            "psidec_h4": 251.37395500000002,
+            "tensorfold": 247.16291999999999
+          },
+          "policy_over": {
+            "psidec_h1": 0.990977393241619,
+            "psidec_h4": 1.0,
+            "tensorfold": 1.0010832644289571
+          }
+        },
+        {
+          "case": "r1_q512_h4096_s128",
+          "total_tokens": 512,
+          "requests": 1,
+          "tokens": 512,
+          "arm": "psidec_h4",
+          "training_h4_over_h1": 0.9880885399918883,
+          "validation_h4_over_h1": 0.9853260050195984,
+          "h4_wins": 8,
+          "us": {
+            "psidec_h1": 257.638335,
+            "psidec_h4": 254.624165,
+            "tensorfold": 258.27458
+          },
+          "policy_over": {
+            "psidec_h1": 0.9853260050195984,
+            "psidec_h4": 1.0,
+            "tensorfold": 0.9843796293243907
+          }
+        },
+        {
+          "case": "r1_q768_h4096_s128",
+          "total_tokens": 768,
+          "requests": 1,
+          "tokens": 768,
+          "arm": "psidec_h4",
+          "training_h4_over_h1": 0.980304090811703,
+          "validation_h4_over_h1": 0.9902317626342866,
+          "h4_wins": 7,
+          "us": {
+            "psidec_h1": 271.34125,
+            "psidec_h4": 268.12208499999997,
+            "tensorfold": 268.299165
+          },
+          "policy_over": {
+            "psidec_h1": 0.9902317626342866,
+            "psidec_h4": 1.0,
+            "tensorfold": 0.9970636428613184
+          }
+        },
+        {
+          "case": "r1_q1024_h4096_s128",
+          "total_tokens": 1024,
+          "requests": 1,
+          "tokens": 1024,
+          "arm": "psidec_h4",
+          "training_h4_over_h1": 0.9878655028798781,
+          "validation_h4_over_h1": 0.98690104252498,
+          "h4_wins": 7,
+          "us": {
+            "psidec_h1": 283.07228999999995,
+            "psidec_h4": 278.299165,
+            "tensorfold": 278.357085
+          },
+          "policy_over": {
+            "psidec_h1": 0.98690104252498,
+            "psidec_h4": 1.0,
+            "tensorfold": 0.9991676402552332
+          }
+        },
+        {
+          "case": "r1_q2048_h4096_s128",
+          "total_tokens": 2048,
+          "requests": 1,
+          "tokens": 2048,
+          "arm": "psidec_h4",
+          "training_h4_over_h1": 0.9640036435728541,
+          "validation_h4_over_h1": 0.9556990185641017,
+          "h4_wins": 8,
+          "us": {
+            "psidec_h1": 338.351045,
+            "psidec_h4": 324.385625,
+            "tensorfold": 322.33687499999996
+          },
+          "policy_over": {
+            "psidec_h1": 0.9556990185641017,
+            "psidec_h4": 1.0,
+            "tensorfold": 1.0054604654036903
+          }
+        }
+      ]
+    }
+  },
+  "long_input": {
+    "commit": "1f32600f1002ce35ca48eb5d0c49732912c151ed",
+    "dirty": true,
+    "identity_key": "eae570a6f1d9d2000d858574a6bc4373b42e0d5247e9dd0752617199f1282f13",
+    "command": [
+      "scripts/ple_compare.py",
+      "--suite",
+      "lookup",
+      "--mode",
+      "run",
+      "--tokens",
+      "256,1024,4096,16384,32768,65536",
+      "--tensorfold-dir",
+      "/private/tmp/psi-dec-ple-resident-20261016/tensorfold/src/tensorfold/kernels/qwen/flash_next/v1",
+      "--table-dir",
+      "target/perf/ple-resident-small/weights/h2560_e2560_v1000000_s128",
+      "--out",
+      "target/perf/ple-lookup-grid-long"
+    ],
+    "warmups": 5,
+    "iters": 20,
+    "rounds": 6,
+    "metric": "median wall latency per submission in microseconds and median same-round ratios",
+    "cases": [
+      {
+        "case": "r1_q16384_h4096_s128",
+        "requests": 1,
+        "tokens": 16384,
+        "total_tokens": 16384,
+        "history": 4096,
+        "shards": 128,
+        "rounds": 6,
+        "us": {
+          "psidec": 29379.077100000002,
+          "psidec_h1": 1109.3625,
+          "psidec_h4": 992.219775,
+          "psidec_h8": 998.22395,
+          "psidec_h16": 999.008325,
+          "psidec_h1_z": 1108.8802,
+          "psidec_h4_z": 998.85105,
+          "psidec_h8_z": 1002.909375,
+          "psidec_h16_z": 1002.0957999999999,
+          "omlx_sharded": 23026.882275,
+          "tensorfold": 982.1541749999999
+        },
+        "relative": {
+          "psidec_h1": 0.03775747034110484,
+          "psidec_h4": 0.03376447424397494,
+          "psidec_h8": 0.03397738714957343,
+          "psidec_h16": 0.03400408666752565,
+          "psidec_h1_z": 0.03774666775231716,
+          "psidec_h4_z": 0.03398701861682657,
+          "psidec_h8_z": 0.03414057971229835,
+          "psidec_h16_z": 0.03411521368988864
+        },
+        "grid": {
+          "psidec_h1": {
+            "z_over_x": 0.998756127466254,
+            "z_wins": 4
+          },
+          "psidec_h4": {
+            "z_over_x": 1.0102238483205213,
+            "z_wins": 2
+          },
+          "psidec_h8": {
+            "z_over_x": 1.0061974559417273,
+            "z_wins": 2
+          },
+          "psidec_h16": {
+            "z_over_x": 1.0021440091277158,
+            "z_wins": 2
+          }
+        },
+        "best": "psidec_h4",
+        "best_over": {
+          "psidec": 0.03376447424397494,
+          "psidec_h1": 0.8962814711264457,
+          "psidec_h4": 1.0,
+          "psidec_h8": 1.0055605694581913,
+          "psidec_h16": 0.9891422129671705,
+          "psidec_h1_z": 0.899878090749771,
+          "psidec_h4_z": 0.989892102087264,
+          "psidec_h8_z": 0.9910002158792107,
+          "psidec_h16_z": 0.9962707986362459,
+          "omlx_sharded": 0.04317814005493892,
+          "tensorfold": 1.0202653292530819
+        }
+      },
+      {
+        "case": "r1_q32768_h4096_s128",
+        "requests": 1,
+        "tokens": 32768,
+        "total_tokens": 32768,
+        "history": 4096,
+        "shards": 128,
+        "rounds": 6,
+        "us": {
+          "psidec": 58043.756225000005,
+          "psidec_h1": 1885.7552,
+          "psidec_h4": 1666.5041999999999,
+          "psidec_h8": 1668.762475,
+          "psidec_h16": 1661.009375,
+          "psidec_h1_z": 1898.816675,
+          "psidec_h4_z": 1668.571875,
+          "psidec_h8_z": 1669.729175,
+          "psidec_h16_z": 1674.5489499999999,
+          "omlx_sharded": 45006.59375,
+          "tensorfold": 1609.4239499999999
+        },
+        "relative": {
+          "psidec_h1": 0.03248320075584169,
+          "psidec_h4": 0.02870528694484288,
+          "psidec_h8": 0.02875121769479587,
+          "psidec_h16": 0.028615699841485542,
+          "psidec_h1_z": 0.03271830383551597,
+          "psidec_h4_z": 0.02874578671366656,
+          "psidec_h8_z": 0.02876673184093769,
+          "psidec_h16_z": 0.028843849355801178
+        },
+        "grid": {
+          "psidec_h1": {
+            "z_over_x": 1.0071191213542598,
+            "z_wins": 0
+          },
+          "psidec_h4": {
+            "z_over_x": 1.000671690368974,
+            "z_wins": 3
+          },
+          "psidec_h8": {
+            "z_over_x": 0.9983276114117206,
+            "z_wins": 4
+          },
+          "psidec_h16": {
+            "z_over_x": 1.002427649189547,
+            "z_wins": 1
+          }
+        },
+        "best": "psidec_h16",
+        "best_over": {
+          "psidec": 0.028615699841485542,
+          "psidec_h1": 0.8812213040922341,
+          "psidec_h4": 1.000168759310041,
+          "psidec_h8": 0.9975197096933439,
+          "psidec_h16": 1.0,
+          "psidec_h1_z": 0.8762064501513562,
+          "psidec_h4_z": 0.9982020502562192,
+          "psidec_h8_z": 0.9982333981534666,
+          "psidec_h16_z": 0.9975782705554638,
+          "omlx_sharded": 0.03725563642286768,
+          "tensorfold": 1.0320531606737715
+        }
+      },
+      {
+        "case": "r1_q65536_h4096_s128",
+        "requests": 1,
+        "tokens": 65536,
+        "total_tokens": 65536,
+        "history": 4096,
+        "shards": 128,
+        "rounds": 6,
+        "us": {
+          "psidec": 121242.6375,
+          "psidec_h1": 3475.8437750000003,
+          "psidec_h4": 3019.3104249999997,
+          "psidec_h8": 3027.07915,
+          "psidec_h16": 3019.1844,
+          "psidec_h1_z": 3466.14375,
+          "psidec_h4_z": 3009.8625249999996,
+          "psidec_h8_z": 3026.7271,
+          "psidec_h16_z": 3019.075,
+          "omlx_sharded": 87585.099975,
+          "tensorfold": 2894.588525
+        },
+        "relative": {
+          "psidec_h1": 0.028653338194305718,
+          "psidec_h4": 0.024913262471265463,
+          "psidec_h8": 0.02496208491264223,
+          "psidec_h16": 0.024905230836461165,
+          "psidec_h1_z": 0.028616378921772132,
+          "psidec_h4_z": 0.02483015621893582,
+          "psidec_h8_z": 0.02497897261079425,
+          "psidec_h16_z": 0.024893223054673258
+        },
+        "grid": {
+          "psidec_h1": {
+            "z_over_x": 0.9974706359051061,
+            "z_wins": 4
+          },
+          "psidec_h4": {
+            "z_over_x": 0.9968711606046927,
+            "z_wins": 5
+          },
+          "psidec_h8": {
+            "z_over_x": 1.0015928148300484,
+            "z_wins": 2
+          },
+          "psidec_h16": {
+            "z_over_x": 0.998602902705717,
+            "z_wins": 4
+          }
+        },
+        "best": "psidec_h4_z",
+        "best_over": {
+          "psidec": 0.02483015621893582,
+          "psidec_h1": 0.8656161142552572,
+          "psidec_h4": 0.9968711606046927,
+          "psidec_h8": 0.9939541732533275,
+          "psidec_h16": 0.9971725318259608,
+          "psidec_h1_z": 0.8682197386800762,
+          "psidec_h4_z": 1.0,
+          "psidec_h8_z": 0.9947526482024652,
+          "psidec_h16_z": 0.9971854285536286,
+          "omlx_sharded": 0.03437147200782201,
+          "tensorfold": 1.040267096557356
+        }
+      }
+    ]
+  }
+}

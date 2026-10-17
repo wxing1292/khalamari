@@ -97,6 +97,11 @@ path = "benches/head/embedding.rs"
 harness = false
 
 [[bench]]
+name = "ngram_embedding"
+path = "benches/ngram_embedding.rs"
+harness = false
+
+[[bench]]
 name = "unembedding"
 path = "benches/head/unembedding.rs"
 harness = false

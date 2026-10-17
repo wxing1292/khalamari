@@ -96,6 +96,11 @@ python3 scripts/qsa_indexer_score_matrix.py --mode report \
 Each case retains raw samples, correctness records, generated shaders, memory observations, and completion status.
 The report excludes interrupted attempts. `summary.csv` and `selection.json` retain medians and fitted shape thresholds.
 
+## N-gram embedding
+
+- Wire [resident n-gram embedding](executor_ngram_embedding.md) through the checkpoint/table loader and model owner. Preserve global row IDs when loading final groups directly from checkpoint shards.
+- Validate checkpoint-sized cache/TLB behavior and production component latency after loading. Keep active counts, recorded capacities, and lookup topology distinct in replay keys.
+
 ## Multimodal Input
 
 - Measure resource-level early unload: peak arena bytes, rematerialization, and repeated audio/image/video placements.

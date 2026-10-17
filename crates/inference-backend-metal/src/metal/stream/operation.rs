@@ -261,6 +261,11 @@ impl<'a> CommandRecorder<'a> {
         self.set_bytes(index, std::slice::from_ref(&value));
     }
 
+    pub fn set_u32_slice(&self, index: usize, values: &[u32]) {
+        assert!(!values.is_empty());
+        self.set_bytes(index, values);
+    }
+
     pub fn set_i32_slice(&self, index: usize, values: &[i32]) {
         assert!(!values.is_empty());
         self.set_bytes(index, values);

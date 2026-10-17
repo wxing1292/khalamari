@@ -65,6 +65,9 @@ Real-weight targets accept the model paths that their production owner needs.
 `qwen35_main_sampling` does not load model weights.
 These targets share `--iters`, `--warmup-iters`, and `--runs`.
 
+The `ngram_embedding` backend benchmark records production H1/H4 lookup and hash+lookup with 32 invocations per replay.
+Its [component guide](executor_ngram_embedding.md#verification-and-benchmark) defines the resident layout, selection, and measurement scope.
+
 Production `src` must not gain benchmark-only state, feature paths, or environment controls.
 
 The [QSA indexer guide](executor_qsa_indexer.md#benchmarks) separates the production replay benchmark from
