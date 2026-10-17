@@ -75,6 +75,7 @@ objc2-metal = { version = "0.3", default-features = false, features = [
 offset-allocator = "0.2"
 ordered-float = "5.3"
 prost = "0.14"
+quick_cache = { version = "0.7", default-features = false, features = ["custom-hasher"] }
 quote = "1.0"
 rand = "0.10"
 reqwest = { version = "0.13", default-features = false, features = [

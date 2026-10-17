@@ -14,6 +14,7 @@ inference-executor-core = { workspace = true }
 inference-runtime-core = { path = "../inference-runtime-core" }
 inference-runtime-macro = { path = "../inference-runtime-macro" }
 offset-allocator = { workspace = true }
+quick_cache = { workspace = true }
 safetensors = { workspace = true }
 wincode = { workspace = true }
 

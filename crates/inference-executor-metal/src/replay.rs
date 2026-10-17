@@ -1,11 +1,14 @@
-use std::collections::HashMap;
 use std::fmt::Debug;
 use std::hash::Hash;
 
 use inference_backend_metal::metal::ReplayProgram;
+use quick_cache::OptionsBuilder;
+use quick_cache::unsync::Cache;
 
 use crate::def::replay_op::MetalReplayRuntime;
 use crate::def::replay_op::ReplayRecorder;
+
+const REPLAY_CACHE_CAPACITY: usize = 128;
 
 pub trait ReplayComponent {
     type Key: Clone + Debug + Eq + Hash;
@@ -17,15 +20,25 @@ pub trait ReplayComponent {
 }
 
 pub struct Replay<T: ReplayComponent> {
+    name: &'static str,
     component: T,
-    cache: ReplayCache<T::Key>,
+    cache: Cache<T::Key, ReplayProgram>,
 }
 
 impl<T: ReplayComponent> Replay<T> {
     pub fn new(name: &'static str, component: T) -> Self {
+        // Ghost reinsertion can evict the new program before submission.
+        // Without ghosts, insertion evicts existing programs first.
+        let options = OptionsBuilder::new()
+            .estimated_items_capacity(REPLAY_CACHE_CAPACITY)
+            .weight_capacity(REPLAY_CACHE_CAPACITY as u64)
+            .ghost_allocation(0.0)
+            .build()
+            .expect("replay cache options must be valid");
         Self {
+            name,
             component,
-            cache: ReplayCache::new(name),
+            cache: Cache::with_options(options, Default::default(), Default::default(), Default::default()),
         }
     }
 
@@ -41,61 +54,23 @@ impl<T: ReplayComponent> Replay<T> {
         self.cache.clear();
     }
 
+    /// Records or reuses a program. The returned key remains available until
+    /// the next `record` or `clear` call on this owner.
     pub fn record<'a>(&'a mut self, runtime: &MetalReplayRuntime<'_>, input: &T::Input<'a>) -> (T::Key, bool) {
         let key = self.component.replay_key(input);
-        let cache_hit = self.cache.contains(&key);
+        let cache_hit = self.cache.get(&key).is_some();
         if !cache_hit {
             let mut recorder = runtime.create_recorder();
             self.component.record(&mut recorder, input);
-            self.cache.insert_recorded_replay(key.clone(), recorder.build());
+            self.cache.insert(key.clone(), recorder.build());
         }
         (key, cache_hit)
     }
 
     pub fn replay(&self, key: &T::Key) -> &ReplayProgram {
-        self.cache.replay(key)
-    }
-}
-
-struct ReplayCache<K> {
-    name: &'static str,
-    entries: HashMap<K, ReplayProgram>,
-}
-
-impl<K> ReplayCache<K>
-where
-    K: Debug + Eq + Hash,
-{
-    fn new(name: &'static str) -> Self {
-        Self {
-            name,
-            entries: HashMap::new(),
-        }
-    }
-
-    fn contains(&self, key: &K) -> bool {
-        self.entries.contains_key(key)
-    }
-
-    fn insert_recorded_replay(&mut self, key: K, replay: ReplayProgram) {
-        match self.entries.entry(key) {
-            std::collections::hash_map::Entry::Vacant(entry) => {
-                entry.insert(replay);
-            },
-            std::collections::hash_map::Entry::Occupied(entry) => {
-                panic!("{} replay cache filled twice for key {:?}", self.name, entry.key());
-            },
-        }
-    }
-
-    fn replay(&self, key: &K) -> &ReplayProgram {
-        self.entries
-            .get(key)
+        self.cache
+            .peek(key)
             .unwrap_or_else(|| panic!("{} replay cache missing recorded batch for key {:?}", self.name, key))
-    }
-
-    fn clear(&mut self) {
-        self.entries.clear();
     }
 }
 
@@ -171,6 +146,31 @@ mod tests {
         assert_eq!(replay.record(&runtime, &7), (key, true));
         assert_eq!(replay.component().records.get(), 1);
         let _ = replay.replay(&key);
+
+        replay.clear();
+        replay.cache.set_capacity(3);
+        for key in 0..4 {
+            assert_eq!(replay.record(&runtime, &key), (key, false));
+            let _ = replay.replay(&key);
+        }
+        assert_eq!(replay.cache.len(), 3);
+        let evicted_key = (0..4).find(|key| replay.cache.peek(key).is_none()).unwrap();
+        let resident_keys = replay.cache.iter().map(|(key, _)| *key).collect::<Vec<_>>();
+        // Warm resident entries before revisiting an evicted key. The rebuilt program
+        // must remain available even when the older programs have higher counts.
+        for key in resident_keys {
+            assert_eq!(replay.record(&runtime, &key), (key, true));
+            assert_eq!(replay.record(&runtime, &key), (key, true));
+        }
+        assert_eq!(replay.record(&runtime, &evicted_key), (evicted_key, false));
+        let _ = replay.replay(&evicted_key);
+        assert_eq!(replay.cache.len(), 3);
+        assert_eq!(replay.component().records.get(), 6);
+
+        replay.clear();
+        assert!(replay.cache.is_empty());
+        assert_eq!(replay.record(&runtime, &evicted_key), (evicted_key, false));
+        assert_eq!(replay.component().records.get(), 7);
     }
 
     #[test]

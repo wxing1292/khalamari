@@ -552,10 +552,31 @@ It selects the Metal affine parameter dtype from the checkpoint and requires one
 
 `Replay<T>::record(runtime, input)` derives the component key and returns immediately on a hit.
 On a miss, it records, builds, and inserts exactly once.
+The cache disables ghost history so insertion keeps the new program available for submission.
 It returns `(key, cache_hit)`.
+Each replay stage uses `quick_cache::unsync::Cache` with a capacity of 128 programs.
+`record` updates the entry's access count on a hit.
+An insertion can evict an older program.
+The returned key remains available until the next `record` or `clear` call on the same owner.
+Callers must submit a prepared key before another `record` call on that owner.
 `Replay<T>::replay(key)` is a strict lookup.
-It panics if record did not establish the key.
+It uses `peek` and does not update the access count.
+It panics if the key is absent.
 `Replay<T>` exposes `component()` explicitly and does not implement `Deref`.
+
+For example, recording key `K129` can evict `K1` when the stage already holds 128 programs:
+
+```text
+before: record(K129) -> HashMap inserts P129 -> lookup(K129) -> submit P129
+                       retains P1..P129
+
+after:  record(K129) -> Cache inserts P129   -> peek(K129)   -> submit P129
+                       evicts one old program
+                       retains at most 128 programs
+```
+
+Each submission retains its program resources until the submission drops.
+Cache eviction does not release resources that a submission still owns.
 
 The independent cached graphs are:
 
