@@ -167,14 +167,16 @@ impl Compute {
         num_active_token_writes: ReplayU32,
         page_table_index: ReplayU32,
     ) -> Invocation<'a> {
-        Invocation {
+        let invocation = Invocation {
             constants: self.constants,
             kernel: &self.kernel,
             shape,
             buffers,
             num_active_token_writes,
             page_table_index,
-        }
+        };
+        invocation.validate();
+        invocation
     }
 }
 
@@ -202,7 +204,6 @@ pub struct Invocation<'a> {
 
 impl Operator for Invocation<'_> {
     fn record(self, recorder: &CommandRecorder<'_>) {
-        self.validate();
         let config = self.constants.config;
         recorder.set_kernel(self.kernel);
         recorder.set_buffer_write(0, self.buffers.pages, 0);
@@ -212,22 +213,12 @@ impl Operator for Invocation<'_> {
         recorder.set_buffer_read(4, self.buffers.flat_token_indices, 0);
         recorder.set_buffer_read(5, self.buffers.page_ids, 0);
         match self.num_active_token_writes {
-            ReplayU32::Fixed(num_active_token_writes) => {
-                assert!(num_active_token_writes > 0);
-                assert!(num_active_token_writes <= self.shape.num_total_token_writes);
-                recorder.set_u32(6, num_active_token_writes);
-            },
+            ReplayU32::Fixed(num_active_token_writes) => recorder.set_u32(6, num_active_token_writes),
             ReplayU32::Parameter(key) => recorder.bind_u32(6, key, 1, self.shape.num_total_token_writes),
         }
         let max_page_table_index = self.shape.page_table_layout.num_gqa_layers - 1;
         match self.page_table_index {
-            ReplayU32::Fixed(page_table_index) => {
-                assert!(
-                    page_table_index <= max_page_table_index,
-                    "GQA page-table index exceeds layer count"
-                );
-                recorder.set_u32(7, page_table_index);
-            },
+            ReplayU32::Fixed(page_table_index) => recorder.set_u32(7, page_table_index),
             ReplayU32::Parameter(key) => recorder.bind_u32(7, key, 0, max_page_table_index),
         }
         recorder.set_u32(8, self.shape.page_table_layout.num_gqa_layers);
@@ -244,6 +235,10 @@ impl Invocation<'_> {
     fn validate(&self) {
         let config = self.constants.config;
         self.shape.validate(config);
+        self.num_active_token_writes
+            .validate_range(1, self.shape.num_total_token_writes);
+        self.page_table_index
+            .validate_range(0, self.shape.page_table_layout.num_gqa_layers - 1);
         assert!(self.buffers.flat_k.len_bytes() >= config.flat_kv_bytes(self.shape));
         assert!(self.buffers.flat_v.len_bytes() >= config.flat_kv_bytes(self.shape));
         assert!(self.buffers.req_slots.len_bytes() >= config.index_bytes(self.shape));
@@ -262,7 +257,6 @@ mod tests {
     use crate::metal::ReplayArguments;
     use crate::metal::ReplayParameterKey;
     use crate::metal::Stream;
-    use crate::test_support::ReplayTestCache;
 
     const NUM_ACTIVE_WRITES: ReplayParameterKey = ReplayParameterKey::new("test.gqa.kv.active_writes");
 
@@ -321,8 +315,7 @@ mod tests {
             },
         };
         let kernel = Compute::new(&device, config);
-        let mut cache = ReplayTestCache::new();
-        let (_, cache_hit) = cache.record(shape.num_total_token_writes, || {
+        let replay = {
             let mut builder = stream.create_replay_program();
             builder.record(kernel.invoke(
                 shape,
@@ -338,16 +331,13 @@ mod tests {
                 ReplayU32::Fixed(0),
             ));
             builder.build()
-        });
-        assert!(!cache_hit);
+        };
 
         for num_active_writes in [1_usize, 8, 3, 7, 2, 6, 4, 5] {
             pages.write_typed(0, &vec![initial_page_value; num_pages * page_values]);
-            let (replay, cache_hit) = cache.record(shape.num_total_token_writes, || unreachable!());
-            assert!(cache_hit);
             stream
                 .submit_replay_with_arguments(
-                    replay,
+                    &replay,
                     &ReplayArguments::new().with_u32(NUM_ACTIVE_WRITES, num_active_writes as u32),
                 )
                 .wait();
@@ -425,8 +415,7 @@ mod tests {
             },
         };
         let kernel = Compute::new(device, config);
-        let mut cache = ReplayTestCache::new();
-        let (_, cache_hit) = cache.record(shape.num_total_token_writes, || {
+        let replay = {
             let mut recorder = stream.create_replay_program();
             recorder.record(kernel.invoke(
                 shape,
@@ -442,13 +431,10 @@ mod tests {
                 ReplayU32::Fixed(0),
             ));
             recorder.build()
-        });
-        assert!(!cache_hit);
-        let (replay, cache_hit) = cache.record(shape.num_total_token_writes, || unreachable!());
-        assert!(cache_hit);
+        };
         stream
             .submit_replay_with_arguments(
-                replay,
+                &replay,
                 &ReplayArguments::new().with_u32(NUM_ACTIVE_WRITES, shape.num_total_token_writes),
             )
             .wait();

@@ -458,6 +458,21 @@ impl Shape {
         assert!(self.num_total_reqs > 0);
         assert!(self.num_total_tokens > 0);
     }
+
+    fn validate_active(self, requests: ReplayU32, tokens: ReplayU32, recurrent_requests: ReplayU32) {
+        requests.validate_range(1, self.num_total_reqs);
+        tokens.validate_range(1, self.num_total_tokens);
+        recurrent_requests.validate_range(0, self.num_total_reqs);
+        if let (ReplayU32::Fixed(requests), ReplayU32::Fixed(tokens)) = (requests, tokens) {
+            assert!(requests <= tokens, "each active GDN request must have a token");
+        }
+        if let (ReplayU32::Fixed(requests), ReplayU32::Fixed(recurrent)) = (requests, recurrent_requests) {
+            assert!(
+                recurrent <= requests,
+                "GDN recurrent requests must be an active request prefix"
+            );
+        }
+    }
 }
 
 fn source(constants: ComputeConstants) -> String {
@@ -589,6 +604,9 @@ impl Compute {
         num_active_reqs: ReplayU32,
         num_active_tokens: ReplayU32,
     ) -> Invocation<'a> {
+        self.constants.validate_shape(shape);
+        shape.validate_active(num_active_reqs, num_active_tokens, ReplayU32::Fixed(0));
+        validate_buffers(self.constants, shape, &buffers);
         Invocation {
             compute: self,
             shape,
@@ -605,6 +623,9 @@ impl Compute {
         num_active_reqs: ReplayU32,
         num_active_tokens: ReplayU32,
     ) -> CandidateStateUpdateInvocation<'a> {
+        self.constants.validate_shape(shape);
+        shape.validate_active(num_active_reqs, num_active_tokens, ReplayU32::Fixed(0));
+        validate_buffers(self.constants, shape, &buffers);
         CandidateStateUpdateInvocation {
             compute: self,
             shape,
@@ -630,6 +651,9 @@ impl Compute {
         num_active_recurrent_requests: ReplayU32,
         write_candidate_states: bool,
     ) -> MixedInvocation<'a> {
+        self.constants.validate_shape(shape);
+        shape.validate_active(num_active_reqs, num_active_tokens, num_active_recurrent_requests);
+        validate_buffers(self.constants, shape, &buffers);
         MixedInvocation {
             compute: self,
             shape,
@@ -723,13 +747,7 @@ impl Compute {
         recorder.set_buffer_read(2, buffers.z, 0);
         recorder.set_buffer_read(3, buffers.norm_weight, 0);
         recorder.set_f32(4, self.norm_eps);
-        set_replay_u32(
-            recorder,
-            5,
-            num_active_tokens,
-            shape.num_total_tokens,
-            "GDN active token count",
-        );
+        set_replay_u32(recorder, 5, num_active_tokens, shape.num_total_tokens);
         recorder.dispatch_1d(
             self.constants.total_output_norm_gate_threads(shape),
             self.constants.kernels.output_norm_gate.thread_block.required_threads as usize,
@@ -748,8 +766,6 @@ pub struct Invocation<'a> {
 impl Operator for Invocation<'_> {
     fn record(self, recorder: &CommandRecorder<'_>) {
         let compute = self.compute;
-        compute.constants.validate_shape(self.shape);
-        validate_buffers(compute.constants, self.shape, &self.buffers);
         compute.record_short_conv(
             recorder,
             self.shape,
@@ -781,8 +797,6 @@ pub struct CandidateStateUpdateInvocation<'a> {
 impl Operator for CandidateStateUpdateInvocation<'_> {
     fn record(self, recorder: &CommandRecorder<'_>) {
         let compute = self.compute;
-        compute.constants.validate_shape(self.shape);
-        validate_buffers(compute.constants, self.shape, &self.buffers);
         compute.record_short_conv(
             recorder,
             self.shape,
@@ -816,13 +830,6 @@ pub struct MixedInvocation<'a> {
 impl Operator for MixedInvocation<'_> {
     fn record(self, recorder: &CommandRecorder<'_>) {
         let compute = self.compute;
-        compute.constants.validate_shape(self.shape);
-        validate_buffers(compute.constants, self.shape, &self.buffers);
-        if let (ReplayU32::Fixed(num_active_reqs), ReplayU32::Fixed(num_active_recurrent_requests)) =
-            (self.num_active_reqs, self.num_active_recurrent_requests)
-        {
-            assert!(num_active_recurrent_requests <= num_active_reqs);
-        }
         compute.record_short_conv(
             recorder,
             self.shape,
@@ -871,13 +878,7 @@ impl Operator for MixedInvocation<'_> {
 
 fn set_recurrent_count(recorder: &CommandRecorder<'_>, index: usize, value: ReplayU32, max_value: u32) {
     match value {
-        ReplayU32::Fixed(value) => {
-            assert!(
-                value <= max_value,
-                "GDN recurrent request count exceeds recorded capacity"
-            );
-            recorder.set_u32(index, value);
-        },
+        ReplayU32::Fixed(value) => recorder.set_u32(index, value),
         ReplayU32::Parameter(key) => recorder.bind_u32(index, key, 0, max_value),
     }
 }
@@ -889,29 +890,13 @@ fn set_batch_args(
     num_active_reqs: ReplayU32,
     num_active_tokens: ReplayU32,
 ) {
-    set_replay_u32(
-        recorder,
-        start_index,
-        num_active_reqs,
-        shape.num_total_reqs,
-        "GDN active request count",
-    );
-    set_replay_u32(
-        recorder,
-        start_index + 1,
-        num_active_tokens,
-        shape.num_total_tokens,
-        "GDN active token count",
-    );
+    set_replay_u32(recorder, start_index, num_active_reqs, shape.num_total_reqs);
+    set_replay_u32(recorder, start_index + 1, num_active_tokens, shape.num_total_tokens);
 }
 
-fn set_replay_u32(recorder: &CommandRecorder<'_>, index: usize, value: ReplayU32, max_value: u32, name: &str) {
+fn set_replay_u32(recorder: &CommandRecorder<'_>, index: usize, value: ReplayU32, max_value: u32) {
     match value {
-        ReplayU32::Fixed(value) => {
-            assert!(value > 0, "{name} must be positive");
-            assert!(value <= max_value, "{name} exceeds recorded capacity");
-            recorder.set_u32(index, value);
-        },
+        ReplayU32::Fixed(value) => recorder.set_u32(index, value),
         ReplayU32::Parameter(key) => recorder.bind_u32(index, key, 1, max_value),
     }
 }

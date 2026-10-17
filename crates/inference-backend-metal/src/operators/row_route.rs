@@ -39,7 +39,6 @@ pub struct Shape {
 
 impl Shape {
     fn validate(self, config: Config) {
-        config.validate();
         assert!(self.num_total_rows > 0, "row route requires rows");
         self.num_values(config);
     }
@@ -93,13 +92,15 @@ impl Kernel {
     }
 
     pub fn invoke<'a>(&'a self, shape: Shape, num_active_rows: ReplayU32, buffers: Buffers<'a>) -> Invocation<'a> {
-        Invocation {
+        let invocation = Invocation {
             config: self.config,
             kernel: &self.kernel,
             shape,
             num_active_rows,
             buffers,
-        }
+        };
+        invocation.validate();
+        invocation
     }
 }
 
@@ -113,7 +114,6 @@ pub struct Invocation<'a> {
 
 impl Operator for Invocation<'_> {
     fn record(self, recorder: &CommandRecorder<'_>) {
-        self.validate();
         recorder.set_kernel(self.kernel);
         recorder.set_buffer_read(0, self.buffers.first_input, 0);
         recorder.set_buffer_read(1, self.buffers.second_input, 0);
@@ -122,10 +122,7 @@ impl Operator for Invocation<'_> {
         recorder.set_buffer_write(4, self.buffers.output, 0);
         recorder.set_u32(5, self.config.num_cols);
         match self.num_active_rows {
-            ReplayU32::Fixed(value) => {
-                assert_eq!(value, self.shape.num_total_rows);
-                recorder.set_u32(6, value);
-            },
+            ReplayU32::Fixed(value) => recorder.set_u32(6, value),
             ReplayU32::Parameter(key) => recorder.bind_u32(6, key, 1, self.shape.num_total_rows),
         }
         recorder.dispatch_1d(self.shape.num_values(self.config) as usize, 256);
@@ -135,12 +132,27 @@ impl Operator for Invocation<'_> {
 impl Invocation<'_> {
     fn validate(&self) {
         self.shape.validate(self.config);
+        if let ReplayU32::Fixed(value) = self.num_active_rows {
+            assert_eq!(value, self.shape.num_total_rows);
+        }
         let row_bytes = self.config.row_bytes();
         assert!(self.buffers.first_input.len_bytes() >= row_bytes);
         assert!(self.buffers.second_input.len_bytes() >= row_bytes);
         assert!(self.buffers.third_input.len_bytes() >= row_bytes);
         assert!(self.buffers.routes.len_bytes() >= self.shape.routes_bytes());
         assert!(self.buffers.output.len_bytes() >= self.shape.output_bytes(self.config));
+        for (name, input) in [
+            ("first input", self.buffers.first_input),
+            ("second input", self.buffers.second_input),
+            ("third input", self.buffers.third_input),
+            ("routes", self.buffers.routes),
+        ] {
+            assert_ne!(
+                self.buffers.output.as_raw_ptr(),
+                input.as_raw_ptr(),
+                "row route output must not alias {name}"
+            );
+        }
     }
 }
 
@@ -150,7 +162,6 @@ mod tests {
     use crate::metal::ReplayArguments;
     use crate::metal::ReplayParameterKey;
     use crate::metal::Stream;
-    use crate::test_support::ReplayTestCache;
 
     const NUM_ACTIVE_ROWS: ReplayParameterKey = ReplayParameterKey::new("test.row_route.num_active_rows");
 
@@ -171,8 +182,7 @@ mod tests {
         let routes_buffer = Buffer::from_slice(&device, &route_values);
         let output = Buffer::new_zeroed(&device, shape.output_bytes(config));
         let kernel = Kernel::new(&device, config);
-        let mut cache = ReplayTestCache::new();
-        let (_, cache_hit) = cache.record(shape.num_total_rows, || {
+        let replay = {
             let mut recorder = stream.create_replay_program();
             recorder.record(kernel.invoke(
                 shape,
@@ -186,15 +196,12 @@ mod tests {
                 },
             ));
             recorder.build()
-        });
-        assert!(!cache_hit);
+        };
 
         for num_active_rows in [1, 8, 3, 7, 2, 6, 4, 5] {
-            let (replay, cache_hit) = cache.record(shape.num_total_rows, || unreachable!());
-            assert!(cache_hit);
             stream
                 .submit_replay_with_arguments(
-                    replay,
+                    &replay,
                     &ReplayArguments::new().with_u32(NUM_ACTIVE_ROWS, num_active_rows),
                 )
                 .wait();

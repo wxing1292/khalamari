@@ -148,6 +148,10 @@ impl Compute {
     }
 
     pub fn invoke<'a>(&'a self, shape: Shape, num_active_tokens: ReplayU32, buffers: Buffers<'a>) -> Invocation<'a> {
+        if let ReplayU32::Fixed(value) = num_active_tokens {
+            assert_eq!(value, shape.num_total_tokens);
+        }
+        validate_buffers(self.config, shape, &buffers);
         Invocation {
             kernel: self,
             shape,
@@ -166,8 +170,6 @@ pub struct Invocation<'a> {
 
 impl Operator for Invocation<'_> {
     fn record(self, recorder: &CommandRecorder<'_>) {
-        self.shape.validate();
-        validate_buffers(self.kernel.config, self.shape, &self.buffers);
         let config = self.kernel.config;
         recorder.set_kernel(&self.kernel.kernel);
         recorder.set_buffer_read(0, self.buffers.token_ids, 0);
@@ -176,10 +178,7 @@ impl Operator for Invocation<'_> {
         recorder.set_buffer_read(3, self.buffers.biases, 0);
         recorder.set_buffer_write(4, self.buffers.output, 0);
         match self.num_active_tokens {
-            ReplayU32::Fixed(value) => {
-                assert_eq!(value, self.shape.num_total_tokens);
-                recorder.set_u32(5, value);
-            },
+            ReplayU32::Fixed(value) => recorder.set_u32(5, value),
             ReplayU32::Parameter(key) => recorder.bind_u32(5, key, 1, self.shape.num_total_tokens),
         }
         recorder.set_u32(6, config.vocab_size);
@@ -226,7 +225,6 @@ mod tests {
     use crate::metal::ReplayParameterKey;
     use crate::metal::ReplayU32;
     use crate::metal::Stream;
-    use crate::test_support::ReplayTestCache;
 
     const VOCAB_SIZE: u32 = 2;
     const HIDDEN_DIM: u32 = 32;
@@ -259,9 +257,7 @@ mod tests {
             let biases_buffer = affine_buffer(&device, &biases, scale_bias_dtype);
             let output = Buffer::new_zeroed_elements(&device, shape.num_output_values(config), Dtype::Bfloat16);
             let kernel = Compute::new(&device, config);
-            let cache_key = (shape.num_total_tokens, dtype_tag(scale_bias_dtype));
-            let mut cache = ReplayTestCache::new();
-            let (_, cache_hit) = cache.record(cache_key, || {
+            let replay = {
                 let mut recorder = stream.create_replay_program();
                 recorder.record(kernel.invoke(
                     shape,
@@ -275,15 +271,12 @@ mod tests {
                     },
                 ));
                 recorder.build()
-            });
-            assert!(!cache_hit);
+            };
 
             for num_active_tokens in [1_usize, 8, 3, 7, 2, 6, 4, 5] {
-                let (replay, cache_hit) = cache.record(cache_key, || unreachable!());
-                assert!(cache_hit);
                 stream
                     .submit_replay_with_arguments(
-                        replay,
+                        &replay,
                         &ReplayArguments::new().with_u32(NUM_ACTIVE_TOKENS, num_active_tokens as u32),
                     )
                     .wait();
@@ -343,14 +336,6 @@ mod tests {
                         .collect::<Vec<_>>(),
                 )
             },
-            _ => panic!("unsupported embedding test affine dtype {dtype:?}"),
-        }
-    }
-
-    fn dtype_tag(dtype: Dtype) -> u32 {
-        match dtype {
-            Dtype::Float32 => 0,
-            Dtype::Bfloat16 => 1,
             _ => panic!("unsupported embedding test affine dtype {dtype:?}"),
         }
     }

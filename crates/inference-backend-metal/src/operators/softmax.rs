@@ -64,8 +64,6 @@ impl Shape {
     }
 
     fn bytes(self, config: Config) -> usize {
-        self.validate();
-        config.validate();
         (self.num_total_rows as usize)
             .checked_mul(config.num_values_per_row as usize)
             .and_then(|num_values| num_values.checked_mul(config.dtype.item_size()))
@@ -96,6 +94,9 @@ impl Kernel {
 
     pub fn invoke<'a>(&'a self, shape: Shape, num_active_rows: ReplayU32, buffers: Buffers<'a>) -> Invocation<'a> {
         shape.validate();
+        let bytes = shape.bytes(self.constants.config);
+        assert!(bytes <= buffers.input.len_bytes());
+        assert!(bytes <= buffers.output.len_bytes());
         Invocation {
             kernel: self,
             shape,
@@ -125,13 +126,8 @@ pub struct Invocation<'a> {
 impl Operator for Invocation<'_> {
     fn record(self, recorder: &CommandRecorder<'_>) {
         let shape = self.shape;
-        shape.validate();
         let constants = self.kernel.constants;
         let config = constants.config;
-        let bytes = shape.bytes(config);
-        assert!(bytes <= self.buffers.input.len_bytes());
-        assert!(bytes <= self.buffers.output.len_bytes());
-
         recorder.set_kernel(&self.kernel.kernel);
         recorder.set_buffer_read(0, self.buffers.input, 0);
         recorder.set_buffer_write(1, self.buffers.output, 0);
@@ -292,7 +288,6 @@ mod tests {
     use crate::metal::ReplayParameterKey;
     use crate::metal::ReplayU32;
     use crate::metal::Stream;
-    use crate::test_support::ReplayTestCache;
 
     const NUM_ACTIVE_ROWS: ReplayParameterKey = ReplayParameterKey::new("test.softmax.num_active_rows");
 
@@ -310,8 +305,7 @@ mod tests {
             .collect::<Vec<_>>();
         let input = bf16_buffer(&device, &input_values);
         let output = Buffer::new_zeroed(&device, shape.bytes(config));
-        let mut cache = ReplayTestCache::new();
-        let (replay, cache_hit) = cache.record(shape.num_total_rows, || {
+        let replay = {
             let mut recorder = stream.create_replay_program();
             recorder.record(kernel.invoke(
                 shape,
@@ -322,15 +316,12 @@ mod tests {
                 },
             ));
             recorder.build()
-        });
-        assert!(!cache_hit);
+        };
 
         for num_active_rows in [1_usize, 8, 3, 7, 2, 6, 4, 5] {
-            let (replay, cache_hit) = cache.record(shape.num_total_rows, || unreachable!());
-            assert!(cache_hit);
             stream
                 .submit_replay_with_arguments(
-                    replay,
+                    &replay,
                     &ReplayArguments::new().with_u32(NUM_ACTIVE_ROWS, num_active_rows as u32),
                 )
                 .wait();

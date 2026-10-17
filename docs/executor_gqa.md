@@ -819,7 +819,8 @@ The Steel fragment layout supplies the lane coordinates for masking, per-Q-token
 There is no TensorOps layout probe, architecture-name check, or alternate Map implementation.
 
 Kernel initialization validates shape, SIMD width, thread limits, and SMEM capacity.
-Replay recording validates borrowed buffer extents and parameter bounds once for that recorded graph.
+Invocation creation validates borrowed buffer extents and fixed parameter values before recording.
+Recording declares the submission-time parameter domains for that graph.
 Cached replay submission supplies active counts without repeating static shape checks.
 Active head, token, and KV-range masks remain part of attention semantics.
 
@@ -1243,7 +1244,7 @@ It verifies separate cached replays for both output modes with equal recorded ex
 The ungated SDPA-stage test covers six logical query heads, causal output, and unchanged inactive Q tokens for both modes.
 
 `gqa/sdpa/sliced_kv_test.rs` compares SplitKV SlicedKv with the CPU projected-GQA reference. Its main replay test uses
-one isolated cache and the complete active-count sequence for capacity `8`. Focused cases cover a ragged batch and a
+one recorded replay and the complete active-count sequence for capacity `8`. Focused cases cover a ragged batch and a
 logical cache block that spans multiple physical page IDs, BF16 and F32 activations, and head dimensions up to 256.
 The cases validate compact KV-split indexing,
 online-softmax iteration merging, request slots, page-table lookup, and causal visibility.
@@ -1257,7 +1258,7 @@ They cover all five supported `(D, tokens_per_page)` profiles, non-contiguous pa
 heads, Q-head tails, multiple Q fragments, sliding visibility, fully masked Q tokens, and padded replay capacity.
 
 `gqa/sdpa/sliced_q_test.rs` compares the BF16-output SplitKV SlicedQ map and reduce variant, with an FP8 E4M3FN KV
-cache, against the same CPU reference. The replay test uses one isolated cache with a total token capacity
+cache, against the same CPU reference. The test reuses one recorded replay with a total token capacity
 of `4` and the active-count sequence `1, 4, 3, 2`. The Q-token-tile and map-task capacities stay fixed.
 The paged-range case also verifies that inactive output Q tokens retain their sentinel values.
 
@@ -1268,7 +1269,8 @@ This test protects the BiDiBlockGQA total-dispatch and active-guard contract.
 `gqa/qkv_split.rs` records one total token capacity of `8` and uses the same non-monotonic active-count sequence.
 It compares active Q, K, and V tokens with the exact CPU split reference.
 
-`gqa/qgkv_split.rs` and `gqa/activation_gate.rs` use the same isolated-cache sequence. They compare the active Q/G/K/V
+`gqa/qgkv_split.rs` and `gqa/activation_gate.rs` reuse recorded programs with changing active counts.
+They compare the active Q/G/K/V
 tokens and gated attention values with exact CPU references. `gqa/kv_page_write.rs` compares the complete affected FP8
 page arena with a CPU page-table, page-offset, and E4M3FN conversion reference because page writes update persistent
 state.

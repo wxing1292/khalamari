@@ -35,6 +35,13 @@ impl Compute {
     }
 
     pub fn invoke<'a>(&'a self, input: Input<'a>, label: String) -> impl Operator + 'a {
+        input.num_active_rows.validate_range(1, input.num_total_rows);
+        let elements = input
+            .num_total_rows
+            .checked_mul(self.row_width)
+            .expect("finite-check index must fit u32");
+        let bytes = elements as usize * self.dtype.item_size();
+        assert!(input.buffer.len_bytes() >= bytes, "finite-check input is too short");
         Invocation {
             compute: self,
             input,
@@ -65,14 +72,7 @@ impl Operator for Invocation<'_> {
         } = self.input;
         let dtype = self.compute.dtype;
         let row_width = self.compute.row_width;
-        assert!(row_width > 0 && num_total_rows > 0);
-        let elements = num_total_rows
-            .checked_mul(row_width)
-            .expect("finite-check index must fit u32");
-        let bytes = (elements as usize)
-            .checked_mul(dtype.item_size())
-            .expect("finite-check bytes must fit usize");
-        assert!(buffer.len_bytes() >= bytes, "finite-check input is too short");
+        let elements = num_total_rows * row_width;
         let device = Device::from_raw_retained(self.compute.kernel.as_raw().device());
         let check = Rc::new(FiniteCheck {
             status: Buffer::from_slice(&device, &[0_u32; 4]),
@@ -83,10 +83,7 @@ impl Operator for Invocation<'_> {
         recorder.set_kernel(&self.compute.kernel);
         recorder.set_buffer_read(0, buffer, 0);
         match num_active_rows {
-            ReplayU32::Fixed(rows) => {
-                assert!(rows > 0 && rows <= num_total_rows);
-                recorder.set_u32(1, rows);
-            },
+            ReplayU32::Fixed(rows) => recorder.set_u32(1, rows),
             ReplayU32::Parameter(key) => recorder.bind_u32(1, key, 1, num_total_rows),
         }
         recorder.set_u32(2, row_width);

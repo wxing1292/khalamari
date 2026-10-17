@@ -9,7 +9,6 @@ use crate::metal::ReplayArguments;
 use crate::metal::ReplayParameterKey;
 use crate::metal::ReplayProgram;
 use crate::metal::Stream;
-use crate::test_support::ReplayTestCache;
 
 const NUM_ACTIVE_TOKENS: ReplayParameterKey = ReplayParameterKey::new("test.moe.combine.num_active_tokens");
 const ACTIVE_SEQUENCE: [u32; 8] = [1, 8, 3, 7, 2, 6, 4, 5];
@@ -17,16 +16,11 @@ const ACTIVE_SEQUENCE: [u32; 8] = [1, 8, 3, 7, 2, 6, 4, 5];
 #[test]
 fn test_replay_matches_reference_across_active_counts_and_shared_expert_modes() {
     let fixture = CombineFixture::new();
-    let mut cache = ReplayTestCache::new();
     for with_shared_experts in [false, true] {
-        let key = (fixture.shape.num_total_tokens, with_shared_experts);
-        let (_, cache_hit) = cache.record(key, || fixture.replay(with_shared_experts));
-        assert!(!cache_hit);
+        let replay = fixture.replay(with_shared_experts);
         for (case_index, num_active_tokens) in ACTIVE_SEQUENCE.into_iter().enumerate() {
             let work = fixture.write_work(0x2148_937A_u32.wrapping_add(case_index as u32));
-            let (replay, cache_hit) = cache.record(key, || unreachable!());
-            assert!(cache_hit);
-            fixture.submit(replay, num_active_tokens);
+            fixture.submit(&replay, num_active_tokens);
             fixture.assert_active_output(&work, num_active_tokens, with_shared_experts);
         }
     }

@@ -1,4 +1,5 @@
 use std::cell::Cell;
+use std::io::Write;
 use std::ptr::NonNull;
 use std::rc::Rc;
 use std::sync::mpsc::Receiver;
@@ -87,7 +88,15 @@ impl CommitCompletion {
         let error = self
             .feedback
             .recv_timeout(Duration::from_secs(60))
-            .expect("timed out waiting for Metal commit feedback");
+            .unwrap_or_else(|error| {
+                // Without completion, unwinding could release resources that the GPU still uses.
+                let _ = writeln!(
+                    std::io::stderr().lock(),
+                    "failed to confirm Metal commit completion (60-second wait): {error}; aborting to avoid releasing \
+                     in-flight resources"
+                );
+                std::process::abort();
+            });
         if let Some(error) = error {
             panic!("Metal replay submission failed: {error}");
         }

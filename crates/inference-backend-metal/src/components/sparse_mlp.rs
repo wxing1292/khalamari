@@ -247,7 +247,6 @@ impl RouteActivity {
     }
 
     fn num_total_routes(self) -> u32 {
-        debug_assert!(self.num_total_tokens.checked_mul(self.num_experts_per_token).is_some());
         self.num_total_tokens * self.num_experts_per_token
     }
 }
@@ -536,7 +535,6 @@ pub struct TokenMajorGateUpSwiGLUInvocation<'a> {
 
 impl Operator for TokenMajorGateUpSwiGLUInvocation<'_> {
     fn record(self, recorder: &CommandRecorder<'_>) {
-        debug_validate_token_major_buffers(self.kernels.config, self.shape, &self.buffers, &self.scratch);
         let invocation = self.kernels.gate_up_swiglu.invoke(
             self.kernels.config.token_major_gate_up_shape(self.shape),
             self.route_activity.num_total_tokens,
@@ -568,7 +566,6 @@ pub struct TokenMajorDownInvocation<'a> {
 
 impl Operator for TokenMajorDownInvocation<'_> {
     fn record(self, recorder: &CommandRecorder<'_>) {
-        debug_validate_token_major_buffers(self.kernels.config, self.shape, &self.buffers, &self.scratch);
         let invocation = self.kernels.down.invoke(
             self.kernels.config.token_major_down_shape(self.shape),
             self.route_activity.num_total_tokens,
@@ -597,7 +594,6 @@ pub struct ExpertMajorInvocation<'a> {
 
 impl Operator for ExpertMajorInvocation<'_> {
     fn record(self, recorder: &CommandRecorder<'_>) {
-        debug_validate_expert_major_buffers(self.kernels.config, self.shape, &self.buffers, &self.scratch);
         let gate_up_swiglu = self.kernels.gate_up_swiglu.invoke(
             self.kernels.config.expert_major_affine_shape(self.shape),
             self.route_activity.num_total_tokens,
@@ -630,116 +626,6 @@ impl Operator for ExpertMajorInvocation<'_> {
         );
         recorder.record_with_barrier_before(down);
     }
-}
-
-fn debug_validate_expert_major_buffers(
-    config: Config,
-    shape: ExpertMajorShape,
-    buffers: &ExpertMajorBuffers<'_>,
-    scratch: &Scratch<'_>,
-) {
-    #[cfg(debug_assertions)]
-    validate_expert_major_buffers(config, shape, buffers, scratch);
-}
-
-fn debug_validate_token_major_buffers(
-    config: Config,
-    shape: TokenMajorShape,
-    buffers: &TokenMajorBuffers<'_>,
-    scratch: &Scratch<'_>,
-) {
-    #[cfg(debug_assertions)]
-    validate_token_major_buffers(config, shape, buffers, scratch);
-}
-
-fn validate_expert_major_buffers(
-    config: Config,
-    shape: ExpertMajorShape,
-    buffers: &ExpertMajorBuffers<'_>,
-    scratch: &Scratch<'_>,
-) {
-    shape.validate();
-    let input_bytes = config.expert_major_input_bytes(shape);
-    let route_indices_bytes = config.expert_major_route_indices_bytes(shape);
-    let output_bytes = config.expert_major_output_bytes(shape);
-    let swiglu_bytes = config.swiglu_bytes(shape.num_total_routes);
-    assert!(
-        buffers.packed_input.len_bytes() >= input_bytes,
-        "sparse MLP expert-major packed input buffer too short: shape={shape:?} required_bytes={} buffer_bytes={}",
-        input_bytes,
-        buffers.packed_input.len_bytes()
-    );
-    assert!(
-        buffers.experts_by_route.len_bytes() >= route_indices_bytes,
-        "sparse MLP expert-major expert map buffer too short: shape={shape:?} required_bytes={} buffer_bytes={}",
-        route_indices_bytes,
-        buffers.experts_by_route.len_bytes()
-    );
-    assert!(
-        buffers.packed_output.len_bytes() >= output_bytes,
-        "sparse MLP expert-major output buffer too short: shape={shape:?} required_bytes={} buffer_bytes={}",
-        output_bytes,
-        buffers.packed_output.len_bytes()
-    );
-    assert!(
-        scratch.swiglu.len_bytes() >= swiglu_bytes,
-        "sparse MLP expert-major swiglu buffer too short: shape={shape:?} required_bytes={} buffer_bytes={}",
-        swiglu_bytes,
-        scratch.swiglu.len_bytes()
-    );
-}
-
-fn validate_token_major_buffers(
-    config: Config,
-    shape: TokenMajorShape,
-    buffers: &TokenMajorBuffers<'_>,
-    scratch: &Scratch<'_>,
-) {
-    shape.validate();
-    let input_bytes = config.token_major_input_bytes_unchecked(shape);
-    let route_indices_bytes = config.token_major_route_indices_bytes_unchecked(shape);
-    let output_bytes = config.token_major_output_bytes_unchecked(shape);
-    assert!(
-        buffers.input.len_bytes() >= input_bytes,
-        "sparse MLP input buffer too short: shape={shape:?} required_bytes={} buffer_bytes={}",
-        input_bytes,
-        buffers.input.len_bytes()
-    );
-    assert!(
-        buffers.token_indices.len_bytes() >= route_indices_bytes,
-        "sparse MLP token index buffer too short: shape={shape:?} required_bytes={} buffer_bytes={}",
-        route_indices_bytes,
-        buffers.token_indices.len_bytes()
-    );
-    assert!(
-        buffers.expert_indices.len_bytes() >= route_indices_bytes,
-        "sparse MLP expert index buffer too short: shape={shape:?} required_bytes={} buffer_bytes={}",
-        route_indices_bytes,
-        buffers.expert_indices.len_bytes()
-    );
-    assert!(
-        buffers.route_indices.len_bytes() >= route_indices_bytes,
-        "sparse MLP route index buffer too short: shape={shape:?} required_bytes={} buffer_bytes={}",
-        route_indices_bytes,
-        buffers.route_indices.len_bytes()
-    );
-    assert!(
-        buffers.routed_hidden.len_bytes() >= output_bytes,
-        "sparse MLP output buffer too short: shape={shape:?} required_bytes={} buffer_bytes={}",
-        output_bytes,
-        buffers.routed_hidden.len_bytes()
-    );
-    validate_token_major_scratch(config, shape, scratch);
-}
-
-fn validate_token_major_scratch(config: Config, shape: TokenMajorShape, scratch: &Scratch<'_>) {
-    let swiglu_bytes = config.swiglu_bytes_unchecked(shape.num_total_routes);
-    assert!(
-        scratch.swiglu.len_bytes() >= swiglu_bytes,
-        "sparse MLP swiglu scratch buffer too short: shape={shape:?} required_bytes={} buffer_bytes={}",
-        swiglu_bytes,
-        scratch.swiglu.len_bytes()
-    );
 }
 
 #[cfg(test)]

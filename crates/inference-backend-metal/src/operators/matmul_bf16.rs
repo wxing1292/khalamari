@@ -63,11 +63,7 @@ struct Selector {
 }
 
 struct Registry {
-    entries: Vec<(KernelKind, Variant)>,
-}
-
-struct Variant {
-    kernel: CompiledKernel,
+    entries: Vec<(KernelKind, CompiledKernel)>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -97,13 +93,44 @@ impl Matmul {
         weight: &'a Buffer,
         weight_offset_bytes: usize,
     ) -> Invocation<'a> {
-        debug_assert!(num_rows > 0, "BF16 matmul row count must be positive");
-        debug_assert!(num_rows <= i32::MAX as u32, "BF16 matmul row count must fit i32");
-        let (kind, variant) = self.selector.select(self.config, num_rows);
+        assert!(num_rows > 0, "BF16 matmul row count must be positive");
+        assert!(num_rows <= i32::MAX as u32, "BF16 matmul row count must fit i32");
+        if num_rows == 1 {
+            // MLX moves a partial four-row SIMDgroup back to output_dim - GEMV_TM.
+            assert!(
+                self.config.output_dim >= GEMV_TM,
+                "BF16 matmul GEMV requires at least {GEMV_TM} output columns"
+            );
+            // MLX forms weight row bases and local offsets as signed int.
+            let max_weight_index = self.config.output_dim as u64 * self.config.input_dim as u64 - 1;
+            assert!(
+                max_weight_index <= i32::MAX as u64,
+                "BF16 matmul GEMV weight element index must fit i32"
+            );
+        }
+        assert_range(
+            input,
+            input_offset_bytes,
+            self.config.input_bytes(num_rows),
+            "BF16 matmul input",
+        );
+        assert_range(
+            output,
+            output_offset_bytes,
+            self.config.output_bytes(num_rows),
+            "BF16 matmul output",
+        );
+        assert_range(
+            weight,
+            weight_offset_bytes,
+            self.config.weight_bytes(),
+            "BF16 matmul weight",
+        );
+        let (kind, kernel) = self.selector.select(self.config, num_rows);
         Invocation {
             config: self.config,
             kind,
-            variant,
+            kernel,
             num_rows,
             output,
             output_offset_bytes,
@@ -122,7 +149,7 @@ impl Selector {
         }
     }
 
-    fn select(&self, config: Config, num_rows: u32) -> (KernelKind, &Variant) {
+    fn select(&self, config: Config, num_rows: u32) -> (KernelKind, &CompiledKernel) {
         let key = Self::key(config, num_rows);
         (key, self.registry.get(key))
     }
@@ -150,26 +177,19 @@ impl Registry {
         };
         Self {
             entries: vec![
-                (
-                    gemv_kind,
-                    Variant {
-                        kernel: CompiledKernel::new(device, gemv_source, gemv_kernel_name),
-                    },
-                ),
+                (gemv_kind, CompiledKernel::new(device, gemv_source, gemv_kernel_name)),
                 (
                     KernelKind::GemmBm64Bn64Bk16Wm2Wn2,
-                    Variant {
-                        kernel: CompiledKernel::new(device, gemm_source, GEMM_KERNEL_NAME),
-                    },
+                    CompiledKernel::new(device, gemm_source, GEMM_KERNEL_NAME),
                 ),
             ],
         }
     }
 
-    fn get(&self, key: KernelKind) -> &Variant {
+    fn get(&self, key: KernelKind) -> &CompiledKernel {
         self.entries
             .iter()
-            .find_map(|(candidate_key, variant)| (*candidate_key == key).then_some(variant))
+            .find_map(|(candidate_key, kernel)| (*candidate_key == key).then_some(kernel))
             .unwrap_or_else(|| panic!("missing BF16 matmul execution variant {key:?}"))
     }
 }
@@ -177,7 +197,7 @@ impl Registry {
 pub struct Invocation<'a> {
     config: Config,
     kind: KernelKind,
-    variant: &'a Variant,
+    kernel: &'a CompiledKernel,
     num_rows: u32,
     output: &'a Buffer,
     output_offset_bytes: usize,
@@ -190,26 +210,7 @@ pub struct Invocation<'a> {
 impl Operator for Invocation<'_> {
     fn record(self, recorder: &CommandRecorder<'_>) {
         let config = self.config;
-        debug_assert_range(
-            self.input,
-            self.input_offset_bytes,
-            config.input_bytes(self.num_rows),
-            "BF16 matmul input",
-        );
-        debug_assert_range(
-            self.output,
-            self.output_offset_bytes,
-            config.output_bytes(self.num_rows),
-            "BF16 matmul output",
-        );
-        debug_assert_range(
-            self.weight,
-            self.weight_offset_bytes,
-            config.weight_bytes(),
-            "BF16 matmul weight",
-        );
-
-        recorder.set_kernel(&self.variant.kernel);
+        recorder.set_kernel(self.kernel);
         recorder.set_buffer_write(3, self.output, self.output_offset_bytes);
         match self.kind {
             KernelKind::GemvBm4 | KernelKind::GemvBm8 => {
@@ -282,9 +283,16 @@ fn tensor_bytes(rows: u32, columns: u32) -> usize {
     rows as usize * columns as usize * Dtype::Bfloat16.item_size()
 }
 
-fn debug_assert_range(buffer: &Buffer, offset_bytes: usize, len_bytes: usize, name: &str) {
-    let end_bytes = offset_bytes + len_bytes;
-    debug_assert!(end_bytes <= buffer.len_bytes(), "{name} byte range exceeds its buffer");
+fn assert_range(buffer: &Buffer, offset_bytes: usize, len_bytes: usize, name: &str) {
+    assert!(
+        offset_bytes.is_multiple_of(Dtype::Bfloat16.item_size()),
+        "{name} byte offset must be BF16-aligned"
+    );
+    let buffer_bytes = buffer.len_bytes();
+    assert!(
+        offset_bytes <= buffer_bytes && len_bytes <= buffer_bytes - offset_bytes,
+        "{name} byte range exceeds its buffer"
+    );
 }
 
 fn gemv_source() -> &'static str {

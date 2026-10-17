@@ -11,6 +11,8 @@ use crate::metal::Operator;
 use crate::mlx_headers::find_mlx_metal_header_root;
 use crate::mlx_headers::read_mlx_metal_header;
 
+const THREADS_PER_THREADBLOCK: usize = 256;
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Config {
     pub hidden_dim: u32,
@@ -20,6 +22,13 @@ pub struct Config {
 impl Config {
     fn validate(self) {
         assert!(self.hidden_dim > 0, "LayerNorm hidden dimension must be positive");
+        // MLX reads four values per thread and advances its uint loop by this tile width.
+        let loop_width = THREADS_PER_THREADBLOCK as u64 * 4;
+        let padded_hidden_dim = (self.hidden_dim as u64).div_ceil(loop_width) * loop_width;
+        assert!(
+            padded_hidden_dim <= u32::MAX as u64,
+            "LayerNorm padded hidden dimension must fit the shader u32 loop domain"
+        );
         assert!(
             self.eps.is_finite() && self.eps > 0.0,
             "LayerNorm epsilon must be finite and positive"
@@ -41,8 +50,11 @@ pub struct Shape {
 }
 
 impl Shape {
-    fn validate(self) {
-        debug_assert!(self.num_rows > 0, "LayerNorm row count must be positive");
+    fn validate(self, config: Config) {
+        assert!(self.num_rows > 0, "LayerNorm row count must be positive");
+        (self.num_rows as usize)
+            .checked_mul(config.row_bytes())
+            .expect("LayerNorm tensor byte length must fit usize");
     }
 }
 
@@ -69,7 +81,25 @@ impl Compute {
     }
 
     pub fn invoke<'a>(&'a self, shape: Shape, buffers: Buffers<'a>) -> Invocation<'a> {
-        shape.validate();
+        shape.validate(self.config);
+        let tensor_bytes = self.config.tensor_bytes(shape);
+        let row_bytes = self.config.row_bytes();
+        assert!(
+            buffers.input.len_bytes() >= tensor_bytes,
+            "LayerNorm input buffer is too small"
+        );
+        assert!(
+            buffers.output.len_bytes() >= tensor_bytes,
+            "LayerNorm output buffer is too small"
+        );
+        assert!(
+            buffers.weight.len_bytes() >= row_bytes,
+            "LayerNorm weight buffer is too small"
+        );
+        assert!(
+            buffers.bias.len_bytes() >= row_bytes,
+            "LayerNorm bias buffer is too small"
+        );
         Invocation {
             compute: self,
             shape,
@@ -87,24 +117,6 @@ pub struct Invocation<'a> {
 impl Operator for Invocation<'_> {
     fn record(self, recorder: &CommandRecorder<'_>) {
         let config = self.compute.config;
-        let tensor_bytes = config.tensor_bytes(self.shape);
-        let row_bytes = config.row_bytes();
-        debug_assert!(
-            self.buffers.input.len_bytes() >= tensor_bytes,
-            "LayerNorm input buffer is too small"
-        );
-        debug_assert!(
-            self.buffers.output.len_bytes() >= tensor_bytes,
-            "LayerNorm output buffer is too small"
-        );
-        debug_assert!(
-            self.buffers.weight.len_bytes() >= row_bytes,
-            "LayerNorm weight buffer is too small"
-        );
-        debug_assert!(
-            self.buffers.bias.len_bytes() >= row_bytes,
-            "LayerNorm bias buffer is too small"
-        );
         recorder.set_kernel(&self.compute.kernel);
         recorder.set_buffer_read(0, self.buffers.input, 0);
         recorder.set_buffer_read(1, self.buffers.weight, 0);
@@ -114,7 +126,7 @@ impl Operator for Invocation<'_> {
         recorder.set_u32(5, config.hidden_dim);
         recorder.set_u32(6, 1);
         recorder.set_u32(7, 1);
-        recorder.dispatch_threadblocks((self.shape.num_rows as usize, 1, 1), (256, 1, 1));
+        recorder.dispatch_threadblocks((self.shape.num_rows as usize, 1, 1), (THREADS_PER_THREADBLOCK, 1, 1));
     }
 }
 

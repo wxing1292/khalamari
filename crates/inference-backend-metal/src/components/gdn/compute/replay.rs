@@ -81,6 +81,30 @@ impl Compute {
         num_active_tokens: ReplayU32,
         num_active_recurrent_requests: ReplayU32,
     ) -> ReplayInvocation<'a> {
+        self.constants.validate_shape(shape);
+        shape.validate_active(num_active_reqs, num_active_tokens, num_active_recurrent_requests);
+        validate_buffers(self.constants, shape, &buffers);
+        assert!(replay.num_total_tokens > 0);
+        let model = self.constants.model;
+        for (buffer, row_bytes) in [
+            (replay.alpha, model.num_v_heads as u64 * size_of::<f32>() as u64),
+            (
+                replay.k,
+                model.num_qk_heads as u64 * model.qk_head_dim as u64 * size_of::<f32>() as u64,
+            ),
+            (
+                replay.u,
+                model.num_v_heads as u64 * model.v_head_dim as u64 * size_of::<f32>() as u64,
+            ),
+            (replay.qkv, model.qkv_dim() as u64 * size_of::<u16>() as u64),
+        ] {
+            validate_log_range(
+                buffer.len_bytes_u64(),
+                row_bytes,
+                replay.token_offset,
+                replay.num_total_tokens,
+            );
+        }
         ReplayInvocation {
             compute: self,
             shape,
@@ -106,34 +130,6 @@ pub struct ReplayInvocation<'a> {
 impl Operator for ReplayInvocation<'_> {
     fn record(self, recorder: &CommandRecorder<'_>) {
         let compute = self.compute;
-        compute.constants.validate_shape(self.shape);
-        validate_buffers(compute.constants, self.shape, &self.buffers);
-        assert!(self.replay.num_total_tokens > 0);
-        let model = compute.constants.model;
-        for (buffer, row_bytes) in [
-            (self.replay.alpha, model.num_v_heads as u64 * size_of::<f32>() as u64),
-            (
-                self.replay.k,
-                model.num_qk_heads as u64 * model.qk_head_dim as u64 * size_of::<f32>() as u64,
-            ),
-            (
-                self.replay.u,
-                model.num_v_heads as u64 * model.v_head_dim as u64 * size_of::<f32>() as u64,
-            ),
-            (self.replay.qkv, model.qkv_dim() as u64 * size_of::<u16>() as u64),
-        ] {
-            validate_log_range(
-                buffer.len_bytes_u64(),
-                row_bytes,
-                self.replay.token_offset,
-                self.replay.num_total_tokens,
-            );
-        }
-        if let (ReplayU32::Fixed(num_active_reqs), ReplayU32::Fixed(num_active_recurrent_requests)) =
-            (self.num_active_reqs, self.num_active_recurrent_requests)
-        {
-            assert!(num_active_recurrent_requests <= num_active_reqs);
-        }
         recorder.set_kernel(&compute.short_conv_replay);
         compute.record_short_conv_bindings(
             recorder,
@@ -199,13 +195,7 @@ impl ReplayInvocation<'_> {
         recorder.set_buffer_write(8, self.replay.u, 0);
         recorder.set_buffer_read(9, self.buffers.cu_tokens, 0);
         recorder.set_f32(10, self.compute.q_scale);
-        set_replay_u32(
-            recorder,
-            11,
-            self.num_active_reqs,
-            self.shape.num_total_reqs,
-            "GDN active request count",
-        );
+        set_replay_u32(recorder, 11, self.num_active_reqs, self.shape.num_total_reqs);
         recorder.set_u64(12, self.buffers.recurrent_state_arena_offset_bytes);
         set_recurrent_count(
             recorder,

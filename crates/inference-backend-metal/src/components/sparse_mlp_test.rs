@@ -12,7 +12,6 @@ use crate::metal::ReplayParameterKey;
 use crate::metal::ReplayProgram;
 use crate::metal::ReplayU32;
 use crate::metal::Stream;
-use crate::test_support::ReplayTestCache;
 
 const NUM_ACTIVE_TOKENS: ReplayParameterKey = ReplayParameterKey::new("test.sparse_mlp.num_active_tokens");
 
@@ -23,7 +22,7 @@ enum Layout {
 }
 
 #[test]
-fn test_replay_bucketing() {
+fn test_replay_active_counts() {
     for (num_total_tokens, intermediate_dim, group_size, num_experts, active_sequence) in [
         (4, 64, 32, 5, [1, 4, 3, 2]),
         (17, 512, 32, 5, [1, 17, 16, 3]),
@@ -39,11 +38,8 @@ fn test_replay_bucketing() {
         (161, 64, 64, 5, [1, 161, 16, 17]),
     ] {
         let fixture = SparseMLPFixture::new(num_total_tokens, 2, intermediate_dim, group_size, num_experts);
-        let mut cache = ReplayTestCache::new();
         for layout in [Layout::TokenMajor, Layout::ExpertMajor] {
-            let key = (fixture.num_total_tokens, intermediate_dim, layout);
-            let (_, cache_hit) = cache.record(key, || fixture.replay(layout));
-            assert!(!cache_hit);
+            let replay = fixture.replay(layout);
             for (case_index, num_active_tokens) in active_sequence.into_iter().enumerate() {
                 let work = fixture.write_work(
                     num_active_tokens,
@@ -51,9 +47,7 @@ fn test_replay_bucketing() {
                         .wrapping_add(intermediate_dim)
                         .wrapping_add(case_index as u32),
                 );
-                let (replay, cache_hit) = cache.record(key, || unreachable!());
-                assert!(cache_hit);
-                fixture.submit(replay, num_active_tokens);
+                fixture.submit(&replay, num_active_tokens);
                 fixture.assert_active_output(layout, &work);
             }
         }

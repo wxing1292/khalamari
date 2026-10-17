@@ -26,7 +26,6 @@ use crate::metal::ReplayArguments;
 use crate::metal::ReplayParameterKey;
 use crate::metal::ReplayU32;
 use crate::metal::Stream;
-use crate::test_support::ReplayTestCache;
 
 const NUM_ACTIVE_REQUESTS: ReplayParameterKey = ReplayParameterKey::new("test.gdn_compute.num_active_requests");
 const NUM_ACTIVE_TOKENS: ReplayParameterKey = ReplayParameterKey::new("test.gdn_compute.num_active_tokens");
@@ -596,9 +595,7 @@ fn check_recurrent_replay_across_active_counts(num_total_tokens: u32, candidate_
         Buffer::new_zeroed_elements(&device, config.num_recurrent_output_values(shape), Dtype::Bfloat16);
     let norm_gated_output =
         Buffer::new_zeroed_elements(&device, config.num_recurrent_output_values(shape), Dtype::Bfloat16);
-    let cache_key = (shape.num_total_reqs, shape.num_total_tokens);
-    let mut cache = ReplayTestCache::new();
-    let (_, cache_hit) = cache.record(cache_key, || {
+    let replay = {
         let mut builder = stream.create_replay_program();
         let buffers = Buffers {
             qkv: &qkv,
@@ -640,8 +637,7 @@ fn check_recurrent_replay_across_active_counts(num_total_tokens: u32, candidate_
             ));
         }
         builder.build()
-    });
-    assert!(!cache_hit);
+    };
     write_bf16(&qkv, 0, &qkv_values);
     write_bf16(&a, 0, &a_values);
     write_bf16(&b, 0, &b_values);
@@ -667,12 +663,10 @@ fn check_recurrent_replay_across_active_counts(num_total_tokens: u32, candidate_
                 .copy_from_slice(&source_recurrent_states[src_begin..src_begin + recurrent_state_stride]);
         }
         write_bf16(&recurrent_state_arena, 0, &recurrent_arena_values);
-        let (replay, cache_hit) = cache.record(cache_key, || unreachable!());
-        assert!(cache_hit);
 
         stream
             .submit_replay_with_arguments(
-                replay,
+                &replay,
                 &ReplayArguments::new()
                     .with_u32(NUM_ACTIVE_REQUESTS, num_active as u32)
                     .with_u32(NUM_ACTIVE_TOKENS, num_active as u32),
@@ -957,27 +951,23 @@ fn assert_mixed_replay(config: Config, num_total_reqs: usize, num_total_tokens: 
         norm_gated_output: &norm_gated_output,
     };
     for write_candidate_states in [false, true] {
-        let mut cache = ReplayTestCache::new();
-        for serialized in [false, true] {
-            let (_, hit) = cache.record(serialized, || {
-                let mut builder = stream.create_replay_program();
-                let invocation = kernels.invoke_mixed(
-                    shape,
-                    buffers,
-                    ReplayU32::Parameter(NUM_ACTIVE_REQUESTS),
-                    ReplayU32::Parameter(NUM_ACTIVE_TOKENS),
-                    ReplayU32::Parameter(NUM_ACTIVE_RECURRENT_REQUESTS),
-                    write_candidate_states,
-                );
-                if serialized {
-                    builder.record(SerialMixedInvocation(invocation));
-                } else {
-                    builder.record(invocation);
-                }
-                builder.build()
-            });
-            assert!(!hit);
-        }
+        let [replay, serial_replay] = [false, true].map(|serialized| {
+            let mut builder = stream.create_replay_program();
+            let invocation = kernels.invoke_mixed(
+                shape,
+                buffers,
+                ReplayU32::Parameter(NUM_ACTIVE_REQUESTS),
+                ReplayU32::Parameter(NUM_ACTIVE_TOKENS),
+                ReplayU32::Parameter(NUM_ACTIVE_RECURRENT_REQUESTS),
+                write_candidate_states,
+            );
+            if serialized {
+                builder.record(SerialMixedInvocation(invocation));
+            } else {
+                builder.record(invocation);
+            }
+            builder.build()
+        });
         for &(num_prefill, request_lengths) in rounds {
             let mut cu_values = vec![0];
             for &length in request_lengths {
@@ -1019,9 +1009,7 @@ fn assert_mixed_replay(config: Config, num_total_reqs: usize, num_total_tokens: 
                 .with_u32(NUM_ACTIVE_REQUESTS, request_lengths.len() as u32)
                 .with_u32(NUM_ACTIVE_TOKENS, num_tokens as u32)
                 .with_u32(NUM_ACTIVE_RECURRENT_REQUESTS, num_prefill);
-            let (replay, hit) = cache.record(false, || unreachable!());
-            assert!(hit);
-            stream.submit_replay_with_arguments(replay, &arguments).wait();
+            stream.submit_replay_with_arguments(&replay, &arguments).wait();
 
             for (req, bounds) in cu_values.windows(2).enumerate() {
                 let begin = bounds[0] as usize;
@@ -1128,9 +1116,7 @@ fn assert_mixed_replay(config: Config, num_total_reqs: usize, num_total_tokens: 
             for buffer in [&conv_qkv, &recurrent_output, &norm_gated_output] {
                 write_bf16(buffer, 0, &vec![CANARY; buffer.len_bytes() / size_of::<u16>()]);
             }
-            let (serial_replay, hit) = cache.record(true, || unreachable!());
-            assert!(hit);
-            stream.submit_replay_with_arguments(serial_replay, &arguments).wait();
+            stream.submit_replay_with_arguments(&serial_replay, &arguments).wait();
             for (buffer, concurrent) in checked_buffers.into_iter().zip(concurrent_values) {
                 assert_eq!(buffer.read_typed::<u16>(0, concurrent.len()), concurrent);
             }

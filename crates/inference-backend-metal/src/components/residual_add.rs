@@ -403,10 +403,7 @@ impl Invocation<'_> {
     }
 
     fn validate(&self) {
-        self.config.validate();
-        self.shape.validate();
         if let Some(row_shape) = self.row_shape {
-            row_shape.validate();
             assert_eq!(self.shape.num_values, row_shape.num_values());
         }
         assert!(self.num_active_rows_key.is_none() || self.row_shape.is_some());
@@ -443,10 +440,7 @@ impl CaptureReplayOp {
 
 impl ReplayInvocation {
     fn validate(&self) {
-        self.config.validate();
-        self.shape.validate();
         if let Some(row_shape) = self.row_shape {
-            row_shape.validate();
             assert_eq!(self.shape.num_values, row_shape.num_values());
         }
         assert!(self.num_active_rows_key.is_none() || self.row_shape.is_some());
@@ -467,7 +461,6 @@ impl CaptureReplayInvocation {
         self.residual.config.validate();
         self.residual.shape.validate();
         let row_shape = self.row_shape();
-        row_shape.validate();
         assert_eq!(self.residual.shape.num_values, row_shape.num_values());
         assert_eq!(self.residual.config, Config::bf16());
         assert_eq!(

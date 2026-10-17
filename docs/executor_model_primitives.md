@@ -80,6 +80,18 @@ variants. `Selector::select(...)` returns `(affine_quantized::KernelKind, &affin
 validated matrix configuration and row count. The same selection owns kernel tile geometry and topology boundaries.
 `Unembed` supplies model geometry, weights, buffers, and row counts. It must not select a second kernel.
 
+Same-dtype QMV BN8/BK32 with the identity epilogue calls the MLX `qmv_fast_impl` or `qmv_impl` helper.
+Kernel construction requires the packed row byte numerator and packed weight byte indices to fit `i32`.
+Invocation construction requires input row bases, including SIMD lane offsets, and output element indices to fit `u32`.
+These checks run when the kernel or a replay program is created. Cached replay submissions do not repeat them.
+The backend panics before GPU submission when a shape exceeds these domains.
+These limits apply to relative offsets inside the kernel. Buffer range checks separately validate each bound byte range.
+Affine invocation constructors validate these ranges, including byte offsets, before command recording.
+Each offset must align to its operand dtype. Packed weights use `u32` alignment.
+MLX QMV kernel constructors also reject output widths from five through seven.
+The MLX small-output branch exceeds its four-entry result array for these widths.
+This limit applies to same-dtype identity BN8/BK32 QMV and gather QMV. Other kernel families keep their own domains.
+
 For BF16 vocabulary projections with at least 65,536 outputs, QMM starts at five rows when `hidden_dim <= 2048`.
 It starts at six rows for larger hidden dimensions.
 Once QMM is selected, it uses BM8 through eight rows, BM16 through 16 rows, and BM32 above 16 rows.
@@ -107,6 +119,11 @@ The total row count changes the grid. The active-row value controls the guard.
 
 Row gather has one current kernel for each supported dtype. It does not need a registry or selector.
 
+Row gather, scatter, and route require separate output buffers.
+Invocation construction rejects output aliases with source and metadata buffers.
+`repeat_rows` requires a separate output buffer when `num_repeats > 1`.
+With `num_repeats == 1`, input and output may share one buffer.
+
 ## RMSNorm
 
 The standalone RMSNorm kernel maps one thread block to one token row:
@@ -121,6 +138,7 @@ one ThreadBlock
 
 The dtype selects the F32 or BF16-vectorized kernel at initialization. The current kernel requires 1024 threads. The
 runtime token count determines the grid dimensions. RMSNorm does not use a registry or selector.
+F32 kernel initialization bounds the padded hidden dimension by the shader `u32` loop domain.
 
 ## Residual add
 
@@ -149,6 +167,10 @@ The optional capture form also writes selected residual columns. The backend sel
 kernel from the validated dtype and hidden geometry at initialization. This is a static kernel-kind choice. It is not
 a dynamic execution plan.
 
+Replay fusion requires the RMSNorm weight dtype to match its IO dtype.
+BF16 IO with F32 weights uses separate residual-add and RMSNorm commands.
+Scalar kernel initialization bounds the padded hidden dimension by the shader `u32` loop domain.
+
 ## RMSNorm/RoPE
 
 The fused RMSNorm/RoPE component maps one thread block to one `(flat Q token, Q head)` row. It normalizes one head row,
@@ -157,6 +179,7 @@ reads the request position from `flat_token_indices`, applies RoPE to `rope_dim`
 The private compile-time constants contain the attention-head geometry, RoPE geometry, epsilon, scaling constants, dtype,
 and fixed thread-block requirement. The runtime token count changes only the grid and the active-token guard. The
 component has one current kernel for one model configuration and does not need a registry or selector.
+Kernel initialization bounds the padded head dimension by the shader `u32` loop domain.
 
 ## Replay and ownership
 

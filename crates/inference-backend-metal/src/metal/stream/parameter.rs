@@ -32,6 +32,21 @@ pub enum ReplayValue<T> {
 /// Source for one `u32` kernel argument in a replay program.
 pub type ReplayU32 = ReplayValue<u32>;
 
+impl ReplayU32 {
+    /// Validate a fixed value or the declared domain before recording.
+    /// Submission validates values supplied for parameters.
+    #[track_caller]
+    pub fn validate_range(self, min_value: u32, max_value: u32) {
+        assert!(min_value <= max_value, "Metal replay u32 domain is empty");
+        if let Self::Fixed(value) = self {
+            assert!(
+                (min_value..=max_value).contains(&value),
+                "Metal replay u32 value {value} is outside {min_value}..={max_value}"
+            );
+        }
+    }
+}
+
 /// Source for one `u64` kernel argument in a replay program.
 pub type ReplayU64 = ReplayValue<u64>;
 

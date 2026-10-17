@@ -56,16 +56,19 @@ pub struct Shape {
 }
 
 impl Shape {
-    fn num_values(self) -> u32 {
-        debug_assert!(self.num_rows > 0, "BF16 bias activation row count must be positive");
-        debug_assert!(
+    fn validate(self) {
+        assert!(self.num_rows > 0, "BF16 bias activation row count must be positive");
+        assert!(
             self.num_columns > 0,
             "BF16 bias activation column count must be positive"
         );
-        debug_assert!(
+        assert!(
             self.num_rows <= u32::MAX / self.num_columns,
-            "BF16 bias activation value count must fit u32"
+            "BF16 bias activation value count must fit the shader u32 count domain"
         );
+    }
+
+    fn num_values(self) -> u32 {
         self.num_rows * self.num_columns
     }
 }
@@ -92,6 +95,15 @@ impl Kernel {
         output: &'a Buffer,
         output_offset_bytes: usize,
     ) -> Invocation<'a> {
+        shape.validate();
+        let tensor_bytes = shape.num_values() as usize * Dtype::Bfloat16.item_size();
+        let bias_bytes = shape.num_columns as usize * Dtype::Bfloat16.item_size();
+        assert_range(input, input_offset_bytes, tensor_bytes, "BF16 bias activation input");
+        assert_range(output, output_offset_bytes, tensor_bytes, "BF16 bias activation output");
+        assert!(
+            bias.len_bytes() >= bias_bytes,
+            "BF16 bias activation bias buffer is too small"
+        );
         Invocation {
             kernel: &self.kernel,
             shape,
@@ -119,24 +131,6 @@ pub struct Invocation<'a> {
 impl Operator for Invocation<'_> {
     fn record(self, recorder: &CommandRecorder<'_>) {
         let num_values = self.shape.num_values();
-        let tensor_bytes = num_values as usize * Dtype::Bfloat16.item_size();
-        let bias_bytes = self.shape.num_columns as usize * Dtype::Bfloat16.item_size();
-        debug_assert_range(
-            self.input,
-            self.input_offset_bytes,
-            tensor_bytes,
-            "BF16 bias activation input",
-        );
-        debug_assert_range(
-            self.output,
-            self.output_offset_bytes,
-            tensor_bytes,
-            "BF16 bias activation output",
-        );
-        debug_assert!(
-            self.bias.len_bytes() >= bias_bytes,
-            "BF16 bias activation bias buffer is too small"
-        );
         recorder.set_kernel(self.kernel);
         recorder.set_buffer_read(0, self.input, self.input_offset_bytes);
         recorder.set_buffer_read(1, self.bias, 0);
@@ -148,9 +142,16 @@ impl Operator for Invocation<'_> {
     }
 }
 
-fn debug_assert_range(buffer: &Buffer, offset_bytes: usize, len_bytes: usize, name: &str) {
-    let end_bytes = offset_bytes + len_bytes;
-    debug_assert!(end_bytes <= buffer.len_bytes(), "{name} byte range exceeds its buffer");
+fn assert_range(buffer: &Buffer, offset_bytes: usize, len_bytes: usize, name: &str) {
+    assert!(
+        offset_bytes.is_multiple_of(Dtype::Bfloat16.item_size()),
+        "{name} byte offset must be BF16-aligned"
+    );
+    let buffer_bytes = buffer.len_bytes();
+    assert!(
+        offset_bytes <= buffer_bytes && len_bytes <= buffer_bytes - offset_bytes,
+        "{name} byte range exceeds its buffer"
+    );
 }
 
 fn source() -> &'static str {

@@ -755,7 +755,7 @@ Both fused paths retain storage-dtype projection rounding before F32 SwiGLU.
 
 ## Tests and benchmarks
 
-The focused backend test records each dense MLP topology into an isolated test cache.
+The focused backend test records one replay for each dense MLP capacity and topology.
 It replays non-monotonic active-token sequences and compares each active output prefix with the CPU quantized
 dense-MLP reference.
 The reference covers the gate/up projection, `SiLU(gate) * up`, and the down projection as one numerical contract.

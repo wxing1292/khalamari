@@ -17,7 +17,7 @@ void row_scatter_impl(
     uint route_index = gid / num_cols;
     uint col = gid - route_index * num_cols;
     uint2 route = routes[route_index];
-    output[route.y * num_cols + col] = input[route.x * num_cols + col];
+    output[ulong(route.y) * num_cols + col] = input[ulong(route.x) * num_cols + col];
 }
 
 kernel void row_scatter_bf16(

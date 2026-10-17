@@ -118,7 +118,8 @@ A capacity of 512 with one active token keeps H4. It does not change the recorde
 
 The core fixture checks hash parameters and row IDs against independent integer results.
 Fixed and random Metal tests check request-local history, EOS behavior, supported storage formats, and uneven group boundaries against CPU references.
-The cached replay test checks the 256/257 boundary, cache hits, and different active counts.
+The replay test checks the 256/257 boundary and changing active counts.
+It records capacities `256`, `257`, and `512`, then reuses the same capacity-256 replay after the larger programs.
 
 ```sh
 cargo test -p inference-executor-core ngram_embedding

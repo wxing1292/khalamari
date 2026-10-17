@@ -32,6 +32,14 @@ impl Compute {
         output: &'a Buffer,
     ) -> LogMelChunkInvocation<'a> {
         shape.validate();
+        assert!(
+            source.len_bytes() >= shape.source_bytes(),
+            "log-Mel source buffer is too small"
+        );
+        assert!(
+            output.len_bytes() >= shape.output_bytes(shape.output_values()),
+            "chunked log-Mel output buffer is too small"
+        );
         LogMelChunkInvocation {
             kernel: &self.chunk_log_mel,
             shape,
@@ -47,6 +55,15 @@ impl Compute {
         output: &'a Buffer,
     ) -> FlattenConvInvocation<'a> {
         shape.validate();
+        let tensor_bytes = shape.num_values() as usize * Dtype::Bfloat16.item_size();
+        assert!(
+            source.len_bytes() >= tensor_bytes,
+            "audio Conv2D flatten source buffer is too small"
+        );
+        assert!(
+            output.len_bytes() >= tensor_bytes,
+            "audio Conv2D flatten output buffer is too small"
+        );
         FlattenConvInvocation {
             kernel: &self.flatten_conv,
             shape,
@@ -62,6 +79,16 @@ impl Compute {
         output: &'a Buffer,
     ) -> CompactPositionInvocation<'a> {
         shape.validate();
+        let source_bytes = shape.source_values() as usize * Dtype::Bfloat16.item_size();
+        let output_bytes = shape.num_values() as usize * Dtype::Bfloat16.item_size();
+        assert!(
+            source.len_bytes() >= source_bytes,
+            "audio position source buffer is too small"
+        );
+        assert!(
+            output.len_bytes() >= output_bytes,
+            "audio position output buffer is too small"
+        );
         CompactPositionInvocation {
             kernel: &self.compact_position,
             shape,
@@ -88,9 +115,13 @@ impl LogMelChunkShape {
     }
 
     fn validate(self) {
-        debug_assert!(self.num_mel_bins > 0, "log-Mel bin count must be positive");
-        debug_assert!(self.num_frames > 0, "log-Mel frame count must be positive");
-        debug_assert!(self.frames_per_chunk > 0, "log-Mel chunk width must be positive");
+        assert!(self.num_mel_bins > 0, "log-Mel bin count must be positive");
+        assert!(self.num_frames > 0, "log-Mel frame count must be positive");
+        assert!(self.frames_per_chunk > 0, "log-Mel chunk width must be positive");
+        self.num_chunks()
+            .checked_mul(self.num_mel_bins)
+            .and_then(|values| values.checked_mul(self.frames_per_chunk))
+            .expect("chunked log-Mel output value count must fit the shader u32 count domain");
     }
 
     fn source_bytes(self) -> usize {
@@ -112,14 +143,6 @@ pub struct LogMelChunkInvocation<'a> {
 impl Operator for LogMelChunkInvocation<'_> {
     fn record(self, recorder: &CommandRecorder<'_>) {
         let output_values = self.shape.output_values();
-        debug_assert!(
-            self.source.len_bytes() >= self.shape.source_bytes(),
-            "log-Mel source buffer is too small"
-        );
-        debug_assert!(
-            self.output.len_bytes() >= self.shape.output_bytes(output_values),
-            "chunked log-Mel output buffer is too small"
-        );
         recorder.set_kernel(self.kernel);
         recorder.set_buffer_read(0, self.source, 0);
         recorder.set_buffer_write(1, self.output, 0);
@@ -145,10 +168,15 @@ impl FlattenConvShape {
     }
 
     fn validate(self) {
-        debug_assert!(self.batch > 0, "audio Conv2D batch size must be positive");
-        debug_assert!(self.height > 0, "audio Conv2D height must be positive");
-        debug_assert!(self.width > 0, "audio Conv2D width must be positive");
-        debug_assert!(self.channels > 0, "audio Conv2D channel count must be positive");
+        assert!(self.batch > 0, "audio Conv2D batch size must be positive");
+        assert!(self.height > 0, "audio Conv2D height must be positive");
+        assert!(self.width > 0, "audio Conv2D width must be positive");
+        assert!(self.channels > 0, "audio Conv2D channel count must be positive");
+        self.batch
+            .checked_mul(self.height)
+            .and_then(|values| values.checked_mul(self.width))
+            .and_then(|values| values.checked_mul(self.channels))
+            .expect("audio Conv2D flatten value count must fit the shader u32 count domain");
     }
 }
 
@@ -162,15 +190,6 @@ pub struct FlattenConvInvocation<'a> {
 impl Operator for FlattenConvInvocation<'_> {
     fn record(self, recorder: &CommandRecorder<'_>) {
         let num_values = self.shape.num_values();
-        let tensor_bytes = num_values as usize * Dtype::Bfloat16.item_size();
-        debug_assert!(
-            self.source.len_bytes() >= tensor_bytes,
-            "audio Conv2D flatten source buffer is too small"
-        );
-        debug_assert!(
-            self.output.len_bytes() >= tensor_bytes,
-            "audio Conv2D flatten output buffer is too small"
-        );
         recorder.set_kernel(self.kernel);
         recorder.set_buffer_read(0, self.source, 0);
         recorder.set_buffer_write(1, self.output, 0);
@@ -191,19 +210,27 @@ pub struct CompactPositionShape {
 
 impl CompactPositionShape {
     fn validate(self) {
-        debug_assert!(self.num_rows > 0, "audio position row count must be positive");
-        debug_assert!(
+        assert!(self.num_rows > 0, "audio position row count must be positive");
+        assert!(
             self.source_rows_per_chunk > 0 && self.source_rows_per_chunk <= ROWS_PER_COMPLETE_CHUNK,
             "audio position source rows per chunk must be in 1..={ROWS_PER_COMPLETE_CHUNK}"
         );
-        debug_assert!(
+        assert!(
             self.num_rows <= self.source_rows_per_chunk || self.source_rows_per_chunk == ROWS_PER_COMPLETE_CHUNK,
             "multi-chunk audio positions require {ROWS_PER_COMPLETE_CHUNK} source rows per chunk"
         );
-        debug_assert!(
+        assert!(
             self.hidden_dim >= 4 && self.hidden_dim.is_multiple_of(2),
             "audio position hidden dimension must be even and at least four"
         );
+        self.num_rows
+            .checked_mul(self.hidden_dim)
+            .expect("audio position output value count must fit the shader u32 count domain");
+        self.num_rows
+            .div_ceil(ROWS_PER_COMPLETE_CHUNK)
+            .checked_mul(self.source_rows_per_chunk)
+            .and_then(|rows| rows.checked_mul(self.hidden_dim))
+            .expect("audio position padded source value count must fit u32");
     }
 
     fn num_values(self) -> u32 {
@@ -225,16 +252,6 @@ pub struct CompactPositionInvocation<'a> {
 impl Operator for CompactPositionInvocation<'_> {
     fn record(self, recorder: &CommandRecorder<'_>) {
         let num_values = self.shape.num_values();
-        let source_bytes = self.shape.source_values() as usize * Dtype::Bfloat16.item_size();
-        let output_bytes = num_values as usize * Dtype::Bfloat16.item_size();
-        debug_assert!(
-            self.source.len_bytes() >= source_bytes,
-            "audio position source buffer is too small"
-        );
-        debug_assert!(
-            self.output.len_bytes() >= output_bytes,
-            "audio position output buffer is too small"
-        );
         recorder.set_kernel(self.kernel);
         recorder.set_buffer_read(0, self.source, 0);
         recorder.set_buffer_write(1, self.output, 0);

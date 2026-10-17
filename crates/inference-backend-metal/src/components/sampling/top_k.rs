@@ -144,13 +144,7 @@ fn standard_partial_candidate_layout() -> PartialCandidateLayout {
 }
 
 fn num_vocab_partitions(shape: Shape, layout: PartialCandidateLayout) -> u32 {
-    shape.validate();
     shape.vocab_size.div_ceil(layout.vocab_partition_size())
-}
-
-fn num_candidates_per_partition(shape: Shape) -> u32 {
-    shape.validate();
-    shape.top_k
 }
 
 fn partial_candidate_count(shape: Shape, layout: PartialCandidateLayout) -> usize {
@@ -159,7 +153,7 @@ fn partial_candidate_count(shape: Shape, layout: PartialCandidateLayout) -> usiz
         &[
             shape.num_total_sampling_inputs as usize,
             num_vocab_partitions(shape, layout) as usize,
-            num_candidates_per_partition(shape) as usize,
+            shape.top_k as usize,
         ],
     )
 }
@@ -230,6 +224,10 @@ fn assert_map_buffers_fit(
     buffers: MapBuffers<'_>,
     logits_item_size: usize,
 ) {
+    assert!(
+        buffers.logits_offset_bytes.is_multiple_of(logits_item_size),
+        "top-k logits byte offset must align to its dtype"
+    );
     let logits_bytes = checked_product(
         "Metal top-k logits byte length",
         &[
@@ -401,6 +399,12 @@ impl MapCompute {
         buffers: MapBuffers<'a>,
     ) -> MapInvocation<'a> {
         let (_, variant) = Selector::select(&self.registry, shape, logits_dtype, operation);
+        let constants = variant.constants;
+        let layout = constants.partial_candidate_layout();
+        assert_map_buffers_fit(shape, layout, buffers, variant.logits_item_size);
+        let num_partitions = num_vocab_partitions(shape, layout);
+        let num_threads_per_row = checked_num_threads(num_partitions, constants.thread_block.required_threads);
+        checked_num_threads(shape.num_total_sampling_inputs, num_threads_per_row);
         MapInvocation {
             variant,
             shape,
@@ -409,6 +413,7 @@ impl MapCompute {
     }
 
     pub fn candidate_count(&self, shape: Shape) -> usize {
+        shape.validate();
         partial_candidate_count(shape, self.partial_candidate_layout())
     }
 
@@ -416,18 +421,16 @@ impl MapCompute {
         standard_partial_candidate_layout()
     }
 
+    /// Adds active values for the same shape used to record the replay.
     pub fn add_replay_arguments(&self, shape: Shape, num_active_sampling_inputs: u32, arguments: &mut ReplayArguments) {
-        shape.validate();
         assert!(
             num_active_sampling_inputs > 0 && num_active_sampling_inputs <= shape.num_total_sampling_inputs,
             "top-k active sampling inputs must fit the recorded capacity"
         );
         let num_partitions = num_vocab_partitions(shape, self.partial_candidate_layout());
         let required_threads = MapThreadBlockConstants::current().required_threads;
-        let num_threads_per_row = checked_num_threads(num_partitions, required_threads);
+        let num_threads_per_row = num_partitions * required_threads;
         let num_active_threads = checked_num_threads(num_active_sampling_inputs, num_threads_per_row);
-        let num_total_threads = checked_num_threads(shape.num_total_sampling_inputs, num_threads_per_row);
-        assert!(num_active_threads <= num_total_threads);
         arguments.set_u32(MAP_NUM_ACTIVE_THREADS_KEY, num_active_threads);
     }
 }
@@ -440,11 +443,9 @@ pub struct MapInvocation<'a> {
 
 impl Operator for MapInvocation<'_> {
     fn record(self, recorder: &CommandRecorder<'_>) {
-        self.shape.validate();
         let constants = self.variant.constants;
         let layout = constants.partial_candidate_layout();
-        assert_map_buffers_fit(self.shape, layout, self.buffers, self.variant.logits_item_size);
-        let num_partitions = num_vocab_partitions(self.shape, layout);
+        let num_partitions = self.shape.vocab_size.div_ceil(layout.vocab_partition_size());
         recorder.set_kernel(&self.variant.kernel);
         recorder.set_buffer_read(0, self.buffers.logits, self.buffers.logits_offset_bytes);
         recorder.set_buffer_write(1, self.buffers.tile_token_ids, 0);
@@ -454,8 +455,8 @@ impl Operator for MapInvocation<'_> {
         recorder.set_u32(6, layout.vocab_partition_size());
         recorder.set_u32(7, num_partitions);
         let required_threads = constants.thread_block.required_threads;
-        let num_threads_per_row = checked_num_threads(num_partitions, required_threads);
-        let num_total_threads = checked_num_threads(self.shape.num_total_sampling_inputs, num_threads_per_row);
+        let num_threads_per_row = num_partitions * required_threads;
+        let num_total_threads = self.shape.num_total_sampling_inputs * num_threads_per_row;
         recorder.bind_u32(3, MAP_NUM_ACTIVE_THREADS_KEY, num_threads_per_row, num_total_threads);
         recorder.dispatch_1d(num_total_threads as usize, required_threads as usize);
     }
@@ -485,10 +486,31 @@ impl ReduceCompute {
     }
 
     pub fn invoke_merge<'a>(&'a self, shape: Shape, buffers: MergeBuffers<'a>) -> MergeInvocation<'a> {
+        let partial_candidate_layout = standard_partial_candidate_layout();
+        shape.validate();
+        let candidates = partial_candidate_count(shape, partial_candidate_layout);
+        assert!(
+            buffers.tile_token_ids.len_bytes()
+                >= checked_bytes("Metal top-k merge partial token", candidates, size_of::<i32>())
+        );
+        assert!(
+            buffers.tile_logits.len_bytes()
+                >= checked_bytes("Metal top-k merge partial logit", candidates, size_of::<f32>())
+        );
+        let outputs = checked_product(
+            "Metal top-k merge output count",
+            &[shape.num_total_sampling_inputs as usize, shape.top_k as usize],
+        );
+        assert!(buffers.token_ids.len_bytes() >= checked_bytes("Metal top-k merge token", outputs, size_of::<i32>()));
+        assert!(buffers.logits.len_bytes() >= checked_bytes("Metal top-k merge logit", outputs, size_of::<f32>()));
+        checked_num_threads(
+            shape.num_total_sampling_inputs,
+            self.constants.thread_block.required_threads,
+        );
         MergeInvocation {
             kernel: &self.merge,
             constants: self.constants,
-            partial_candidate_layout: standard_partial_candidate_layout(),
+            partial_candidate_layout,
             shape,
             buffers,
         }
@@ -504,6 +526,46 @@ impl ReduceCompute {
         buffers: SampleBuffers<'a>,
         partial_candidate_layout: PartialCandidateLayout,
     ) -> SampleInvocation<'a> {
+        shape.validate();
+        assert_reduce_inputs_fit(
+            shape,
+            buffers.tile_token_ids,
+            buffers.tile_logits,
+            buffers.params,
+            buffers.req_slots,
+            partial_candidate_layout,
+        );
+        assert!(
+            buffers.sample_positions.len_bytes()
+                >= checked_bytes(
+                    "Metal top-k sample position",
+                    shape.num_total_sampling_inputs as usize,
+                    size_of::<u32>(),
+                ),
+            "top-k sample-position buffer is too short"
+        );
+        assert!(
+            buffers.token_ids.len_bytes()
+                >= checked_bytes(
+                    "Metal sampled token",
+                    shape.num_total_sampling_inputs as usize,
+                    size_of::<i32>(),
+                ),
+            "top-k sampled-token buffer is too short"
+        );
+        assert!(
+            buffers.token_probs.len_bytes()
+                >= checked_bytes(
+                    "Metal sampled probability",
+                    shape.num_total_sampling_inputs as usize,
+                    size_of::<f32>(),
+                ),
+            "top-k sampled-probability buffer is too short"
+        );
+        checked_num_threads(
+            shape.num_total_sampling_inputs,
+            self.constants.thread_block.required_threads,
+        );
         SampleInvocation {
             kernel: &self.sample,
             constants: self.constants,
@@ -527,6 +589,54 @@ impl ReduceCompute {
         buffers: WriteDistributionBuffers<'a>,
         partial_candidate_layout: PartialCandidateLayout,
     ) -> WriteDistributionInvocation<'a> {
+        shape.validate();
+        assert_reduce_inputs_fit(
+            shape,
+            buffers.tile_token_ids,
+            buffers.tile_logits,
+            buffers.params,
+            buffers.req_slots,
+            partial_candidate_layout,
+        );
+        assert!(
+            buffers.max_k >= shape.top_k,
+            "top-k write-distribution slots must cover active top_k"
+        );
+        assert!(
+            buffers.num_output_distributions > 0,
+            "top-k write-distribution output requires distributions"
+        );
+        let output_elements = checked_product(
+            "Metal top-k write-distribution output element count",
+            &[buffers.num_output_distributions as usize, buffers.max_k as usize],
+        );
+        assert!(
+            buffers.output_distribution_indices.len_bytes()
+                >= checked_bytes(
+                    "Metal write-distribution output index",
+                    shape.num_total_sampling_inputs as usize,
+                    size_of::<u32>(),
+                ),
+            "top-k write-distribution output-index buffer too short"
+        );
+        assert!(
+            buffers.distribution_token_ids.len_bytes()
+                >= output_elements
+                    .checked_mul(size_of::<i32>())
+                    .expect("Metal top-k write-distribution token bytes must fit usize"),
+            "top-k write-distribution token buffer too short for declared outputs"
+        );
+        assert!(
+            buffers.distribution_probs.len_bytes()
+                >= output_elements
+                    .checked_mul(size_of::<f32>())
+                    .expect("Metal top-k write-distribution probability bytes must fit usize"),
+            "top-k write-distribution prob buffer too short for declared outputs"
+        );
+        checked_num_threads(
+            shape.num_total_sampling_inputs,
+            self.constants.thread_block.required_threads,
+        );
         WriteDistributionInvocation {
             kernel: &self.write_distribution,
             constants: self.constants,
@@ -550,6 +660,81 @@ impl ReduceCompute {
         buffers: SampleAndWriteDistributionBuffers<'a>,
         partial_candidate_layout: PartialCandidateLayout,
     ) -> SampleAndWriteDistributionInvocation<'a> {
+        shape.validate();
+        assert_reduce_inputs_fit(
+            shape,
+            buffers.tile_token_ids,
+            buffers.tile_logits,
+            buffers.params,
+            buffers.req_slots,
+            partial_candidate_layout,
+        );
+        assert!(
+            buffers.sample_positions.len_bytes()
+                >= checked_bytes(
+                    "Metal top-k sample position",
+                    shape.num_total_sampling_inputs as usize,
+                    size_of::<u32>(),
+                ),
+            "top-k sample-position buffer is too short"
+        );
+        assert!(
+            buffers.sampled_token_ids.len_bytes()
+                >= checked_bytes(
+                    "Metal sampled token",
+                    shape.num_total_sampling_inputs as usize,
+                    size_of::<i32>(),
+                ),
+            "top-k sample-and-write-distribution sampled-token buffer is too short"
+        );
+        assert!(
+            buffers.sampled_token_probs.len_bytes()
+                >= checked_bytes(
+                    "Metal sampled probability",
+                    shape.num_total_sampling_inputs as usize,
+                    size_of::<f32>(),
+                ),
+            "top-k sample-and-write-distribution sampled-probability buffer is too short"
+        );
+        assert!(
+            buffers.max_k >= shape.top_k,
+            "top-k sample-and-write-distribution slots must cover batch top_k"
+        );
+        assert!(
+            buffers.num_output_distributions > 0,
+            "top-k sample-and-write-distribution output requires distributions"
+        );
+        let output_elements = checked_product(
+            "Metal top-k sample-and-write-distribution output element count",
+            &[buffers.num_output_distributions as usize, buffers.max_k as usize],
+        );
+        assert!(
+            buffers.output_distribution_indices.len_bytes()
+                >= checked_bytes(
+                    "Metal write-distribution output index",
+                    shape.num_total_sampling_inputs as usize,
+                    size_of::<u32>(),
+                ),
+            "top-k sample-and-write-distribution output-index buffer too short"
+        );
+        assert!(
+            buffers.distribution_token_ids.len_bytes()
+                >= output_elements
+                    .checked_mul(size_of::<i32>())
+                    .expect("Metal top-k sample-and-write-distribution token bytes must fit usize"),
+            "top-k sample-and-write-distribution token buffer too short"
+        );
+        assert!(
+            buffers.distribution_probs.len_bytes()
+                >= output_elements
+                    .checked_mul(size_of::<f32>())
+                    .expect("Metal top-k sample-and-write-distribution probability bytes must fit usize"),
+            "top-k sample-and-write-distribution probability buffer too short"
+        );
+        checked_num_threads(
+            shape.num_total_sampling_inputs,
+            self.constants.thread_block.required_threads,
+        );
         SampleAndWriteDistributionInvocation {
             kernel: &self.sample_and_write_distribution,
             constants: self.constants,
@@ -559,13 +744,15 @@ impl ReduceCompute {
         }
     }
 
+    /// Adds active values for the same shape used to record the replay.
     pub fn add_replay_arguments(&self, shape: Shape, num_active_sampling_inputs: u32, arguments: &mut ReplayArguments) {
-        add_top_k_reduce_replay_argument(
-            shape,
-            num_active_sampling_inputs,
-            self.constants.thread_block.required_threads,
-            arguments,
+        assert!(
+            num_active_sampling_inputs > 0 && num_active_sampling_inputs <= shape.num_total_sampling_inputs,
+            "top-k active sampling inputs must fit the recorded capacity"
         );
+        let num_active_threads =
+            checked_num_threads(num_active_sampling_inputs, self.constants.thread_block.required_threads);
+        arguments.set_u32(REDUCE_NUM_ACTIVE_THREADS_KEY, num_active_threads);
     }
 }
 
@@ -579,24 +766,6 @@ pub struct MergeInvocation<'a> {
 
 impl Operator for MergeInvocation<'_> {
     fn record(self, recorder: &CommandRecorder<'_>) {
-        self.shape.validate();
-        let candidates = partial_candidate_count(self.shape, self.partial_candidate_layout);
-        assert!(
-            self.buffers.tile_token_ids.len_bytes()
-                >= checked_bytes("Metal top-k merge partial token", candidates, size_of::<i32>())
-        );
-        assert!(
-            self.buffers.tile_logits.len_bytes()
-                >= checked_bytes("Metal top-k merge partial logit", candidates, size_of::<f32>())
-        );
-        let outputs = checked_product(
-            "Metal top-k merge output count",
-            &[self.shape.num_total_sampling_inputs as usize, self.shape.top_k as usize],
-        );
-        assert!(
-            self.buffers.token_ids.len_bytes() >= checked_bytes("Metal top-k merge token", outputs, size_of::<i32>())
-        );
-        assert!(self.buffers.logits.len_bytes() >= checked_bytes("Metal top-k merge logit", outputs, size_of::<f32>()));
         let num_partitions = num_vocab_partitions(self.shape, self.partial_candidate_layout);
         recorder.set_kernel(self.kernel);
         SamplingFailure::record(
@@ -610,11 +779,11 @@ impl Operator for MergeInvocation<'_> {
         recorder.set_buffer_write(2, self.buffers.token_ids, 0);
         recorder.set_buffer_write(3, self.buffers.logits, 0);
         let required_threads = self.constants.thread_block.required_threads;
-        let num_total_threads = checked_num_threads(self.shape.num_total_sampling_inputs, required_threads);
+        let num_total_threads = self.shape.num_total_sampling_inputs * required_threads;
         recorder.bind_u32(4, REDUCE_NUM_ACTIVE_THREADS_KEY, required_threads, num_total_threads);
         recorder.set_u32(5, self.shape.top_k);
         recorder.set_u32(6, num_partitions);
-        recorder.set_u32(7, num_candidates_per_partition(self.shape));
+        recorder.set_u32(7, self.shape.top_k);
         recorder.set_u32(8, self.partial_candidate_layout.vocab_partition_size());
         recorder.dispatch_1d(num_total_threads as usize, required_threads as usize);
     }
@@ -630,44 +799,8 @@ pub struct SampleInvocation<'a> {
 
 impl Operator for SampleInvocation<'_> {
     fn record(self, recorder: &CommandRecorder<'_>) {
-        self.shape.validate();
-        assert_reduce_inputs_fit(
-            self.shape,
-            self.buffers.tile_token_ids,
-            self.buffers.tile_logits,
-            self.buffers.params,
-            self.buffers.req_slots,
-            self.partial_candidate_layout,
-        );
-        assert!(
-            self.buffers.sample_positions.len_bytes()
-                >= checked_bytes(
-                    "Metal top-k sample position",
-                    self.shape.num_total_sampling_inputs as usize,
-                    size_of::<u32>(),
-                ),
-            "top-k sample-position buffer is too short"
-        );
-        assert!(
-            self.buffers.token_ids.len_bytes()
-                >= checked_bytes(
-                    "Metal sampled token",
-                    self.shape.num_total_sampling_inputs as usize,
-                    size_of::<i32>(),
-                ),
-            "top-k sampled-token buffer is too short"
-        );
-        assert!(
-            self.buffers.token_probs.len_bytes()
-                >= checked_bytes(
-                    "Metal sampled probability",
-                    self.shape.num_total_sampling_inputs as usize,
-                    size_of::<f32>(),
-                ),
-            "top-k sampled-probability buffer is too short"
-        );
         let num_partitions = num_vocab_partitions(self.shape, self.partial_candidate_layout);
-        let num_candidates_per_partition = num_candidates_per_partition(self.shape);
+        let num_candidates_per_partition = self.shape.top_k;
         recorder.set_kernel(self.kernel);
         SamplingFailure::record(
             recorder,
@@ -689,7 +822,7 @@ impl Operator for SampleInvocation<'_> {
         recorder.set_u32(12, num_candidates_per_partition);
         recorder.set_u32(13, self.partial_candidate_layout.vocab_partition_size());
         let num_threads_per_row = self.constants.thread_block.required_threads;
-        let num_total_threads = checked_num_threads(self.shape.num_total_sampling_inputs, num_threads_per_row);
+        let num_total_threads = self.shape.num_total_sampling_inputs * num_threads_per_row;
         recorder.bind_u32(7, REDUCE_NUM_ACTIVE_THREADS_KEY, num_threads_per_row, num_total_threads);
         recorder.dispatch_1d(num_total_threads as usize, num_threads_per_row as usize);
     }
@@ -705,55 +838,8 @@ pub struct WriteDistributionInvocation<'a> {
 
 impl Operator for WriteDistributionInvocation<'_> {
     fn record(self, recorder: &CommandRecorder<'_>) {
-        self.shape.validate();
-        assert_reduce_inputs_fit(
-            self.shape,
-            self.buffers.tile_token_ids,
-            self.buffers.tile_logits,
-            self.buffers.params,
-            self.buffers.req_slots,
-            self.partial_candidate_layout,
-        );
-        assert!(
-            self.buffers.max_k >= self.shape.top_k,
-            "top-k write-distribution slots must cover active top_k"
-        );
-        assert!(
-            self.buffers.num_output_distributions > 0,
-            "top-k write-distribution output requires distributions"
-        );
-        let output_elements = checked_product(
-            "Metal top-k write-distribution output element count",
-            &[
-                self.buffers.num_output_distributions as usize,
-                self.buffers.max_k as usize,
-            ],
-        );
         let num_partitions = num_vocab_partitions(self.shape, self.partial_candidate_layout);
-        let num_candidates_per_partition = num_candidates_per_partition(self.shape);
-        assert!(
-            self.buffers.output_distribution_indices.len_bytes()
-                >= checked_bytes(
-                    "Metal write-distribution output index",
-                    self.shape.num_total_sampling_inputs as usize,
-                    size_of::<u32>(),
-                ),
-            "top-k write-distribution output-index buffer too short"
-        );
-        assert!(
-            self.buffers.distribution_token_ids.len_bytes()
-                >= output_elements
-                    .checked_mul(size_of::<i32>())
-                    .expect("Metal top-k write-distribution token bytes must fit usize"),
-            "top-k write-distribution token buffer too short for declared outputs"
-        );
-        assert!(
-            self.buffers.distribution_probs.len_bytes()
-                >= output_elements
-                    .checked_mul(size_of::<f32>())
-                    .expect("Metal top-k write-distribution probability bytes must fit usize"),
-            "top-k write-distribution prob buffer too short for declared outputs"
-        );
+        let num_candidates_per_partition = self.shape.top_k;
         recorder.set_kernel(self.kernel);
         SamplingFailure::record(
             recorder,
@@ -775,7 +861,7 @@ impl Operator for WriteDistributionInvocation<'_> {
         recorder.set_u32(12, self.buffers.max_k);
         recorder.set_u32(13, self.buffers.num_output_distributions);
         let num_threads_per_row = self.constants.thread_block.required_threads;
-        let num_total_threads = checked_num_threads(self.shape.num_total_sampling_inputs, num_threads_per_row);
+        let num_total_threads = self.shape.num_total_sampling_inputs * num_threads_per_row;
         recorder.bind_u32(7, REDUCE_NUM_ACTIVE_THREADS_KEY, num_threads_per_row, num_total_threads);
         recorder.dispatch_1d(num_total_threads as usize, num_threads_per_row as usize);
     }
@@ -791,82 +877,8 @@ pub struct SampleAndWriteDistributionInvocation<'a> {
 
 impl Operator for SampleAndWriteDistributionInvocation<'_> {
     fn record(self, recorder: &CommandRecorder<'_>) {
-        self.shape.validate();
-        assert_reduce_inputs_fit(
-            self.shape,
-            self.buffers.tile_token_ids,
-            self.buffers.tile_logits,
-            self.buffers.params,
-            self.buffers.req_slots,
-            self.partial_candidate_layout,
-        );
-        assert!(
-            self.buffers.sample_positions.len_bytes()
-                >= checked_bytes(
-                    "Metal top-k sample position",
-                    self.shape.num_total_sampling_inputs as usize,
-                    size_of::<u32>(),
-                ),
-            "top-k sample-position buffer is too short"
-        );
-        assert!(
-            self.buffers.sampled_token_ids.len_bytes()
-                >= checked_bytes(
-                    "Metal sampled token",
-                    self.shape.num_total_sampling_inputs as usize,
-                    size_of::<i32>(),
-                ),
-            "top-k sample-and-write-distribution sampled-token buffer is too short"
-        );
-        assert!(
-            self.buffers.sampled_token_probs.len_bytes()
-                >= checked_bytes(
-                    "Metal sampled probability",
-                    self.shape.num_total_sampling_inputs as usize,
-                    size_of::<f32>(),
-                ),
-            "top-k sample-and-write-distribution sampled-probability buffer is too short"
-        );
-        assert!(
-            self.buffers.max_k >= self.shape.top_k,
-            "top-k sample-and-write-distribution slots must cover batch top_k"
-        );
-        assert!(
-            self.buffers.num_output_distributions > 0,
-            "top-k sample-and-write-distribution output requires distributions"
-        );
-        let output_elements = checked_product(
-            "Metal top-k sample-and-write-distribution output element count",
-            &[
-                self.buffers.num_output_distributions as usize,
-                self.buffers.max_k as usize,
-            ],
-        );
-        assert!(
-            self.buffers.output_distribution_indices.len_bytes()
-                >= checked_bytes(
-                    "Metal write-distribution output index",
-                    self.shape.num_total_sampling_inputs as usize,
-                    size_of::<u32>(),
-                ),
-            "top-k sample-and-write-distribution output-index buffer too short"
-        );
-        assert!(
-            self.buffers.distribution_token_ids.len_bytes()
-                >= output_elements
-                    .checked_mul(size_of::<i32>())
-                    .expect("Metal top-k sample-and-write-distribution token bytes must fit usize"),
-            "top-k sample-and-write-distribution token buffer too short"
-        );
-        assert!(
-            self.buffers.distribution_probs.len_bytes()
-                >= output_elements
-                    .checked_mul(size_of::<f32>())
-                    .expect("Metal top-k sample-and-write-distribution probability bytes must fit usize"),
-            "top-k sample-and-write-distribution probability buffer too short"
-        );
         let num_partitions = num_vocab_partitions(self.shape, self.partial_candidate_layout);
-        let num_candidates_per_partition = num_candidates_per_partition(self.shape);
+        let num_candidates_per_partition = self.shape.top_k;
         recorder.set_kernel(self.kernel);
         SamplingFailure::record(
             recorder,
@@ -893,7 +905,7 @@ impl Operator for SampleAndWriteDistributionInvocation<'_> {
         recorder.set_u32(17, self.buffers.max_k);
         recorder.set_u32(18, self.buffers.num_output_distributions);
         let num_threads_per_row = self.constants.thread_block.required_threads;
-        let num_total_threads = checked_num_threads(self.shape.num_total_sampling_inputs, num_threads_per_row);
+        let num_total_threads = self.shape.num_total_sampling_inputs * num_threads_per_row;
         recorder.bind_u32(
             10,
             REDUCE_NUM_ACTIVE_THREADS_KEY,
@@ -902,23 +914,6 @@ impl Operator for SampleAndWriteDistributionInvocation<'_> {
         );
         recorder.dispatch_1d(num_total_threads as usize, num_threads_per_row as usize);
     }
-}
-
-fn add_top_k_reduce_replay_argument(
-    shape: Shape,
-    num_active_sampling_inputs: u32,
-    required_threads: u32,
-    arguments: &mut ReplayArguments,
-) {
-    shape.validate();
-    assert!(
-        num_active_sampling_inputs > 0 && num_active_sampling_inputs <= shape.num_total_sampling_inputs,
-        "top-k active sampling inputs must fit the recorded capacity"
-    );
-    let num_active_threads = checked_num_threads(num_active_sampling_inputs, required_threads);
-    let num_total_threads = checked_num_threads(shape.num_total_sampling_inputs, required_threads);
-    assert!(num_active_threads <= num_total_threads);
-    arguments.set_u32(REDUCE_NUM_ACTIVE_THREADS_KEY, num_active_threads);
 }
 
 #[cfg(test)]

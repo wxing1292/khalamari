@@ -14,7 +14,6 @@ use crate::metal::Dtype;
 use crate::metal::ReplayArguments;
 use crate::metal::ReplayProgram;
 use crate::metal::Stream;
-use crate::test_support::ReplayTestCache;
 
 const ACTIVE_SEQUENCE: [u32; 4] = [1, 4, 3, 2];
 const SAMPLE_POSITIONS: [u32; 4] = [11, 29, 41, 53];
@@ -115,14 +114,7 @@ fn run_merge_case(dtype: Dtype, top_k: u32) {
         shape.num_total_sampling_inputs as usize * shape.top_k as usize,
         Dtype::Float32,
     );
-    let cache_key = (
-        shape.num_total_sampling_inputs,
-        shape.vocab_size,
-        shape.top_k,
-        dtype_tag(dtype),
-    );
-    let mut cache = ReplayTestCache::new();
-    let (_, cache_hit) = cache.record(cache_key, || {
+    let replay = {
         let mut builder = stream.create_replay_program();
         builder.record(map.invoke_replay(
             shape,
@@ -145,16 +137,13 @@ fn run_merge_case(dtype: Dtype, top_k: u32) {
             },
         ));
         builder.build()
-    });
-    assert!(!cache_hit);
+    };
 
     for num_active_rows in ACTIVE_SEQUENCE {
-        let (replay, cache_hit) = cache.record(cache_key, || unreachable!());
-        assert!(cache_hit);
         let mut arguments = ReplayArguments::new();
         map.add_replay_arguments(shape, num_active_rows, &mut arguments);
         reduce.add_replay_arguments(shape, num_active_rows, &mut arguments);
-        stream.submit_replay_with_arguments(replay, &arguments).wait();
+        stream.submit_replay_with_arguments(&replay, &arguments).wait();
 
         let num_values = num_active_rows as usize * shape.top_k as usize;
         let actual_ids = token_ids.read_typed::<i32>(0, num_values);
@@ -175,11 +164,10 @@ fn run_merge_case(dtype: Dtype, top_k: u32) {
             }
         }
     }
-    let (replay, _) = cache.record(cache_key, || unreachable!());
     let mut arguments = ReplayArguments::new();
     map.add_replay_arguments(shape, 1, &mut arguments);
     reduce.add_replay_arguments(shape, 1, &mut arguments);
-    assert_invalid_logits_rejected(&stream, replay, &arguments, &logits, dtype, shape.vocab_size as usize);
+    assert_invalid_logits_rejected(&stream, &replay, &arguments, &logits, dtype, shape.vocab_size as usize);
 }
 
 fn run_sample_case(dtype: Dtype, top_k: u32) {
@@ -205,14 +193,7 @@ fn run_sample_case(dtype: Dtype, top_k: u32) {
         Buffer::new_zeroed_elements(&device, shape.num_total_sampling_inputs as usize, Dtype::Int32);
     let sampled_token_probs =
         Buffer::new_zeroed_elements(&device, shape.num_total_sampling_inputs as usize, Dtype::Float32);
-    let cache_key = (
-        shape.num_total_sampling_inputs,
-        shape.vocab_size,
-        shape.top_k,
-        dtype_tag(dtype),
-    );
-    let mut cache = ReplayTestCache::new();
-    let (_, cache_hit) = cache.record(cache_key, || {
+    let replay = {
         let mut builder = stream.create_replay_program();
         builder.record(map.invoke_replay(
             shape,
@@ -240,16 +221,13 @@ fn run_sample_case(dtype: Dtype, top_k: u32) {
             },
         ));
         builder.build()
-    });
-    assert!(!cache_hit);
+    };
 
     for num_active_rows in ACTIVE_SEQUENCE {
-        let (replay, cache_hit) = cache.record(cache_key, || unreachable!());
-        assert!(cache_hit);
         let mut arguments = ReplayArguments::new();
         map.add_replay_arguments(shape, num_active_rows, &mut arguments);
         reduce.add_replay_arguments(shape, num_active_rows, &mut arguments);
-        stream.submit_replay_with_arguments(replay, &arguments).wait();
+        stream.submit_replay_with_arguments(&replay, &arguments).wait();
         assert_active_samples(
             shape,
             &reference_logits,
@@ -260,11 +238,10 @@ fn run_sample_case(dtype: Dtype, top_k: u32) {
             &sampled_token_probs,
         );
     }
-    let (replay, _) = cache.record(cache_key, || unreachable!());
     let mut arguments = ReplayArguments::new();
     map.add_replay_arguments(shape, 1, &mut arguments);
     reduce.add_replay_arguments(shape, 1, &mut arguments);
-    assert_invalid_logits_rejected(&stream, replay, &arguments, &logits, dtype, shape.vocab_size as usize);
+    assert_invalid_logits_rejected(&stream, &replay, &arguments, &logits, dtype, shape.vocab_size as usize);
     if dtype == Dtype::Float32 && top_k > 1 {
         req_slots.write_typed(0, &[2_u32]);
         sample_positions.write_typed(0, &[394_u32]);
@@ -280,7 +257,7 @@ fn run_sample_case(dtype: Dtype, top_k: u32) {
         );
         logits.write_typed(shape.vocab_size as usize, &[f32::MAX, f32::MAX / 2.0]);
         let failure = catch_unwind(AssertUnwindSafe(|| {
-            stream.submit_replay_with_arguments(replay, &arguments).wait();
+            stream.submit_replay_with_arguments(&replay, &arguments).wait();
         }))
         .expect_err("normalization overflow must fail");
         let message = failure.downcast_ref::<String>().unwrap();
@@ -337,15 +314,7 @@ fn run_distribution_case(dtype: Dtype, sample: bool) {
     } else {
         Operation::WriteDistribution
     };
-    let cache_key = (
-        shape.num_total_sampling_inputs,
-        shape.vocab_size,
-        shape.top_k,
-        dtype_tag(dtype),
-        u32::from(sample),
-    );
-    let mut cache = ReplayTestCache::new();
-    let (_, cache_hit) = cache.record(cache_key, || {
+    let replay = {
         let mut builder = stream.create_replay_program();
         builder.record(map.invoke_replay(
             shape,
@@ -395,12 +364,9 @@ fn run_distribution_case(dtype: Dtype, sample: bool) {
             ));
         }
         builder.build()
-    });
-    assert!(!cache_hit);
+    };
 
     for num_active_rows in ACTIVE_SEQUENCE {
-        let (replay, cache_hit) = cache.record(cache_key, || unreachable!());
-        assert!(cache_hit);
         let inactive_distributions = OUTPUT_DISTRIBUTION_INDICES[num_active_rows as usize..]
             .iter()
             .map(|&distribution| {
@@ -415,7 +381,7 @@ fn run_distribution_case(dtype: Dtype, sample: bool) {
         let mut arguments = ReplayArguments::new();
         map.add_replay_arguments(shape, num_active_rows, &mut arguments);
         reduce.add_replay_arguments(shape, num_active_rows, &mut arguments);
-        stream.submit_replay_with_arguments(replay, &arguments).wait();
+        stream.submit_replay_with_arguments(&replay, &arguments).wait();
 
         if sample {
             assert_active_samples(
@@ -454,11 +420,10 @@ fn run_distribution_case(dtype: Dtype, sample: bool) {
             assert_eq!(distribution_probs.read_typed::<f32>(offset, max_k as usize), probs);
         }
     }
-    let (replay, _) = cache.record(cache_key, || unreachable!());
     let mut arguments = ReplayArguments::new();
     map.add_replay_arguments(shape, 1, &mut arguments);
     reduce.add_replay_arguments(shape, 1, &mut arguments);
-    assert_invalid_logits_rejected(&stream, replay, &arguments, &logits, dtype, shape.vocab_size as usize);
+    assert_invalid_logits_rejected(&stream, &replay, &arguments, &logits, dtype, shape.vocab_size as usize);
 }
 
 // The fixture has one prefix row. Only the first active row is invalidated.
@@ -595,14 +560,6 @@ fn logits_fixture(device: &Device, dtype: Dtype, shape: Shape, seed: u32) -> (Bu
                 row_values * size_of::<u16>(),
             )
         },
-        _ => panic!("unsupported top-k test logits dtype {dtype:?}"),
-    }
-}
-
-fn dtype_tag(dtype: Dtype) -> u32 {
-    match dtype {
-        Dtype::Float32 => 0,
-        Dtype::Bfloat16 => 1,
         _ => panic!("unsupported top-k test logits dtype {dtype:?}"),
     }
 }

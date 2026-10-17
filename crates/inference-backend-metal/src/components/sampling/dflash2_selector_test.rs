@@ -4,14 +4,13 @@ use super::*;
 use crate::metal::ReplayArguments;
 use crate::metal::ReplayParameterKey;
 use crate::metal::Stream;
-use crate::test_support::ReplayTestCache;
 
 const TEST_NUM_ACTIVE_REQUESTS: ReplayParameterKey =
     ReplayParameterKey::new("test.dflash2_selector.num_active_requests");
 const OUTPUT_DISTRIBUTION_INDICES: [u32; 8] = [3, 7, 1, 5, 0, 6, 2, 4];
 
 #[test]
-fn test_replay_bucketing() {
+fn test_replay_active_counts() {
     let device = Device::system_default();
     let stream = Stream::new(&device);
     let config = Config {
@@ -66,9 +65,7 @@ fn test_replay_bucketing() {
     let distribution_probs = Buffer::new_zeroed(&device, proposal_count * 4 * size_of::<f32>());
     let compute = Compute::new(&device, config);
     let active = ReplayU32::Parameter(TEST_NUM_ACTIVE_REQUESTS);
-    let cache_key = (shape.num_total_requests, shape.num_steps, config.rank, config.top_k);
-    let mut cache = ReplayTestCache::new();
-    let (_, cache_hit) = cache.record(cache_key, || {
+    let replay = {
         let mut builder = stream.create_replay_program();
         builder.record(compute.invoke_predecessor_ids(
             shape,
@@ -110,8 +107,7 @@ fn test_replay_bucketing() {
             },
         ));
         builder.build()
-    });
-    assert!(!cache_hit);
+    };
     let expected_scores = score_reference(
         config,
         shape,
@@ -122,8 +118,6 @@ fn test_replay_bucketing() {
     );
 
     for num_active_requests in [1, 4, 3, 2] {
-        let (replay, cache_hit) = cache.record(cache_key, || unreachable!());
-        assert!(cache_hit);
         let inactive_distributions = OUTPUT_DISTRIBUTION_INDICES
             [num_active_requests as usize * shape.num_steps as usize..]
             .iter()
@@ -137,7 +131,7 @@ fn test_replay_bucketing() {
             })
             .collect::<Vec<_>>();
         let arguments = ReplayArguments::new().with_u32(TEST_NUM_ACTIVE_REQUESTS, num_active_requests);
-        stream.submit_replay_with_arguments(replay, &arguments).wait();
+        stream.submit_replay_with_arguments(&replay, &arguments).wait();
 
         let active_candidate_count = num_active_requests as usize * shape.num_steps as usize * config.top_k as usize;
         assert_eq!(

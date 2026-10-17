@@ -59,6 +59,11 @@ Replay keeps resource identities and dispatch capacity stable. Each submission c
 
 Weights, workspace, and runtime input use the same Metal allocation types despite their different lifecycles.
 `Buffer` owns one `MTLBuffer`. `BufferView` borrows it with a dtype, shape, and byte offset.
+Typed view and operator offsets must align to their element type. Constructors validate this alignment before command recording.
+`Buffer` construction proves that its byte length fits host `usize`.
+`BufferView` construction validates nonnegative dimensions, element and byte products, and the backing-buffer range.
+These immutable values let getters use direct casts and arithmetic.
+Read and write operations validate each supplied range at the I/O boundary.
 `MetalRuntime` owns one compute `Stream` and one `BufferIO`.
 See [Execution Resources](#execution-resources) for retention and residency, and [End-To-End Lifecycle](#end-to-end-lifecycle) for resource creation and submission.
 
@@ -242,6 +247,10 @@ Standalone RMSNorm and residual-RMSNorm expose the exact and bucketed forms. The
 
 An exact invocation records this value directly. A bucketed invocation binds a replay parameter key.
 The per-submission `num_active_tokens` value must not exceed the capacity.
+Invocation constructors validate fixed active counts and recorded domains before command recording.
+Required work uses `1..=capacity`. Optional work may use `0..=capacity`.
+`ReplayU32::validate_range` checks fixed values and domain bounds at this boundary.
+The replay parameter table validates submitted parameter values. Cached submissions do not repeat fixed-value checks.
 
 Residual-add and RMSNorm fusion keeps the same dynamic binding.
 
@@ -589,6 +598,12 @@ The allocator backs transient submission commands. It does not own these persist
 
 `wait()` proves completion and resets the allocator. It leaves the retained submission fields intact. Dropping the
 `ReplaySubmission` releases those fields.
+
+The first `wait()` call allows 60 seconds for commit feedback.
+This interval starts when `wait()` receives from the channel.
+If the wait times out or the feedback channel disconnects, the process reports the failure and aborts.
+Neither condition proves GPU completion. The process must not unwind and release resources that the GPU can still use.
+This timeout does not cancel GPU work.
 
 Operators can register a component-owned `SubmissionCheck` with `CommandRecorder::set_submission_check`.
 The component owns its record layout, ordinary buffer bindings, reset, and failure diagnostics.

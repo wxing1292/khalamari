@@ -1,5 +1,6 @@
 //! Bidirectional attention over contiguous token blocks.
 
+use crate::components::checked_product;
 use crate::metal::Buffer;
 use crate::metal::CommandRecorder;
 use crate::metal::CompiledKernel;
@@ -40,9 +41,23 @@ pub struct Shape {
 }
 
 impl Shape {
-    fn validate(self) {
-        debug_assert!(self.num_rows > 0, "tower block attention row count must be positive");
-        debug_assert!(self.block_size > 0, "tower block attention block size must be positive");
+    fn validate(self, config: Config) {
+        assert!(self.num_rows > 0, "tower block attention row count must be positive");
+        assert!(self.block_size > 0, "tower block attention block size must be positive");
+        let last_window_start = ((self.num_rows - 1) / self.block_size) as u64 * self.block_size as u64;
+        assert!(
+            last_window_start + self.block_size as u64 <= u32::MAX as u64,
+            "tower block attention window end must fit the shader u32 domain"
+        );
+        checked_product(
+            "tower block attention tensor byte length",
+            &[
+                self.num_rows as usize,
+                config.num_heads as usize,
+                config.head_dim as usize,
+                Dtype::Bfloat16.item_size(),
+            ],
+        );
     }
 }
 
@@ -69,7 +84,19 @@ impl Compute {
     }
 
     pub fn invoke<'a>(&'a self, shape: Shape, buffers: Buffers<'a>) -> Invocation<'a> {
-        shape.validate();
+        shape.validate(self.config);
+        let tensor_bytes = self.config.tensor_bytes(shape);
+        for (name, buffer) in [
+            ("query", buffers.query),
+            ("key", buffers.key),
+            ("value", buffers.value),
+            ("output", buffers.output),
+        ] {
+            assert!(
+                buffer.len_bytes() >= tensor_bytes,
+                "tower block attention {name} buffer is too small"
+            );
+        }
         Invocation {
             compute: self,
             shape,
@@ -87,18 +114,6 @@ pub struct Invocation<'a> {
 impl Operator for Invocation<'_> {
     fn record(self, recorder: &CommandRecorder<'_>) {
         let config = self.compute.config;
-        let tensor_bytes = config.tensor_bytes(self.shape);
-        for (name, buffer) in [
-            ("query", self.buffers.query),
-            ("key", self.buffers.key),
-            ("value", self.buffers.value),
-            ("output", self.buffers.output),
-        ] {
-            debug_assert!(
-                buffer.len_bytes() >= tensor_bytes,
-                "tower block attention {name} buffer is too small"
-            );
-        }
         recorder.set_kernel(&self.compute.kernel);
         recorder.set_buffer_read(0, self.buffers.query, 0);
         recorder.set_buffer_read(1, self.buffers.key, 0);

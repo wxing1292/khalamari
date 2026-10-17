@@ -23,7 +23,6 @@ struct KernelConstants {
 
 impl KernelConstants {
     fn new(config: Config) -> Self {
-        config.validate();
         Self {
             dtype: config.dtype,
             thread_block: ThreadBlockConstants { required_threads: 256 },
@@ -57,7 +56,6 @@ pub struct Shape {
 
 impl Shape {
     fn validate(self, config: Config) {
-        config.validate();
         assert!(self.num_total_rows > 0);
         self.num_values(config);
     }
@@ -112,14 +110,16 @@ impl Kernel {
     }
 
     pub fn invoke<'a>(&'a self, shape: Shape, num_active_rows: ReplayU32, buffers: Buffers<'a>) -> Invocation<'a> {
-        Invocation {
+        let invocation = Invocation {
             config: self.config,
             constants: self.constants,
             kernel: &self.kernel,
             shape,
             buffers,
             num_active_rows,
-        }
+        };
+        invocation.validate();
+        invocation
     }
 }
 
@@ -134,17 +134,13 @@ pub struct Invocation<'a> {
 
 impl Operator for Invocation<'_> {
     fn record(self, recorder: &CommandRecorder<'_>) {
-        self.validate();
         recorder.set_kernel(self.kernel);
         recorder.set_buffer_read(0, self.buffers.input, 0);
         recorder.set_buffer_read(1, self.buffers.row_indices, 0);
         recorder.set_buffer_write(2, self.buffers.output, 0);
         recorder.set_u32(3, self.config.num_cols);
         match self.num_active_rows {
-            ReplayU32::Fixed(value) => {
-                assert_eq!(value, self.shape.num_total_rows);
-                recorder.set_u32(4, value);
-            },
+            ReplayU32::Fixed(value) => recorder.set_u32(4, value),
             ReplayU32::Parameter(key) => recorder.bind_u32(4, key, 1, self.shape.num_total_rows),
         }
         recorder.dispatch_1d(
@@ -157,9 +153,22 @@ impl Operator for Invocation<'_> {
 impl Invocation<'_> {
     fn validate(&self) {
         self.shape.validate(self.config);
+        if let ReplayU32::Fixed(value) = self.num_active_rows {
+            assert_eq!(value, self.shape.num_total_rows);
+        }
         assert!(self.buffers.input.len_bytes() >= self.config.row_bytes());
         assert!(self.buffers.row_indices.len_bytes() >= self.shape.row_indices_bytes());
         assert!(self.buffers.output.len_bytes() >= self.shape.output_bytes(self.config));
+        assert_ne!(
+            self.buffers.output.as_raw_ptr(),
+            self.buffers.input.as_raw_ptr(),
+            "row gather output must not alias input"
+        );
+        assert_ne!(
+            self.buffers.output.as_raw_ptr(),
+            self.buffers.row_indices.as_raw_ptr(),
+            "row gather output must not alias row indices"
+        );
     }
 }
 
@@ -169,7 +178,6 @@ mod tests {
     use crate::metal::ReplayArguments;
     use crate::metal::ReplayParameterKey;
     use crate::metal::Stream;
-    use crate::test_support::ReplayTestCache;
 
     const NUM_ACTIVE_ROWS: ReplayParameterKey = ReplayParameterKey::new("test.row_gather.num_active_rows");
 
@@ -189,9 +197,7 @@ mod tests {
             let row_indices = Buffer::from_slice(&device, &row_indices_values);
             let output = Buffer::new_zeroed(&device, shape.output_bytes(config));
             let kernel = Kernel::new(&device, config);
-            let cache_key = (shape.num_total_rows, dtype_tag(dtype));
-            let mut cache = ReplayTestCache::new();
-            let (_, cache_hit) = cache.record(cache_key, || {
+            let replay = {
                 let mut builder = stream.create_replay_program();
                 builder.record(kernel.invoke(
                     shape,
@@ -203,14 +209,11 @@ mod tests {
                     },
                 ));
                 builder.build()
-            });
-            assert!(!cache_hit);
+            };
 
             for num_active_rows in [1_usize, 8, 3, 7, 2, 6, 4, 5] {
-                let (replay, cache_hit) = cache.record(cache_key, || unreachable!());
-                assert!(cache_hit);
                 let arguments = ReplayArguments::new().with_u32(NUM_ACTIVE_ROWS, num_active_rows as u32);
-                stream.submit_replay_with_arguments(replay, &arguments).wait();
+                stream.submit_replay_with_arguments(&replay, &arguments).wait();
                 let expected = gathered_bytes(&input_values, row_bytes, &row_indices_values[..num_active_rows]);
                 assert_eq!(output.read_typed::<u8>(0, num_active_rows * row_bytes), expected);
             }
@@ -227,13 +230,5 @@ mod tests {
                     .copied()
             })
             .collect()
-    }
-
-    fn dtype_tag(dtype: Dtype) -> u32 {
-        match dtype {
-            Dtype::Bfloat16 => 0,
-            Dtype::Float32 => 1,
-            _ => panic!("unsupported row-gather test dtype {dtype:?}"),
-        }
     }
 }

@@ -11,7 +11,6 @@ use crate::components::gqa::fp8::fp8_e4m3_to_bf16;
 use crate::metal::ReplayArguments;
 use crate::metal::ReplayParameterKey;
 use crate::metal::Stream;
-use crate::test_support::ReplayTestCache;
 
 const NUM_ACTIVE_TOKENS: ReplayParameterKey = ReplayParameterKey::new("test.gqa.sdpa_sliced_q.num_active_tokens");
 const NUM_ACTIVE_Q_TOKEN_TILES: ReplayParameterKey =
@@ -46,7 +45,7 @@ fn test_pipelines_reused_across_replay_capacities() {
 }
 
 #[test]
-fn test_replay_bucketing() {
+fn test_replay_active_counts() {
     assert_replay_bucketing();
 }
 
@@ -465,13 +464,7 @@ fn assert_replay_bucketing() {
     let partial_max_logits = Buffer::new_zeroed(&device, config.partial_output_stats_bytes(execution, shape));
     let output = Buffer::new_zeroed(&device, config.q_bytes(shape));
 
-    let cache_key = (
-        shape.num_total_tokens,
-        shape.num_total_q_token_tiles,
-        shape.num_total_sdpa_map_task_templates,
-    );
-    let mut cache = ReplayTestCache::new();
-    let (_, cache_hit) = cache.record(cache_key, || {
+    let replay = {
         let mut builder = stream.create_replay_program();
         builder.record(kernels.invoke_map(
             MapBuffers {
@@ -503,8 +496,7 @@ fn assert_replay_bucketing() {
             ReplayU32::Parameter(NUM_ACTIVE_Q_TOKEN_TILES),
         ));
         builder.build()
-    });
-    assert!(!cache_hit);
+    };
     let q_values_per_token = config.num_q_heads as usize * config.head_dim as usize;
     let kv_values_per_token = config.num_kv_heads as usize * config.head_dim as usize;
     visible_kv_token_ranges.write_typed(
@@ -520,12 +512,10 @@ fn assert_replay_bucketing() {
         // materialize its canonical empty partial, and Reduce must preserve
         // the result of the second task.
         sdpa_map_task_templates.write_typed(0, &[0_u32, 0, 0, 0, 0, num_active_tokens as u32]);
-        let (replay, cache_hit) = cache.record(cache_key, || unreachable!());
-        assert!(cache_hit);
 
         stream
             .submit_replay_with_arguments(
-                replay,
+                &replay,
                 &ReplayArguments::new()
                     .with_u32(NUM_ACTIVE_TOKENS, num_active_tokens as u32)
                     .with_u32(NUM_ACTIVE_Q_TOKEN_TILES, 1)

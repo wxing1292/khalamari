@@ -39,10 +39,22 @@ impl Shape {
     }
 
     fn validate(self) {
-        debug_assert!(self.batch > 0, "Conv2D unfold batch size must be positive");
-        debug_assert!(self.input_height > 0, "Conv2D unfold input height must be positive");
-        debug_assert!(self.input_width > 0, "Conv2D unfold input width must be positive");
-        debug_assert!(self.channels > 0, "Conv2D unfold channel count must be positive");
+        assert!(self.batch > 0, "Conv2D unfold batch size must be positive");
+        assert!(self.input_height > 0, "Conv2D unfold input height must be positive");
+        assert!(self.input_width > 0, "Conv2D unfold input width must be positive");
+        assert!(self.channels > 0, "Conv2D unfold channel count must be positive");
+        let patch_values = self
+            .channels
+            .checked_mul(9)
+            .and_then(|values| values.checked_add(15))
+            .expect("Conv2D unfold aligned patch length must fit the shader u32 domain")
+            & !15;
+        self.batch
+            .checked_mul(self.output_height())
+            .and_then(|rows| rows.checked_mul(self.output_width()))
+            .and_then(|rows| rows.checked_mul(patch_values))
+            .expect("Conv2D unfold output value count must fit the shader u32 count domain");
+        // Each patch has at least 16 values, so this count bound also keeps padded coordinates within i32.
     }
 
     fn input_bytes(self) -> usize {
@@ -67,6 +79,19 @@ impl Kernel {
 
     pub fn invoke<'a>(&'a self, shape: Shape, input: &'a Buffer, output: &'a Buffer) -> Invocation<'a> {
         shape.validate();
+        assert!(
+            input.len_bytes() >= shape.input_bytes(),
+            "Conv2D unfold input buffer is too small"
+        );
+        assert!(
+            output.len_bytes() >= shape.output_values() as usize * Dtype::Bfloat16.item_size(),
+            "Conv2D unfold output buffer is too small"
+        );
+        assert_ne!(
+            input.as_raw_ptr(),
+            output.as_raw_ptr(),
+            "Conv2D unfold output must not alias input"
+        );
         Invocation {
             kernel: &self.kernel,
             shape,
@@ -86,14 +111,6 @@ pub struct Invocation<'a> {
 impl Operator for Invocation<'_> {
     fn record(self, recorder: &CommandRecorder<'_>) {
         let output_values = self.shape.output_values();
-        debug_assert!(
-            self.input.len_bytes() >= self.shape.input_bytes(),
-            "Conv2D unfold input buffer is too small"
-        );
-        debug_assert!(
-            self.output.len_bytes() >= output_values as usize * Dtype::Bfloat16.item_size(),
-            "Conv2D unfold output buffer is too small"
-        );
         recorder.set_kernel(self.kernel);
         recorder.set_buffer_read(0, self.input, 0);
         recorder.set_buffer_write(1, self.output, 0);

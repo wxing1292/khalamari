@@ -68,6 +68,11 @@ inside one executor. The executor updates active request-slot rows when it prepa
 The request-slot buffer capacity and each invocation's sampling-row capacity are independent. Qwen Main uses the
 compact output-row capacity defined in [`executor_qwen.md`](executor_qwen.md#replay-ownership).
 DSpark uses the request-row capacity. Each consumer validates its static capacity when it is initialized.
+Backend sampling components validate static shapes, buffer ranges, and dispatch products when they create invocations.
+Their `record` methods use these validated values.
+`add_replay_arguments` must receive the same shape used to record the replay.
+It checks changing active counts and thread-count conversion without repeating static shape validation.
+The replay parameter table enforces the recorded domain at submission.
 
 Each sampling invocation separately provides the compact sampling-row to `req_slot` mapping, the logical output-token
 position for each row, and one `SamplingDomain`. Main can contain multiple sampling rows for one request. Those rows
@@ -487,9 +492,9 @@ The production path must keep the BF16 contract unless broader checkpoint eviden
 ## Correctness and benchmarks
 
 CPU references define sampling, rejection, and sequential DSpark Markov math.
-Each Top-K API records a total row capacity of `8` in an isolated test cache.
+Each Top-K API records one replay with a total row capacity of `4`.
 The Merge, Sample, WriteDistribution, and SampleAndWriteDistribution tests replay
-`1, 8, 3, 7, 2, 6, 4, 5` and compare each active logical output with a CPU reference.
+`1, 4, 3, 2` active rows and compare each active logical output with a CPU reference.
 The Merge and Sample tests cover F32 and BF16 logits with reduction and bitonic Map topologies.
 The distribution tests cover F32 and BF16 bitonic Map topologies, mapped distribution slots, mixed per-row runtime
 parameters, deterministic sample positions, and Target and Draft domains.

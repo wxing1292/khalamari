@@ -8,7 +8,6 @@ use crate::metal::ReplayArguments;
 use crate::metal::ReplayParameterKey;
 use crate::metal::ReplayU32;
 use crate::metal::Stream;
-use crate::test_support::ReplayTestCache;
 
 const ACTIVE: ReplayParameterKey = ReplayParameterKey::new("test.qsa_indexer.num_active_tokens");
 const ACTIVE_SCORE_TASKS: ReplayParameterKey =
@@ -290,8 +289,7 @@ fn test_prepare_select_bucketing() {
             num_total_groups: groups,
             num_total_score_task_templates: 4,
         };
-        let mut cache = ReplayTestCache::new();
-        let (_, hit) = cache.record(shape, || {
+        let replay = {
             let mut builder = stream.create_replay_program();
             builder.record(fixture.compute.prepare(
                 shape.num_total_tokens,
@@ -308,16 +306,13 @@ fn test_prepare_select_bucketing() {
                 &fixture.scores,
             ));
             builder.build()
-        });
-        assert!(!hit);
+        };
         for active in [1, 4, 3, 2] {
             let before_pages = values(&fixture.pages, dtype);
             let before_states = values(&fixture.states, dtype);
-            let (replay, hit) = cache.record(shape, || unreachable!());
-            assert!(hit);
             stream
                 .submit_replay_with_arguments(
-                    replay,
+                    &replay,
                     &ReplayArguments::new().with_u32(ACTIVE, active).with_u32(
                         ACTIVE_SCORE_TASKS,
                         fixture.num_active_score_task_templates(active as usize),
@@ -326,35 +321,6 @@ fn test_prepare_select_bucketing() {
                 .wait();
             fixture.check(active as usize, &before_pages, &before_states);
         }
-        let smaller = Shape {
-            num_total_tokens: 2,
-            num_total_sparse_queries: 2,
-            num_total_request_sparse_queries: 2,
-            num_total_score_task_templates: 2,
-            ..shape
-        };
-        assert!(
-            !cache
-                .record(smaller, || {
-                    let mut builder = stream.create_replay_program();
-                    builder.record(fixture.compute.prepare(
-                        smaller.num_total_tokens,
-                        fixture.layout,
-                        ReplayU32::Fixed(2),
-                        fixture.prepare_buffers(),
-                    ));
-                    builder.record_with_barrier_before(fixture.compute.select(
-                        smaller,
-                        fixture.layout,
-                        ReplayU32::Fixed(2),
-                        ReplayU32::Fixed(fixture.num_active_score_task_templates(2)),
-                        fixture.select_buffers(),
-                        &fixture.scores,
-                    ));
-                    builder.build()
-                })
-                .1
-        );
     }
 }
 

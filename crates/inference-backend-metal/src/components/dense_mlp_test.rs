@@ -10,12 +10,11 @@ use crate::metal::ReplayArguments;
 use crate::metal::ReplayParameterKey;
 use crate::metal::ReplayProgram;
 use crate::metal::Stream;
-use crate::test_support::ReplayTestCache;
 
 const NUM_ACTIVE_TOKENS: ReplayParameterKey = ReplayParameterKey::new("test.dense_mlp.num_active_tokens");
 
 #[test]
-fn test_replay_bucketing() {
+fn test_replay_active_counts() {
     for (config, cases) in [
         (
             standard_config(),
@@ -44,16 +43,11 @@ fn test_replay_bucketing() {
         ),
     ] {
         let fixture = DenseMLPFixture::new(33, config);
-        let mut cache = ReplayTestCache::new();
         for &(num_total_tokens, active_sequence, seed) in cases {
-            let key = (num_total_tokens, fixture.compute.topology(num_total_tokens));
-            let (_, cache_hit) = cache.record(key, || fixture.replay(num_total_tokens));
-            assert!(!cache_hit);
+            let replay = fixture.replay(num_total_tokens);
             for (case_index, &num_active_tokens) in active_sequence.iter().enumerate() {
                 let hidden = fixture.write_hidden(num_active_tokens, seed.wrapping_add(case_index as u32));
-                let (replay, cache_hit) = cache.record(key, || unreachable!());
-                assert!(cache_hit);
-                fixture.submit(replay, num_active_tokens);
+                fixture.submit(&replay, num_active_tokens);
                 fixture.assert_active_output(&hidden, num_active_tokens);
             }
         }

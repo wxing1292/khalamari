@@ -239,6 +239,8 @@ impl Compute {
         num_active_tokens: ReplayU32,
         buffers: LayoutBuffers<'a>,
     ) -> LayoutInvocation<'a> {
+        self.config.validate_shape(shape);
+        validate_layout_buffers(self.config, shape, &buffers);
         LayoutInvocation {
             kernels: self,
             shape,
@@ -253,6 +255,8 @@ impl Compute {
         num_active_tokens: ReplayU32,
         buffers: PackInputBuffers<'a>,
     ) -> PackInputInvocation<'a> {
+        self.config.validate_shape(shape);
+        validate_pack_input_buffers(self.config, shape, &buffers);
         PackInputInvocation {
             kernels: self,
             shape,
@@ -267,6 +271,8 @@ impl Compute {
         num_active_tokens: ReplayU32,
         buffers: ScatterWithoutSharedExpertsBuffers<'a>,
     ) -> ScatterWithoutSharedExpertsInvocation<'a> {
+        self.config.validate_shape(shape);
+        validate_scatter_without_shared_experts_buffers(self.config, shape, &buffers);
         ScatterWithoutSharedExpertsInvocation {
             kernels: self,
             shape,
@@ -281,6 +287,8 @@ impl Compute {
         num_active_tokens: ReplayU32,
         buffers: ScatterWithSharedExpertsBuffers<'a>,
     ) -> ScatterWithSharedExpertsInvocation<'a> {
+        self.config.validate_shape(shape);
+        validate_scatter_with_shared_experts_buffers(self.config, shape, &buffers);
         ScatterWithSharedExpertsInvocation {
             kernels: self,
             shape,
@@ -310,8 +318,6 @@ pub struct LayoutInvocation<'a> {
 impl Operator for LayoutInvocation<'_> {
     fn record(self, recorder: &CommandRecorder<'_>) {
         let config = self.kernels.config;
-        config.validate_shape(self.shape);
-        debug_validate_layout_buffers(config, self.shape, &self.buffers);
         recorder.set_kernel(&self.kernels.layout_clear);
         recorder.set_buffer_write(0, self.buffers.expert_counts, 0);
         recorder.set_buffer_write(1, self.buffers.expert_cursors, 0);
@@ -368,8 +374,6 @@ pub struct PackInputInvocation<'a> {
 impl Operator for PackInputInvocation<'_> {
     fn record(self, recorder: &CommandRecorder<'_>) {
         let config = self.kernels.config;
-        config.validate_shape(self.shape);
-        debug_validate_pack_input_buffers(config, self.shape, &self.buffers);
         recorder.set_kernel(&self.kernels.pack_input);
         recorder.set_buffer_read(0, self.buffers.input, 0);
         recorder.set_buffer_read(1, self.buffers.routes_by_expert, 0);
@@ -394,8 +398,6 @@ pub struct ScatterWithoutSharedExpertsInvocation<'a> {
 impl Operator for ScatterWithoutSharedExpertsInvocation<'_> {
     fn record(self, recorder: &CommandRecorder<'_>) {
         let config = self.kernels.config;
-        config.validate_shape(self.shape);
-        debug_validate_scatter_without_shared_experts_buffers(config, self.shape, &self.buffers);
         recorder.set_kernel(&self.kernels.scatter_without_shared_experts);
         recorder.set_buffer_read(0, self.buffers.packed_output, 0);
         recorder.set_buffer_read(1, self.buffers.routes_by_token, 0);
@@ -421,8 +423,6 @@ pub struct ScatterWithSharedExpertsInvocation<'a> {
 impl Operator for ScatterWithSharedExpertsInvocation<'_> {
     fn record(self, recorder: &CommandRecorder<'_>) {
         let config = self.kernels.config;
-        config.validate_shape(self.shape);
-        debug_validate_scatter_with_shared_experts_buffers(config, self.shape, &self.buffers);
         recorder.set_kernel(&self.kernels.scatter_with_shared_experts);
         recorder.set_buffer_read(0, self.buffers.packed_output, 0);
         recorder.set_buffer_read(1, self.buffers.routes_by_token, 0);
@@ -450,34 +450,6 @@ fn record_num_active_tokens(
         Some(key) => recorder.bind_u32(binding_index, key, 1, num_total_tokens),
         None => recorder.set_u32(binding_index, num_total_tokens),
     }
-}
-
-fn debug_validate_layout_buffers(config: Config, shape: Shape, buffers: &LayoutBuffers<'_>) {
-    #[cfg(debug_assertions)]
-    validate_layout_buffers(config, shape, buffers);
-}
-
-fn debug_validate_pack_input_buffers(config: Config, shape: Shape, buffers: &PackInputBuffers<'_>) {
-    #[cfg(debug_assertions)]
-    validate_pack_input_buffers(config, shape, buffers);
-}
-
-fn debug_validate_scatter_without_shared_experts_buffers(
-    config: Config,
-    shape: Shape,
-    buffers: &ScatterWithoutSharedExpertsBuffers<'_>,
-) {
-    #[cfg(debug_assertions)]
-    validate_scatter_without_shared_experts_buffers(config, shape, buffers);
-}
-
-fn debug_validate_scatter_with_shared_experts_buffers(
-    config: Config,
-    shape: Shape,
-    buffers: &ScatterWithSharedExpertsBuffers<'_>,
-) {
-    #[cfg(debug_assertions)]
-    validate_scatter_with_shared_experts_buffers(config, shape, buffers);
 }
 
 fn validate_layout_buffers(config: Config, shape: Shape, buffers: &LayoutBuffers<'_>) {

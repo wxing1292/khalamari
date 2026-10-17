@@ -146,12 +146,14 @@ impl Write {
         num_active_state_io_requests: ReplayU32,
         buffers: WriteBuffers<'a>,
     ) -> WriteInvocation<'a> {
-        WriteInvocation {
+        let invocation = WriteInvocation {
             kernel: self,
             shape,
             num_active_state_io_requests,
             buffers,
-        }
+        };
+        invocation.validate();
+        invocation
     }
 }
 
@@ -164,7 +166,6 @@ pub struct WriteInvocation<'a> {
 
 impl Operator for WriteInvocation<'_> {
     fn record(self, recorder: &CommandRecorder<'_>) {
-        self.validate();
         let config = self.kernel.config;
         recorder.set_kernel(&self.kernel.kernel);
         recorder.set_buffer_write(0, self.buffers.pages, 0);
@@ -192,6 +193,9 @@ impl WriteInvocation<'_> {
     fn validate(&self) {
         let config = self.kernel.config;
         config.validate_shape(self.shape);
+        if let ReplayU32::Fixed(value) = self.num_active_state_io_requests {
+            assert_eq!(value, self.shape.num_total_state_io_requests);
+        }
         assert!(self.buffers.page_ids.len_bytes() >= config.num_total_pages(self.shape) * size_of::<u32>());
         assert!(self.buffers.recurrent_states.len_bytes() >= config.state_arena_bytes(config.recurrent_state_bytes));
         assert!(self.buffers.conv_states.len_bytes() >= config.state_arena_bytes(config.conv_state_bytes));
@@ -232,12 +236,14 @@ impl Read {
         num_active_state_io_requests: ReplayU32,
         buffers: ReadBuffers<'a>,
     ) -> ReadInvocation<'a> {
-        ReadInvocation {
+        let invocation = ReadInvocation {
             kernel: self,
             shape,
             num_active_state_io_requests,
             buffers,
-        }
+        };
+        invocation.validate();
+        invocation
     }
 }
 
@@ -250,7 +256,6 @@ pub struct ReadInvocation<'a> {
 
 impl Operator for ReadInvocation<'_> {
     fn record(self, recorder: &CommandRecorder<'_>) {
-        self.validate();
         let config = self.kernel.config;
         recorder.set_kernel(&self.kernel.kernel);
         recorder.set_buffer_read(0, self.buffers.pages, 0);
@@ -278,6 +283,9 @@ impl ReadInvocation<'_> {
     fn validate(&self) {
         let config = self.kernel.config;
         config.validate_shape(self.shape);
+        if let ReplayU32::Fixed(value) = self.num_active_state_io_requests {
+            assert_eq!(value, self.shape.num_total_state_io_requests);
+        }
         assert!(self.buffers.page_ids.len_bytes() >= config.num_total_pages(self.shape) * size_of::<u32>());
         assert!(self.buffers.recurrent_states.len_bytes() >= config.state_arena_bytes(config.recurrent_state_bytes));
         assert!(self.buffers.conv_states.len_bytes() >= config.state_arena_bytes(config.conv_state_bytes));
@@ -293,10 +301,7 @@ fn bind_active_state_io_requests(
     num_active_state_io_requests: ReplayU32,
 ) {
     match num_active_state_io_requests {
-        ReplayU32::Fixed(value) => {
-            assert_eq!(value, shape.num_total_state_io_requests);
-            recorder.set_u32(index, value);
-        },
+        ReplayU32::Fixed(value) => recorder.set_u32(index, value),
         ReplayU32::Parameter(key) => {
             recorder.bind_u32(index, key, 1, shape.num_total_state_io_requests);
         },
@@ -317,7 +322,6 @@ mod tests {
     use crate::metal::ReplayParameterKey;
     use crate::metal::ReplayU32;
     use crate::metal::Stream;
-    use crate::test_support::ReplayTestCache;
 
     const NUM_ACTIVE_STATE_IO_REQUESTS: ReplayParameterKey =
         ReplayParameterKey::new("test.gdn_state_pages.num_active_state_io_requests");
@@ -461,8 +465,7 @@ mod tests {
         let page_values = NUM_TOTAL_REQUESTS as usize * 2 * VALUES_PER_PAGE;
         let pages = Buffer::from_slice(&device, &vec![PAGE_CANARY; page_values]);
         let write = Write::new(&device, config);
-        let mut cache = ReplayTestCache::new();
-        let (_, cache_hit) = cache.record(shape.num_total_state_io_requests, || {
+        let replay = {
             let mut builder = stream.create_replay_program();
             builder.record(write.invoke(
                 shape,
@@ -477,15 +480,12 @@ mod tests {
                 },
             ));
             builder.build()
-        });
-        assert!(!cache_hit);
+        };
 
         for num_active_requests in ACTIVE_COUNTS {
             pages.write_typed(0, &vec![PAGE_CANARY; page_values]);
-            let (replay, cache_hit) = cache.record(shape.num_total_state_io_requests, || unreachable!());
-            assert!(cache_hit);
             let arguments = ReplayArguments::new().with_u32(NUM_ACTIVE_STATE_IO_REQUESTS, num_active_requests);
-            stream.submit_replay_with_arguments(replay, &arguments).wait();
+            stream.submit_replay_with_arguments(&replay, &arguments).wait();
 
             let mut expected = vec![PAGE_CANARY; page_values];
             for request_index in 0..num_active_requests as usize {
@@ -529,8 +529,7 @@ mod tests {
         let recurrent_states = Buffer::from_slice(&device, &vec![CANARY; state_values]);
         let conv_states = Buffer::from_slice(&device, &vec![CANARY; state_values]);
         let read = Read::new(&device, config);
-        let mut cache = ReplayTestCache::new();
-        let (_, cache_hit) = cache.record(shape.num_total_state_io_requests, || {
+        let replay = {
             let mut builder = stream.create_replay_program();
             builder.record(read.invoke(
                 shape,
@@ -545,16 +544,13 @@ mod tests {
                 },
             ));
             builder.build()
-        });
-        assert!(!cache_hit);
+        };
 
         for num_active_requests in ACTIVE_COUNTS {
             recurrent_states.write_typed(0, &vec![CANARY; state_values]);
             conv_states.write_typed(0, &vec![CANARY; state_values]);
-            let (replay, cache_hit) = cache.record(shape.num_total_state_io_requests, || unreachable!());
-            assert!(cache_hit);
             let arguments = ReplayArguments::new().with_u32(NUM_ACTIVE_STATE_IO_REQUESTS, num_active_requests);
-            stream.submit_replay_with_arguments(replay, &arguments).wait();
+            stream.submit_replay_with_arguments(&replay, &arguments).wait();
 
             let mut expected_recurrent = vec![CANARY; state_values];
             let mut expected_conv = vec![CANARY; state_values];

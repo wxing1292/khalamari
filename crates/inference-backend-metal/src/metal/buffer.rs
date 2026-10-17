@@ -144,9 +144,7 @@ impl Buffer {
     }
 
     pub fn len_bytes(&self) -> usize {
-        self.len_bytes
-            .try_into()
-            .expect("allocated MTLBuffer byte length must fit host usize")
+        self.len_bytes as usize
     }
 
     pub fn len_bytes_u64(&self) -> u64 {
@@ -344,8 +342,18 @@ pub struct BufferView<'a> {
 
 impl<'a> BufferView<'a> {
     pub fn new(buffer: &'a Buffer, dtype: Dtype, shape: Vec<i32>, start_bytes: usize) -> Self {
+        assert!(
+            start_bytes.is_multiple_of(dtype.item_size()),
+            "buffer view byte offset must align to its dtype"
+        );
         assert!(shape.iter().all(|dim| *dim >= 0));
-        let len_bytes = view_len_bytes(dtype, &shape);
+        let num_elements = shape
+            .iter()
+            .try_fold(1usize, |count, &dim| count.checked_mul(dim as usize))
+            .expect("element count must fit usize");
+        let len_bytes = num_elements
+            .checked_mul(dtype.item_size())
+            .expect("view byte length must fit usize");
         assert!(start_bytes <= buffer.len_bytes());
         let end_bytes = start_bytes
             .checked_add(len_bytes)
@@ -377,18 +385,15 @@ impl<'a> BufferView<'a> {
     }
 
     pub fn num_elements(&self) -> usize {
-        num_elements(&self.shape)
+        self.shape.iter().map(|&dim| dim as usize).product()
     }
 
     pub fn len_bytes(&self) -> usize {
-        self.num_elements()
-            .checked_mul(self.dtype.item_size())
-            .expect("view logical byte length must fit usize")
+        self.num_elements() * self.dtype.item_size()
     }
 
     pub fn write_typed<T: MetalBufferElement>(&self, values: &[T]) {
         assert_eq!(self.dtype, T::DTYPE);
-        assert!(self.offset_bytes.is_multiple_of(T::DTYPE.item_size()));
         assert_eq!(values.len(), self.num_elements());
         self.buffer
             .write_typed(self.offset_bytes / T::DTYPE.item_size(), values);
@@ -396,21 +401,7 @@ impl<'a> BufferView<'a> {
 
     pub fn read_typed<T: MetalBufferElement>(&self) -> Vec<T> {
         assert_eq!(self.dtype, T::DTYPE);
-        assert!(self.offset_bytes.is_multiple_of(T::DTYPE.item_size()));
         self.buffer
             .read_typed(self.offset_bytes / T::DTYPE.item_size(), self.num_elements())
     }
-}
-
-fn num_elements(shape: &[i32]) -> usize {
-    shape.iter().fold(1usize, |acc, dim| {
-        let dim = usize::try_from(*dim).expect("shape dimension must be non-negative");
-        acc.checked_mul(dim).expect("element count must fit usize")
-    })
-}
-
-fn view_len_bytes(dtype: Dtype, shape: &[i32]) -> usize {
-    num_elements(shape)
-        .checked_mul(dtype.item_size())
-        .expect("view byte length must fit usize")
 }

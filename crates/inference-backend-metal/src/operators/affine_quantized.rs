@@ -249,7 +249,6 @@ impl RouteActivity {
         num_experts_per_token: u32,
         num_active_tokens: ReplayU32,
     ) -> Self {
-        config.validate();
         assert!(num_total_tokens > 0);
         assert!(num_experts_per_token > 0);
         assert!(
@@ -314,6 +313,7 @@ impl GatherMatmulKernel {
     pub fn new(device: &Device, config: ExpertConfig) -> Self {
         config.validate();
         let matmul = config.matmul;
+        validate_mlx_qmv_output_dim(matmul.n);
         let type_string = metal_type_string(matmul.input_dtype);
         let bn = 8;
         let fast = matmul.n % bn == 0 && matmul.k % 512 == 0;
@@ -369,6 +369,17 @@ impl GatherMatmulKernel {
         lhs_indices: &'a Buffer,
         rhs_indices: &'a Buffer,
     ) -> GatherMatmulInvocation<'a> {
+        validate_gather_buffer_ranges(
+            self.config,
+            shape,
+            output,
+            input,
+            weight,
+            scales,
+            biases,
+            lhs_indices,
+            rhs_indices,
+        );
         GatherMatmulInvocation {
             kernel: self,
             shape,
@@ -451,6 +462,20 @@ impl GatherGateUpSwiGLUKernel {
         lhs_indices: &'a Buffer,
         rhs_indices: &'a Buffer,
     ) -> GatherGateUpSwiGLUInvocation<'a> {
+        validate_gather_gate_up_swiglu_buffer_ranges(
+            self.config,
+            shape,
+            output,
+            input,
+            gate_weight,
+            gate_scales,
+            gate_biases,
+            up_weight,
+            up_scales,
+            up_biases,
+            lhs_indices,
+            rhs_indices,
+        );
         GatherGateUpSwiGLUInvocation {
             kernel: self,
             shape,
@@ -615,6 +640,20 @@ impl RaggedExpertMajorGateUpSwiGLUKernel {
         experts_by_route: &'a Buffer,
         expert_offsets: &'a Buffer,
     ) -> RaggedExpertMajorGateUpSwiGLUInvocation<'a> {
+        validate_ragged_expert_major_gate_up_swiglu_buffer_ranges(
+            self.config,
+            shape,
+            output,
+            input,
+            gate_weight,
+            gate_scales,
+            gate_biases,
+            up_weight,
+            up_scales,
+            up_biases,
+            experts_by_route,
+            expert_offsets,
+        );
         RaggedExpertMajorGateUpSwiGLUInvocation {
             kernel: self,
             shape,
@@ -663,6 +702,17 @@ impl RaggedExpertMajorMatmulKernel {
         experts_by_route: &'a Buffer,
         expert_offsets: &'a Buffer,
     ) -> RaggedExpertMajorMatmulInvocation<'a> {
+        validate_ragged_expert_major_down_matmul_buffer_ranges(
+            self.config,
+            shape,
+            output,
+            input,
+            weight,
+            scales,
+            biases,
+            experts_by_route,
+            expert_offsets,
+        );
         RaggedExpertMajorMatmulInvocation {
             kernel: self,
             shape,
@@ -747,18 +797,6 @@ impl Operator for RaggedExpertMajorMatmulInvocation<'_> {
         let config = self.kernel.config;
         let matmul = config.matmul;
         let shape = self.shape;
-        validate_ragged_expert_major_down_matmul_buffer_ranges(
-            config,
-            shape,
-            self.output,
-            self.input,
-            self.weight,
-            self.scales,
-            self.biases,
-            self.experts_by_route,
-            self.expert_offsets,
-        );
-
         self.kernel.kernels.record(
             recorder,
             config,
@@ -786,21 +824,6 @@ impl Operator for RaggedExpertMajorGateUpSwiGLUInvocation<'_> {
         let config = self.kernel.config;
         let matmul = config.matmul;
         let shape = self.shape;
-        validate_ragged_expert_major_gate_up_swiglu_buffer_ranges(
-            config,
-            shape,
-            self.output,
-            self.input,
-            self.gate_weight,
-            self.gate_scales,
-            self.gate_biases,
-            self.up_weight,
-            self.up_scales,
-            self.up_biases,
-            self.experts_by_route,
-            self.expert_offsets,
-        );
-
         self.kernel.kernels.record(
             recorder,
             config,
@@ -831,20 +854,6 @@ impl Operator for GatherGateUpSwiGLUInvocation<'_> {
         let config = self.kernel.config;
         let matmul = config.matmul;
         let shape = self.shape;
-        validate_gather_gate_up_swiglu_buffer_ranges(
-            config,
-            shape,
-            self.output,
-            self.input,
-            self.gate_weight,
-            self.gate_scales,
-            self.gate_biases,
-            self.up_weight,
-            self.up_scales,
-            self.up_biases,
-            self.lhs_indices,
-            self.rhs_indices,
-        );
         let kernel = if self.route_activity.uses_parameter() {
             &self.kernel.parameterized_kernel
         } else {
@@ -879,17 +888,6 @@ impl Operator for GatherMatmulInvocation<'_> {
         let config = self.kernel.config;
         let matmul = config.matmul;
         let shape = self.shape;
-        validate_gather_buffer_ranges(
-            config,
-            shape,
-            self.output,
-            self.input,
-            self.weight,
-            self.scales,
-            self.biases,
-            self.lhs_indices,
-            self.rhs_indices,
-        );
         let packed_k = packed_dim(matmul.k, matmul.bits);
         let groups = matmul.k / matmul.group_size;
         let kernel = if self.route_activity.uses_parameter() {
@@ -960,7 +958,6 @@ fn validate_gather_buffer_ranges(
     lhs_indices: &Buffer,
     rhs_indices: &Buffer,
 ) {
-    config.validate();
     shape.validate();
     let output_bytes = config.output_bytes(shape.num_routes);
     let input_bytes = config.input_bytes(shape.num_input_vectors);
@@ -1026,7 +1023,6 @@ fn validate_gather_gate_up_swiglu_buffer_ranges(
     lhs_indices: &Buffer,
     rhs_indices: &Buffer,
 ) {
-    config.validate();
     shape.validate();
     let output_bytes = config.output_bytes(shape.num_routes);
     let input_bytes = config.input_bytes(shape.num_input_vectors);
@@ -1075,7 +1071,6 @@ fn validate_ragged_expert_major_gate_up_swiglu_buffer_ranges(
     experts_by_route: &Buffer,
     expert_offsets: &Buffer,
 ) {
-    config.validate();
     shape.validate();
     let output_bytes = config.output_bytes(shape.num_routes);
     let input_bytes = config.input_bytes(shape.num_routes);
@@ -1119,7 +1114,6 @@ fn validate_ragged_expert_major_down_matmul_buffer_ranges(
     experts_by_route: &Buffer,
     expert_offsets: &Buffer,
 ) {
-    config.validate();
     shape.validate();
     let output_bytes = config.output_bytes(shape.num_routes);
     let input_bytes = config.input_bytes(shape.num_routes);
@@ -1231,6 +1225,28 @@ impl Kernel {
         config.validate();
         assert_eq!(config.n % epilogue.output_divisor(), 0);
         validate_kernel_kind(config, kind, epilogue);
+        if kind == KernelKind::QmvBn8Bk32 && epilogue == Epilogue::Identity && config.uses_same_dtype() {
+            validate_mlx_qmv_output_dim(config.n);
+            // MLX computes the packed row numerator and weight row offsets as signed int.
+            let bytes_per_pack = if config.bits == 3 || config.bits == 6 { 3 } else { 4 };
+            let pack_factor = match config.bits {
+                3 => 8,
+                6 => 4,
+                bits => 32 / bits as u64,
+            };
+            let row_byte_numerator = config.k as u64 * bytes_per_pack;
+            assert!(
+                row_byte_numerator <= i32::MAX as u64,
+                "MLX QMV packed row byte numerator {row_byte_numerator} must fit i32"
+            );
+            let weight_row_bytes = row_byte_numerator / pack_factor;
+            // This weight byte domain also bounds the smaller scale/bias element offsets.
+            let max_weight_byte_index = config.n as u64 * weight_row_bytes - 1;
+            assert!(
+                max_weight_byte_index <= i32::MAX as u64,
+                "MLX QMV packed weight byte index {max_weight_byte_index} must fit i32"
+            );
+        }
         let sliced_k_threadblock_memory = kind.sliced_k_shape().map(|(row_tiles, column_tiles)| {
             let (num_simdgroups, _) = sliced_k_geometry(config, epilogue);
             epilogue.output_divisor() as usize
@@ -1319,6 +1335,46 @@ impl Kernel {
         biases_offset_bytes: usize,
     ) -> Invocation<'a> {
         validate_num_total_rows(num_total_rows);
+        if let Some((bm, _)) = self.kind.small_qmm_shape() {
+            assert!(num_total_rows <= bm, "small QMM recorded rows must fit its tile");
+        }
+        if self.kind == KernelKind::QmvBn8Bk32 && self.epilogue == Epilogue::Identity && self.config.uses_same_dtype() {
+            let config = self.config;
+            let pack_factor = match config.bits {
+                3 => 8,
+                6 => 4,
+                bits => 32 / bits as u64,
+            };
+            let fast = config.n % 8 == 0 && config.k % 512 == 0;
+            let packs_per_lane = if fast && config.bits != 2 { 2 } else { 1 };
+            let values_per_lane = pack_factor * packs_per_lane;
+            // MLX forms these base offsets as uint before pointer arithmetic.
+            let max_input_base = (num_total_rows as u64 - 1) * config.k as u64 + 31 * values_per_lane;
+            assert!(
+                max_input_base <= u32::MAX as u64,
+                "MLX QMV input base element offset {max_input_base} must fit u32"
+            );
+            let max_output_index = num_total_rows as u64 * config.n as u64 - 1;
+            assert!(
+                max_output_index <= u32::MAX as u64,
+                "MLX QMV output element index {max_output_index} must fit u32"
+            );
+        }
+        validate_buffer_ranges(
+            self.config,
+            self.epilogue,
+            num_total_rows as i32,
+            output,
+            output_offset_bytes,
+            input,
+            input_offset_bytes,
+            weight,
+            weight_offset_bytes,
+            scales,
+            scales_offset_bytes,
+            biases,
+            biases_offset_bytes,
+        );
         Invocation {
             kernel: self,
             num_total_rows,
@@ -1573,22 +1629,6 @@ impl Operator for Invocation<'_> {
         let config = kernel.config;
         let num_total_rows = self.num_total_rows;
         let num_total_rows_i32 = num_total_rows as i32;
-        validate_buffer_ranges(
-            config,
-            kernel.epilogue,
-            num_total_rows_i32,
-            output,
-            output_offset_bytes,
-            input,
-            input_offset_bytes,
-            weight,
-            weight_offset_bytes,
-            scales,
-            scales_offset_bytes,
-            biases,
-            biases_offset_bytes,
-        );
-
         recorder.set_kernel(&kernel.kernel);
         recorder.set_buffer_read(0, weight, weight_offset_bytes);
         recorder.set_buffer_read(1, scales, scales_offset_bytes);
@@ -1610,9 +1650,8 @@ impl Operator for Invocation<'_> {
                 ),
                 (32 * num_simdgroups, 1, 1),
             );
-        } else if let Some((bm, num_simdgroups)) = kernel.kind.small_qmm_shape() {
+        } else if let Some((_, num_simdgroups)) = kernel.kind.small_qmm_shape() {
             let sliced_k = kernel.kind == KernelKind::QmmSlicedKBm3Bn4;
-            assert!(num_total_rows <= bm, "small QMM recorded rows must fit its tile");
             let columns = if sliced_k { 4 } else { 32 };
             recorder.dispatch_threadblocks(
                 (1, output_cols as usize / columns, 1),
@@ -1678,8 +1717,6 @@ fn validate_buffer_ranges(
     biases: &Buffer,
     biases_offset_bytes: usize,
 ) {
-    config.validate();
-    assert!(m > 0);
     let output_bytes = checked_bytes(
         "affine matmul output",
         &[m as usize, (config.n / epilogue.output_divisor()) as usize],
@@ -1688,6 +1725,18 @@ fn validate_buffer_ranges(
     let input_bytes = config.input_bytes(m);
     let weight_bytes = config.weight_bytes();
     let scale_or_bias_bytes = config.scale_or_bias_bytes();
+    for (name, offset_bytes, item_size) in [
+        ("output", output_offset_bytes, config.output_dtype.item_size()),
+        ("input", input_offset_bytes, config.input_dtype.item_size()),
+        ("weight", weight_offset_bytes, size_of::<u32>()),
+        ("scales", scales_offset_bytes, config.scale_bias_dtype.item_size()),
+        ("biases", biases_offset_bytes, config.scale_bias_dtype.item_size()),
+    ] {
+        assert!(
+            offset_bytes.is_multiple_of(item_size),
+            "affine quantized matmul {name} byte offset must align to its dtype"
+        );
+    }
     assert!(
         checked_range_end("affine quantized matmul output", output_offset_bytes, output_bytes) <= output.len_bytes(),
         "affine quantized matmul output range out of bounds: config={config:?} m={m} \
@@ -2208,6 +2257,14 @@ fn adaptive_topology_boundaries(config: Config, key: impl Fn(i32) -> KernelKind)
         }
     }
     boundaries.into_boxed_slice()
+}
+
+fn validate_mlx_qmv_output_dim(n: i32) {
+    // Below eight columns, MLX's first SIMDgroup loops over N entries in a four-entry result array.
+    assert!(
+        n <= 4 || n >= 8,
+        "MLX QMV output width must be at most four or at least eight"
+    );
 }
 
 fn validate_kernel_kind(config: Config, kind: KernelKind, epilogue: Epilogue) {

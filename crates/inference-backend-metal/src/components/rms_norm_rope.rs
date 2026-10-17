@@ -25,10 +25,18 @@ struct KernelConstants {
 impl KernelConstants {
     fn new(config: Config) -> Self {
         config.validate();
-        Self {
+        let constants = Self {
             config,
             thread_block: ThreadBlockConstants { required_threads: 128 },
-        }
+        };
+        // The reduction shader advances uint r by four values per thread.
+        let loop_width = constants.thread_block.required_threads as u64 * 4;
+        let padded_head_dim = (config.head_dim as u64).div_ceil(loop_width) * loop_width;
+        assert!(
+            padded_head_dim <= u32::MAX as u64,
+            "RMSNorm/RoPE padded head dimension must fit the shader u32 loop domain"
+        );
+        constants
     }
 
     fn num_threads(self, shape: Shape) -> usize {
@@ -304,13 +312,15 @@ impl Compute {
     }
 
     pub fn invoke<'a>(&'a self, shape: Shape, buffers: Buffers<'a>, num_active_tokens: ReplayU32) -> Invocation<'a> {
-        Invocation {
+        let invocation = Invocation {
             constants: self.constants,
             kernel: &self.kernel,
             shape,
             buffers,
             num_active_tokens,
-        }
+        };
+        invocation.validate();
+        invocation
     }
 }
 
@@ -350,7 +360,6 @@ pub struct Invocation<'a> {
 
 impl Operator for Invocation<'_> {
     fn record(self, recorder: &CommandRecorder<'_>) {
-        self.validate();
         let constants = self.constants;
         let shape = self.shape;
         recorder.set_kernel(self.kernel);
@@ -358,13 +367,10 @@ impl Operator for Invocation<'_> {
         recorder.set_buffer_read(1, self.buffers.norm_weight, 0);
         recorder.set_buffer_read(2, self.buffers.flat_token_indices, 0);
         recorder.set_buffer_write(3, self.buffers.output, 0);
-        set_replay_u32(
-            recorder,
-            4,
-            self.num_active_tokens,
-            shape.num_total_tokens,
-            "RMSNorm/RoPE active token count",
-        );
+        match self.num_active_tokens {
+            ReplayU32::Fixed(value) => recorder.set_u32(4, value),
+            ReplayU32::Parameter(key) => recorder.bind_u32(4, key, 1, shape.num_total_tokens),
+        }
         recorder.dispatch_1d(
             constants.num_threads(shape),
             constants.thread_block.required_threads as usize,
@@ -372,21 +378,11 @@ impl Operator for Invocation<'_> {
     }
 }
 
-fn set_replay_u32(recorder: &CommandRecorder<'_>, index: usize, value: ReplayU32, max_value: u32, name: &str) {
-    match value {
-        ReplayU32::Fixed(value) => {
-            assert!(value > 0, "{name} must be positive");
-            assert!(value <= max_value, "{name} exceeds recorded capacity");
-            recorder.set_u32(index, value);
-        },
-        ReplayU32::Parameter(key) => recorder.bind_u32(index, key, 1, max_value),
-    }
-}
-
 impl Invocation<'_> {
     fn validate(&self) {
         let config = self.constants.config;
         self.shape.validate(config);
+        self.num_active_tokens.validate_range(1, self.shape.num_total_tokens);
         assert!(self.buffers.input.len_bytes() >= config.bytes(self.shape));
         assert!(self.buffers.norm_weight.len_bytes() >= config.norm_weight_bytes());
         assert!(self.buffers.flat_token_indices.len_bytes() >= config.flat_token_indices_bytes(self.shape));

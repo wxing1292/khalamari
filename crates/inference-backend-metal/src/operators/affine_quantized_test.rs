@@ -5,7 +5,6 @@ use inference_executor_core::replay::ReplayBucketPolicy;
 use super::*;
 use crate::metal::ReplayArguments;
 use crate::metal::Stream;
-use crate::test_support::ReplayTestCache;
 
 const NUM_ACTIVE_ROWS: ReplayParameterKey = ReplayParameterKey::new("test.affine.num_active_rows");
 
@@ -463,8 +462,7 @@ fn assert_epilogue_replay_matches_reference(config: Config, kind: KernelKind, nu
         let biases_buffer = buffer_from_f32(&device, &biases, config.scale_bias_dtype);
         let output_bytes = |rows| config.output_bytes(rows) / epilogue.output_divisor() as usize;
         let output = Buffer::new_zeroed(&device, output_bytes(num_total_rows));
-        let mut cache = ReplayTestCache::new();
-        let (replay, cache_hit) = cache.record(num_total_rows, || {
+        let replay = {
             let mut recorder = stream.create_replay_program();
             recorder.record(kernel.invoke(
                 num_total_rows as u32,
@@ -481,8 +479,7 @@ fn assert_epilogue_replay_matches_reference(config: Config, kind: KernelKind, nu
                 0,
             ));
             recorder.build()
-        });
-        assert!(!cache_hit);
+        };
 
         let weight_dtype = if kind.qmm_shape().is_some() && config.uses_same_dtype() {
             config.input_dtype
@@ -524,12 +521,10 @@ fn assert_epilogue_replay_matches_reference(config: Config, kind: KernelKind, nu
         active_counts.retain(|&active| active > 0 && active <= num_total_rows);
         active_counts.dedup();
         for num_active_rows in active_counts {
-            let (replay, cache_hit) = cache.record(num_total_rows, || unreachable!());
-            assert!(cache_hit);
             let before = output.read_typed::<u8>(0, output_bytes(num_total_rows)).to_vec();
             stream
                 .submit_replay_with_arguments(
-                    replay,
+                    &replay,
                     &ReplayArguments::new().with_u32(NUM_ACTIVE_ROWS, num_active_rows as u32),
                 )
                 .wait();

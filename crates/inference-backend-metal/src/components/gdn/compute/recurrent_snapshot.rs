@@ -64,13 +64,7 @@ pub fn record_final_recurrent_state(
     recorder.set_buffer_read(8, buffers.flat_recurrent_state_write_slots, 0);
     recorder.set_buffer_read(9, buffers.cu_tokens, 0);
     recorder.set_f32(10, compute.q_scale);
-    set_replay_u32(
-        recorder,
-        11,
-        num_active_reqs,
-        shape.num_total_reqs,
-        "GDN active request count",
-    );
+    set_replay_u32(recorder, 11, num_active_reqs, shape.num_total_reqs);
     recorder.set_u64(12, buffers.recurrent_state_arena_offset_bytes);
     set_recurrent_count(recorder, 13, num_active_recurrent_requests, shape.num_total_reqs);
     let thread_block = compute.constants.kernels.final_recurrent_state.thread_block;
@@ -123,13 +117,7 @@ pub fn record_candidate_recurrent_state(
     recorder.set_buffer_read(8, buffers.flat_recurrent_state_write_slots, 0);
     recorder.set_buffer_read(9, buffers.cu_tokens, 0);
     recorder.set_f32(10, compute.q_scale);
-    set_replay_u32(
-        recorder,
-        11,
-        num_active_reqs,
-        shape.num_total_reqs,
-        "GDN active request count",
-    );
+    set_replay_u32(recorder, 11, num_active_reqs, shape.num_total_reqs);
     recorder.set_u64(12, buffers.recurrent_state_arena_offset_bytes);
     set_recurrent_count(recorder, 13, num_active_recurrent_requests, shape.num_total_reqs);
     let thread_block = compute.constants.kernels.candidate_recurrent_state.thread_block;

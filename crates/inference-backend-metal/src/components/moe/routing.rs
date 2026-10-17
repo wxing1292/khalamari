@@ -152,7 +152,8 @@ impl Compute {
     }
 
     pub fn invoke<'a>(&'a self, shape: Shape, num_active_tokens: ReplayU32, buffers: Buffers<'a>) -> Invocation<'a> {
-        shape.validate();
+        self.config.validate_shape(shape);
+        validate_buffers(self.config, shape, &buffers);
         Invocation {
             kernel: self,
             shape,
@@ -181,8 +182,6 @@ pub struct Invocation<'a> {
 
 impl Operator for Invocation<'_> {
     fn record(self, recorder: &CommandRecorder<'_>) {
-        self.kernel.config.validate_shape(self.shape);
-        debug_validate_buffers(self.kernel.config, self.shape, &self.buffers);
         recorder.set_kernel(&self.kernel.kernel);
         recorder.set_buffer_read(0, self.buffers.router_probs, 0);
         recorder.set_buffer_write(1, self.buffers.expert_indices, 0);
@@ -196,11 +195,6 @@ impl Operator for Invocation<'_> {
             (self.kernel.constants.thread_block.required_threads as usize, 1, 1),
         );
     }
-}
-
-fn debug_validate_buffers(config: Config, shape: Shape, buffers: &Buffers<'_>) {
-    #[cfg(debug_assertions)]
-    validate_buffers(config, shape, buffers);
 }
 
 fn validate_buffers(config: Config, shape: Shape, buffers: &Buffers<'_>) {

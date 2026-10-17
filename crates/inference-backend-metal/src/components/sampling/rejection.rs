@@ -95,6 +95,143 @@ impl Compute {
     }
 
     pub fn invoke_replay<'a>(&'a self, shape: Shape, buffers: Buffers<'a>) -> Invocation<'a> {
+        shape.validate();
+        let num_target_slots = checked_product(
+            "sparse rejection target-distribution slot count",
+            &[
+                shape.num_total_target_distributions as usize,
+                shape.max_target_k as usize,
+            ],
+        );
+        let num_draft_slots = checked_product(
+            "sparse rejection draft-distribution slot count",
+            &[shape.num_total_draft_distributions as usize, shape.max_draft_k as usize],
+        );
+        assert!(
+            buffers.target_distribution_token_ids.len_bytes()
+                >= checked_bytes("sparse rejection target token", num_target_slots, size_of::<i32>()),
+            "sparse rejection target-distribution token buffer too short"
+        );
+        assert!(
+            buffers.target_distribution_probs.len_bytes()
+                >= checked_bytes(
+                    "sparse rejection target probability",
+                    num_target_slots,
+                    size_of::<f32>()
+                ),
+            "sparse rejection target-distribution probability buffer too short"
+        );
+        assert_eq!(
+            buffers.draft_distribution_token_ids.len_bytes() / size_of::<i32>(),
+            buffers.draft_distribution_probs.len_bytes() / size_of::<f32>(),
+            "sparse rejection draft-distribution token/probability buffers must have equal element counts"
+        );
+        if shape.num_total_draft_distributions > 0 {
+            assert!(
+                buffers.draft_distribution_token_ids.len_bytes()
+                    >= checked_bytes("sparse rejection draft token", num_draft_slots, size_of::<i32>()),
+                "sparse rejection draft-distribution token buffer too short"
+            );
+            assert!(
+                buffers.draft_distribution_probs.len_bytes()
+                    >= checked_bytes("sparse rejection draft probability", num_draft_slots, size_of::<f32>()),
+                "sparse rejection draft-distribution probability buffer too short"
+            );
+        }
+        assert!(
+            buffers.flat_draft_token_ids.len_bytes()
+                >= checked_bytes(
+                    "sparse rejection flat draft token",
+                    shape.num_total_draft_distributions as usize,
+                    size_of::<i32>(),
+                ),
+            "sparse rejection draft-token buffer is too short"
+        );
+        assert!(
+            buffers.cu_target_distributions.len_bytes()
+                >= checked_bytes(
+                    "sparse rejection cumulative target distribution",
+                    (shape.num_total_reqs as usize)
+                        .checked_add(1)
+                        .expect("sparse rejection request count must fit usize"),
+                    size_of::<u32>(),
+                ),
+            "sparse rejection target CU-distribution buffer is too short"
+        );
+        assert!(
+            buffers.cu_draft_distributions.len_bytes()
+                >= checked_bytes(
+                    "sparse rejection cumulative draft distribution",
+                    (shape.num_total_reqs as usize)
+                        .checked_add(1)
+                        .expect("sparse rejection request count must fit usize"),
+                    size_of::<u32>(),
+                ),
+            "sparse rejection draft CU-distribution buffer is too short"
+        );
+        assert!(
+            buffers.flat_draft_distribution_indices.len_bytes()
+                >= checked_bytes(
+                    "sparse rejection flat draft-distribution index",
+                    shape.num_total_draft_distributions as usize,
+                    size_of::<u32>(),
+                ),
+            "sparse rejection flat draft-distribution index buffer too short"
+        );
+        assert!(
+            buffers.flat_accepted_token_ids.len_bytes()
+                >= checked_bytes(
+                    "sparse rejection accepted token",
+                    shape.num_accepted_token_slots(),
+                    size_of::<i32>(),
+                ),
+            "sparse rejection accepted-token buffer is too short"
+        );
+        assert!(
+            buffers.flat_accepted_probs.len_bytes()
+                >= checked_bytes(
+                    "sparse rejection accepted probability",
+                    shape.num_accepted_token_slots(),
+                    size_of::<f32>(),
+                ),
+            "sparse rejection accepted-probability buffer is too short"
+        );
+        assert!(
+            buffers.num_accepted_tokens.len_bytes()
+                >= checked_bytes(
+                    "sparse rejection accepted-token count",
+                    shape.num_total_reqs as usize,
+                    size_of::<u32>(),
+                ),
+            "sparse rejection accepted-token-count buffer is too short"
+        );
+        assert!(
+            buffers.sampled_token_ids.len_bytes()
+                >= checked_bytes(
+                    "sparse rejection sampled token",
+                    shape.num_total_reqs as usize,
+                    size_of::<i32>(),
+                ),
+            "sparse rejection sampled-token buffer is too short"
+        );
+        assert!(
+            buffers.sampled_token_probs.len_bytes()
+                >= checked_bytes(
+                    "sparse rejection sampled probability",
+                    shape.num_total_reqs as usize,
+                    size_of::<f32>(),
+                ),
+            "sparse rejection sampled-probability buffer is too short"
+        );
+        assert!(
+            buffers.runtime_params.len_bytes()
+                >= checked_product(
+                    "sparse rejection runtime parameter byte length",
+                    &[shape.num_total_reqs as usize, 4, size_of::<u32>()],
+                ),
+            "sparse rejection runtime parameter buffer is too short"
+        );
+        checked_num_threads(shape.num_total_reqs, self.constants.thread_block.required_threads);
         Invocation {
             kernel: self,
             shape,
@@ -102,6 +239,7 @@ impl Compute {
         }
     }
 
+    /// Adds active values for the same shape used to record the replay.
     pub fn add_replay_arguments(
         &self,
         shape: Shape,
@@ -110,7 +248,6 @@ impl Compute {
         num_active_draft_distributions: u32,
         arguments: &mut ReplayArguments,
     ) {
-        shape.validate();
         assert!(
             num_active_reqs > 0 && num_active_reqs <= shape.num_total_reqs,
             "sparse rejection active requests must fit the recorded capacity"
@@ -143,145 +280,6 @@ pub struct Invocation<'a> {
 
 impl Operator for Invocation<'_> {
     fn record(self, recorder: &CommandRecorder<'_>) {
-        self.shape.validate();
-        let num_target_slots = checked_product(
-            "sparse rejection target-distribution slot count",
-            &[
-                self.shape.num_total_target_distributions as usize,
-                self.shape.max_target_k as usize,
-            ],
-        );
-        let num_draft_slots = checked_product(
-            "sparse rejection draft-distribution slot count",
-            &[
-                self.shape.num_total_draft_distributions as usize,
-                self.shape.max_draft_k as usize,
-            ],
-        );
-        assert!(
-            self.buffers.target_distribution_token_ids.len_bytes()
-                >= checked_bytes("sparse rejection target token", num_target_slots, size_of::<i32>()),
-            "sparse rejection target-distribution token buffer too short"
-        );
-        assert!(
-            self.buffers.target_distribution_probs.len_bytes()
-                >= checked_bytes(
-                    "sparse rejection target probability",
-                    num_target_slots,
-                    size_of::<f32>()
-                ),
-            "sparse rejection target-distribution probability buffer too short"
-        );
-        assert_eq!(
-            self.buffers.draft_distribution_token_ids.len_bytes() / size_of::<i32>(),
-            self.buffers.draft_distribution_probs.len_bytes() / size_of::<f32>(),
-            "sparse rejection draft-distribution token/probability buffers must have equal element counts"
-        );
-        if self.shape.num_total_draft_distributions > 0 {
-            assert!(
-                self.buffers.draft_distribution_token_ids.len_bytes()
-                    >= checked_bytes("sparse rejection draft token", num_draft_slots, size_of::<i32>()),
-                "sparse rejection draft-distribution token buffer too short"
-            );
-            assert!(
-                self.buffers.draft_distribution_probs.len_bytes()
-                    >= checked_bytes("sparse rejection draft probability", num_draft_slots, size_of::<f32>()),
-                "sparse rejection draft-distribution probability buffer too short"
-            );
-        }
-        assert!(
-            self.buffers.flat_draft_token_ids.len_bytes()
-                >= checked_bytes(
-                    "sparse rejection flat draft token",
-                    self.shape.num_total_draft_distributions as usize,
-                    size_of::<i32>(),
-                ),
-            "sparse rejection draft-token buffer is too short"
-        );
-        assert!(
-            self.buffers.cu_target_distributions.len_bytes()
-                >= checked_bytes(
-                    "sparse rejection cumulative target distribution",
-                    (self.shape.num_total_reqs as usize)
-                        .checked_add(1)
-                        .expect("sparse rejection request count must fit usize"),
-                    size_of::<u32>(),
-                ),
-            "sparse rejection target CU-distribution buffer is too short"
-        );
-        assert!(
-            self.buffers.cu_draft_distributions.len_bytes()
-                >= checked_bytes(
-                    "sparse rejection cumulative draft distribution",
-                    (self.shape.num_total_reqs as usize)
-                        .checked_add(1)
-                        .expect("sparse rejection request count must fit usize"),
-                    size_of::<u32>(),
-                ),
-            "sparse rejection draft CU-distribution buffer is too short"
-        );
-        assert!(
-            self.buffers.flat_draft_distribution_indices.len_bytes()
-                >= checked_bytes(
-                    "sparse rejection flat draft-distribution index",
-                    self.shape.num_total_draft_distributions as usize,
-                    size_of::<u32>(),
-                ),
-            "sparse rejection flat draft-distribution index buffer too short"
-        );
-        assert!(
-            self.buffers.flat_accepted_token_ids.len_bytes()
-                >= checked_bytes(
-                    "sparse rejection accepted token",
-                    self.shape.num_accepted_token_slots(),
-                    size_of::<i32>(),
-                ),
-            "sparse rejection accepted-token buffer is too short"
-        );
-        assert!(
-            self.buffers.flat_accepted_probs.len_bytes()
-                >= checked_bytes(
-                    "sparse rejection accepted probability",
-                    self.shape.num_accepted_token_slots(),
-                    size_of::<f32>(),
-                ),
-            "sparse rejection accepted-probability buffer is too short"
-        );
-        assert!(
-            self.buffers.num_accepted_tokens.len_bytes()
-                >= checked_bytes(
-                    "sparse rejection accepted-token count",
-                    self.shape.num_total_reqs as usize,
-                    size_of::<u32>(),
-                ),
-            "sparse rejection accepted-token-count buffer is too short"
-        );
-        assert!(
-            self.buffers.sampled_token_ids.len_bytes()
-                >= checked_bytes(
-                    "sparse rejection sampled token",
-                    self.shape.num_total_reqs as usize,
-                    size_of::<i32>(),
-                ),
-            "sparse rejection sampled-token buffer is too short"
-        );
-        assert!(
-            self.buffers.sampled_token_probs.len_bytes()
-                >= checked_bytes(
-                    "sparse rejection sampled probability",
-                    self.shape.num_total_reqs as usize,
-                    size_of::<f32>(),
-                ),
-            "sparse rejection sampled-probability buffer is too short"
-        );
-        assert!(
-            self.buffers.runtime_params.len_bytes()
-                >= checked_product(
-                    "sparse rejection runtime parameter byte length",
-                    &[self.shape.num_total_reqs as usize, 4, size_of::<u32>()],
-                ),
-            "sparse rejection runtime parameter buffer is too short"
-        );
         recorder.set_kernel(&self.kernel.kernel);
         SamplingFailure::record(
             recorder,
@@ -307,7 +305,7 @@ impl Operator for Invocation<'_> {
         recorder.set_u32(18, self.shape.max_target_k);
         recorder.set_u32(19, self.shape.max_draft_k);
         let num_threads_per_req = self.kernel.constants.thread_block.required_threads;
-        let num_total_threads = checked_num_threads(self.shape.num_total_reqs, num_threads_per_req);
+        let num_total_threads = self.shape.num_total_reqs * num_threads_per_req;
         recorder.bind_u32(14, NUM_ACTIVE_THREADS_KEY, num_threads_per_req, num_total_threads);
         recorder.bind_u32(
             15,

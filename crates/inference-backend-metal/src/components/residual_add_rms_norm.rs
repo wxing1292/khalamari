@@ -131,10 +131,20 @@ struct KernelConstants {
 impl KernelConstants {
     fn new(config: Config, kind: KernelKind) -> Self {
         validate_kernel_kind(config, kind);
-        Self {
+        let constants = Self {
             kind,
             thread_block: ThreadBlockConstants { required_threads: 1024 },
+        };
+        if kind == KernelKind::Scalar {
+            // The scalar shader advances uint r by four values per thread.
+            let loop_width = constants.thread_block.required_threads as u64 * 4;
+            let padded_hidden_dim = (config.hidden_dim as u64).div_ceil(loop_width) * loop_width;
+            assert!(
+                padded_hidden_dim <= u32::MAX as u64,
+                "scalar residual-add RMSNorm padded hidden dimension must fit the shader u32 loop domain"
+            );
         }
+        constants
     }
 }
 
@@ -365,8 +375,6 @@ impl Operator for CaptureReplayInvocation {
 
 impl Invocation<'_> {
     fn validate(&self) {
-        self.config.validate();
-        self.shape.validate();
         assert!(self.buffers.lhs.len_bytes() >= self.config.bytes(self.shape));
         assert!(self.buffers.rhs.len_bytes() >= self.config.bytes(self.shape));
         assert!(self.buffers.weight.len_bytes() >= self.config.weight_bytes());
@@ -393,6 +401,7 @@ impl ReplayInvocation {
         };
         replay_domain_matches
             && residual_add.shape.num_values == residual_values
+            && rms_norm.config.weight_dtype == rms_norm.config.io_dtype
             && residual_add.config.lhs_dtype == rms_norm.config.io_dtype
             && residual_add.config.rhs_dtype == rms_norm.config.io_dtype
             && residual_add.config.output_dtype == rms_norm.config.io_dtype
@@ -454,8 +463,6 @@ impl ReplayInvocation {
     }
 
     fn validate(&self) {
-        self.config.validate();
-        self.shape.validate();
         assert!(self.buffers.lhs_len_bytes >= self.config.bytes(self.shape));
         assert!(self.buffers.rhs_len_bytes >= self.config.bytes(self.shape));
         assert!(self.buffers.weight_len_bytes >= self.config.weight_bytes());

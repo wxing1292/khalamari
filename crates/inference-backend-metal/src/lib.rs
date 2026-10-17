@@ -11,7 +11,4 @@ pub mod operators;
 mod mlx_headers;
 mod runtime;
 
-#[cfg(test)]
-mod test_support;
-
 pub use runtime::MetalRuntime;

@@ -31,8 +31,8 @@ template <typename InT, typename ParamT, typename OutT, int group_size, int bits
   thread U x_thread[values_per_thread];
   thread U result[results_per_simdgroup] = {0};
 
-  const int in_vec_size_w = in_vec_size * bytes_per_pack / pack_factor;
-  const int in_vec_size_g = in_vec_size / group_size;
+  const ulong in_vec_size_w = ulong(in_vec_size) * bytes_per_pack / pack_factor;
+  const ulong in_vec_size_g = ulong(in_vec_size) / group_size;
   const int out_row = tid.y * (num_simdgroups * results_per_simdgroup) +
       simd_gid * results_per_simdgroup;
 
@@ -102,8 +102,8 @@ template <typename InT, typename ParamT, typename OutT, int group_size, int bits
   thread U x_thread[values_per_thread];
   thread U result[results_per_simdgroup] = {0};
 
-  const int in_vec_size_w = in_vec_size * bytes_per_pack / pack_factor;
-  const int in_vec_size_g = in_vec_size / group_size;
+  const ulong in_vec_size_w = ulong(in_vec_size) * bytes_per_pack / pack_factor;
+  const ulong in_vec_size_g = ulong(in_vec_size) / group_size;
   const int out_row = tid.y * (num_simdgroups * results_per_simdgroup) +
       simd_gid * results_per_simdgroup;
 
@@ -180,8 +180,8 @@ template <
 struct PsiDecMixedBlockLoader {
   STEEL_CONST short vec_size = n_reads;
 
-  const int src_ld;
-  const int tile_stride;
+  const ulong src_ld;
+  const ulong tile_stride;
   const short thread_idx;
   const short bi;
   const short bj;
@@ -270,10 +270,10 @@ struct PsiDecMixedQuantizedBlockLoader {
       (BCOLS_PACKED * BROWS < tgp_size) ? 1 : (BCOLS_PACKED * BROWS) / tgp_size;
   MLX_MTL_CONST short group_steps = group_size / BCOLS;
 
-  const int src_ld;
-  const int tile_stride;
+  const ulong src_ld;
+  const ulong tile_stride;
   short group_step_cnt;
-  const int group_stride;
+  const ulong group_stride;
 
   const short thread_idx;
   const short bi;

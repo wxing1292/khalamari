@@ -184,6 +184,16 @@ impl Commit {
         num_active_jobs: ReplayU32,
         buffers: Buffers<'a>,
     ) -> Invocation<'a> {
+        assert!(num_total_jobs > 0);
+        num_active_jobs.validate_range(0, num_total_jobs);
+        let config = self.config;
+        assert!(buffers.jobs.len_bytes() >= num_total_jobs as usize * size_of::<Job>());
+        assert!(buffers.recurrent_states.len_bytes() >= config.arena_bytes(config.recurrent_state_values()));
+        assert!(buffers.conv_states.len_bytes() >= config.arena_bytes(config.conv_state_values()));
+        assert!(buffers.alpha.len_bytes() >= config.alpha_bytes());
+        assert!(buffers.k.len_bytes() >= config.k_bytes());
+        assert!(buffers.u.len_bytes() >= config.u_bytes());
+        assert!(buffers.qkv.len_bytes() >= config.qkv_bytes());
         Invocation {
             kernel: self,
             num_total_jobs,
@@ -203,14 +213,6 @@ pub struct Invocation<'a> {
 impl Operator for Invocation<'_> {
     fn record(self, recorder: &CommandRecorder<'_>) {
         let config = self.kernel.config;
-        assert!(self.num_total_jobs > 0);
-        assert!(self.buffers.jobs.len_bytes() >= self.num_total_jobs as usize * size_of::<Job>());
-        assert!(self.buffers.recurrent_states.len_bytes() >= config.arena_bytes(config.recurrent_state_values()));
-        assert!(self.buffers.conv_states.len_bytes() >= config.arena_bytes(config.conv_state_values()));
-        assert!(self.buffers.alpha.len_bytes() >= config.alpha_bytes());
-        assert!(self.buffers.k.len_bytes() >= config.k_bytes());
-        assert!(self.buffers.u.len_bytes() >= config.u_bytes());
-        assert!(self.buffers.qkv.len_bytes() >= config.qkv_bytes());
         recorder.set_kernel(&self.kernel.recurrent);
         recorder.set_buffer_read_write(0, self.buffers.recurrent_states, 0);
         recorder.set_buffer_read(1, self.buffers.alpha, 0);
@@ -238,10 +240,7 @@ impl Operator for Invocation<'_> {
 impl Invocation<'_> {
     fn bind_active_jobs(&self, recorder: &CommandRecorder<'_>, index: usize) {
         match self.num_active_jobs {
-            ReplayU32::Fixed(value) => {
-                assert!(value <= self.num_total_jobs);
-                recorder.set_u32(index, value);
-            },
+            ReplayU32::Fixed(value) => recorder.set_u32(index, value),
             ReplayU32::Parameter(key) => recorder.bind_u32(index, key, 0, self.num_total_jobs),
         }
     }

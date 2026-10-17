@@ -188,15 +188,17 @@ impl Compute {
     }
 
     pub fn invoke_replay<'a>(&'a self, shape: Shape, buffers: Buffers<'a>) -> Invocation<'a> {
-        Invocation {
+        let invocation = Invocation {
             compute: self,
             shape,
             buffers,
-        }
+        };
+        invocation.validate();
+        invocation
     }
 
+    /// Adds active values for the same shape used to record the replay.
     pub fn add_replay_arguments(&self, shape: Shape, num_active_requests: u32, arguments: &mut ReplayArguments) {
-        shape.validate(self.config);
         assert!(
             num_active_requests > 0 && num_active_requests <= shape.num_total_requests,
             "active Spec Decode requests must fit the recorded capacity"
@@ -213,7 +215,6 @@ pub struct Invocation<'a> {
 
 impl Operator for Invocation<'_> {
     fn record(self, recorder: &CommandRecorder<'_>) {
-        self.validate();
         let config = self.compute.config;
         recorder.set_kernel(&self.compute.prepare);
         recorder.set_buffer_read(0, self.buffers.num_accepted_tokens, 0);
@@ -386,7 +387,6 @@ mod tests {
     use crate::metal::Device;
     use crate::metal::ReplayArguments;
     use crate::metal::Stream;
-    use crate::test_support::ReplayTestCache;
 
     #[test]
     fn test_reference_success() {
@@ -432,7 +432,7 @@ mod tests {
     }
 
     #[test]
-    fn test_replay_bucketing() {
+    fn test_replay_active_counts() {
         const POISON_U32: u32 = 0xdead_beef;
         const POISON_I32: i32 = i32::MIN + 17;
 
@@ -468,13 +468,7 @@ mod tests {
         }
         let sdpa_map_task_templates = Buffer::from_slice(&device, &initial_task_templates);
         let compute = Compute::new(&device, config);
-        let cache_key = (
-            shape.num_total_requests,
-            shape.num_total_q_token_ranges,
-            shape.num_total_task_templates,
-        );
-        let mut cache = ReplayTestCache::new();
-        let (_, cache_hit) = cache.record(cache_key, || {
+        let replay = {
             let mut builder = stream.create_replay_program();
             builder.record(compute.invoke_replay(
                 shape,
@@ -493,11 +487,8 @@ mod tests {
                 },
             ));
             builder.build()
-        });
-        assert!(!cache_hit);
+        };
         for num_active_requests in [1_u32, 4, 3, 2] {
-            let (replay, cache_hit) = cache.record(cache_key, || unreachable!());
-            assert!(cache_hit);
             let num_active_requests = num_active_requests as usize;
             let inactive_requests = num_active_requests..4;
             let inactive_tokens = num_active_requests * 3..12;
@@ -526,7 +517,7 @@ mod tests {
             let mut arguments = ReplayArguments::new();
             compute.add_replay_arguments(shape, num_active_requests as u32, &mut arguments);
 
-            stream.submit_replay_with_arguments(replay, &arguments).wait();
+            stream.submit_replay_with_arguments(&replay, &arguments).wait();
 
             assert_eq!(
                 anchor_token_ids.read_typed::<i32>(0, num_active_requests),

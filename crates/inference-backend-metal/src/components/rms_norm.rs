@@ -36,8 +36,7 @@ struct KernelConstants {
 
 impl KernelConstants {
     fn new(config: Config) -> Self {
-        config.validate();
-        Self {
+        let constants = Self {
             kind: match (config.io_dtype, config.weight_dtype) {
                 (Dtype::Float32, Dtype::Float32) => KernelKind::F32,
                 (Dtype::Bfloat16, Dtype::Bfloat16) => KernelKind::Bf16Vectorized,
@@ -45,7 +44,17 @@ impl KernelConstants {
                 dtypes => panic!("unsupported RMSNorm IO/weight dtypes {dtypes:?}"),
             },
             thread_block: ThreadBlockConstants { required_threads: 1024 },
+        };
+        if constants.kind == KernelKind::F32 {
+            // The scalar shader advances uint r by four values per thread.
+            let loop_width = constants.thread_block.required_threads as u64 * 4;
+            let padded_hidden_dim = (config.hidden_dim as u64).div_ceil(loop_width) * loop_width;
+            assert!(
+                padded_hidden_dim <= u32::MAX as u64,
+                "F32 RMSNorm padded hidden dimension must fit the shader u32 loop domain"
+            );
         }
+        constants
     }
 }
 
@@ -275,8 +284,6 @@ impl Invocation<'_> {
     }
 
     fn validate(&self) {
-        self.config.validate();
-        self.shape.validate();
         assert!(self.buffers.input.len_bytes() >= self.config.bytes(self.shape));
         assert!(self.buffers.weight.len_bytes() >= self.config.weight_bytes());
         assert!(self.buffers.output.len_bytes() >= self.config.bytes(self.shape));
@@ -285,8 +292,6 @@ impl Invocation<'_> {
 
 impl ReplayInvocation {
     fn validate(&self) {
-        self.config.validate();
-        self.shape.validate();
         assert!(self.buffers.input_len_bytes >= self.config.bytes(self.shape));
         assert!(self.buffers.weight_len_bytes >= self.config.weight_bytes());
         assert!(self.buffers.output_len_bytes >= self.config.bytes(self.shape));
@@ -334,7 +339,6 @@ mod tests {
     use super::*;
     use crate::metal::ReplayArguments;
     use crate::metal::Stream;
-    use crate::test_support::ReplayTestCache;
 
     const NUM_ACTIVE_TOKENS: ReplayParameterKey = ReplayParameterKey::new("test.rms_norm.num_active_tokens");
 
@@ -375,8 +379,7 @@ mod tests {
         let input = buffer_from_values(&device, &stored_input_values, config.io_dtype);
         let weight = buffer_from_values(&device, &stored_weight_values, config.weight_dtype);
         let output = Buffer::new_zeroed(&device, config.bytes(shape));
-        let mut cache = ReplayTestCache::new();
-        let (replay, cache_hit) = cache.record(shape.num_total_tokens, || {
+        let replay = {
             let mut recorder = stream.create_replay_program();
             recorder.record(kernel.invoke(
                 shape,
@@ -388,15 +391,12 @@ mod tests {
                 },
             ));
             recorder.build()
-        });
-        assert!(!cache_hit);
+        };
 
         for num_active_tokens in [1_usize, 8, 3, 7, 2, 6, 4, 5] {
-            let (replay, cache_hit) = cache.record(shape.num_total_tokens, || unreachable!());
-            assert!(cache_hit);
             stream
                 .submit_replay_with_arguments(
-                    replay,
+                    &replay,
                     &ReplayArguments::new().with_u32(NUM_ACTIVE_TOKENS, num_active_tokens as u32),
                 )
                 .wait();

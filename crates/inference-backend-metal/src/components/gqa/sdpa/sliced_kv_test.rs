@@ -12,7 +12,6 @@ use crate::components::gqa::fp8::fp8_e4m3_to_bf16;
 use crate::metal::ReplayArguments;
 use crate::metal::ReplayParameterKey;
 use crate::metal::Stream;
-use crate::test_support::ReplayTestCache;
 
 const NUM_ACTIVE_TOKENS: ReplayParameterKey = ReplayParameterKey::new("test.gqa.sdpa_sliced_kv.active_tokens");
 const NUM_ACTIVE_KV_SPLITS: ReplayParameterKey = ReplayParameterKey::new("test.gqa.paged.active_kv_splits");
@@ -144,9 +143,7 @@ fn test_replay_matches_reference_across_active_counts() {
     let output = Buffer::new_zeroed_elements(&device, config.num_output_values(shape), Dtype::Bfloat16);
     let scratch = Scratch::new(&device, config, shape);
     let kernels = Compute::new(&device, config, fixture_execution(config), shape);
-    let cache_key = (shape.num_total_tokens, shape.num_total_sdpa_map_task_templates);
-    let mut cache = ReplayTestCache::new();
-    let (_, cache_hit) = cache.record(cache_key, || {
+    let replay = {
         let mut builder = stream.create_replay_program();
         builder.record(kernels.invoke_map(
             scratch.map_buffers(&q_buffer, &kv_pages_buffer, &req_slots, &page_ids, &task_templates),
@@ -159,14 +156,11 @@ fn test_replay_matches_reference_across_active_counts() {
             ReplayU32::Parameter(NUM_ACTIVE_TOKENS),
         ));
         builder.build()
-    });
-    assert!(!cache_hit);
+    };
     for num_active_tokens in [1_usize, 8, 3, 7, 2, 6, 4, 5] {
-        let (replay, cache_hit) = cache.record(cache_key, || unreachable!());
-        assert!(cache_hit);
         stream
             .submit_replay_with_arguments(
-                replay,
+                &replay,
                 &ReplayArguments::new()
                     .with_u32(NUM_ACTIVE_TOKENS, num_active_tokens as u32)
                     .with_u32(NUM_ACTIVE_KV_SPLITS, num_active_tokens as u32),

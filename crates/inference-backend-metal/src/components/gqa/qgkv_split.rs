@@ -176,13 +176,15 @@ impl Compute {
     }
 
     pub fn invoke<'a>(&'a self, shape: Shape, buffers: Buffers<'a>, num_active_tokens: ReplayU32) -> Invocation<'a> {
-        Invocation {
+        let invocation = Invocation {
             constants: self.constants,
             kernel: &self.kernel,
             shape,
             buffers,
             num_active_tokens,
-        }
+        };
+        invocation.validate();
+        invocation
     }
 }
 
@@ -206,7 +208,6 @@ pub struct Invocation<'a> {
 
 impl Operator for Invocation<'_> {
     fn record(self, recorder: &CommandRecorder<'_>) {
-        self.validate();
         let shape = self.shape;
         recorder.set_kernel(self.kernel);
         recorder.set_buffer_read(0, self.buffers.qgkv, 0);
@@ -214,13 +215,10 @@ impl Operator for Invocation<'_> {
         recorder.set_buffer_write(2, self.buffers.g, 0);
         recorder.set_buffer_write(3, self.buffers.k, 0);
         recorder.set_buffer_write(4, self.buffers.v, 0);
-        set_replay_u32(
-            recorder,
-            5,
-            self.num_active_tokens,
-            shape.num_total_tokens,
-            "GQA projection-split active token count",
-        );
+        match self.num_active_tokens {
+            ReplayU32::Fixed(value) => recorder.set_u32(5, value),
+            ReplayU32::Parameter(key) => recorder.bind_u32(5, key, 1, shape.num_total_tokens),
+        }
         recorder.dispatch_1d(
             self.constants.config.num_qgkv_slots(shape),
             self.constants.thread_block.required_threads as usize,
@@ -228,21 +226,11 @@ impl Operator for Invocation<'_> {
     }
 }
 
-fn set_replay_u32(recorder: &CommandRecorder<'_>, index: usize, value: ReplayU32, max_value: u32, name: &str) {
-    match value {
-        ReplayU32::Fixed(value) => {
-            assert!(value > 0, "{name} must be positive");
-            assert!(value <= max_value, "{name} exceeds recorded capacity");
-            recorder.set_u32(index, value);
-        },
-        ReplayU32::Parameter(key) => recorder.bind_u32(index, key, 1, max_value),
-    }
-}
-
 impl Invocation<'_> {
     fn validate(&self) {
         let config = self.constants.config;
         self.shape.validate(config);
+        self.num_active_tokens.validate_range(1, self.shape.num_total_tokens);
         assert!(self.buffers.qgkv.len_bytes() >= config.qgkv_bytes(self.shape));
         assert!(self.buffers.q.len_bytes() >= config.q_bytes(self.shape));
         assert!(self.buffers.g.len_bytes() >= config.q_bytes(self.shape));
@@ -264,12 +252,11 @@ mod tests {
     use crate::metal::ReplayParameterKey;
     use crate::metal::ReplayU32;
     use crate::metal::Stream;
-    use crate::test_support::ReplayTestCache;
 
     const NUM_ACTIVE_TOKENS: ReplayParameterKey = ReplayParameterKey::new("test.gqa_qgkv_split.num_active_tokens");
 
     #[test]
-    fn test_replay_bucketing() {
+    fn test_replay_active_counts() {
         const NUM_TOTAL_TOKENS: u32 = 4;
 
         let device = Device::system_default();
@@ -290,8 +277,7 @@ mod tests {
         let k = Buffer::new_zeroed_elements(&device, config.num_kv_slots(shape), Dtype::Float32);
         let v = Buffer::new_zeroed_elements(&device, config.num_kv_slots(shape), Dtype::Float32);
         let compute = Compute::new(&device, config);
-        let mut cache = ReplayTestCache::new();
-        let (_, cache_hit) = cache.record(shape.num_total_tokens, || {
+        let replay = {
             let mut builder = stream.create_replay_program();
             builder.record(compute.invoke(
                 shape,
@@ -305,15 +291,12 @@ mod tests {
                 ReplayU32::Parameter(NUM_ACTIVE_TOKENS),
             ));
             builder.build()
-        });
-        assert!(!cache_hit);
+        };
 
         for num_active_tokens in [1_usize, 4, 3, 2] {
-            let (replay, cache_hit) = cache.record(shape.num_total_tokens, || unreachable!());
-            assert!(cache_hit);
             stream
                 .submit_replay_with_arguments(
-                    replay,
+                    &replay,
                     &ReplayArguments::new().with_u32(NUM_ACTIVE_TOKENS, num_active_tokens as u32),
                 )
                 .wait();

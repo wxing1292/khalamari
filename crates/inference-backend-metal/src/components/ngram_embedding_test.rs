@@ -7,7 +7,6 @@ use super::*;
 use crate::metal::ReplayArguments;
 use crate::metal::ReplayParameterKey;
 use crate::metal::Stream;
-use crate::test_support::ReplayTestCache;
 
 const ACTIVE: ReplayParameterKey = ReplayParameterKey::new("test.ngram.tokens");
 
@@ -159,17 +158,15 @@ fn test_lookup_replay_reuses_capacity_and_topology() {
         let output = Buffer::new_zeroed(&device, expected.len() * 2);
         let boundaries: &[u32] = if groups == 8 { &[257] } else { &[] };
         assert_eq!(&*compute.lookup_topology_boundaries(&shards), boundaries);
-        let mut cache = ReplayTestCache::new();
-        for (total, hit, kind) in [(256, false, h1), (257, false, h4), (512, false, h4), (256, true, h1)] {
-            let topology = compute.lookup_topology(total, &shards);
-            assert_eq!(topology, kind);
-            let (replay, cache_hit) = cache.record((total, topology), || {
-                let mut builder = stream.create_replay_program();
-                builder.record(compute.lookup(total, ReplayU32::Parameter(ACTIVE), &ids, &output, 0.5, &shards));
-                builder.build()
-            });
-            assert_eq!(cache_hit, hit);
-            for active in [1, total, 3, 65, 2] {
+        let replays = [(256, h1), (257, h4), (512, h4)].map(|(total, kind)| {
+            assert_eq!(compute.lookup_topology(total, &shards), kind);
+            let mut builder = stream.create_replay_program();
+            builder.record(compute.lookup(total, ReplayU32::Parameter(ACTIVE), &ids, &output, 0.5, &shards));
+            (total, builder.build())
+        });
+        for index in [0, 1, 2, 0] {
+            let (total, replay) = &replays[index];
+            for active in [1, *total, 3, 65, 2] {
                 stream
                     .submit_replay_with_arguments(replay, &ReplayArguments::new().with_u32(ACTIVE, active))
                     .wait();

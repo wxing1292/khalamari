@@ -17,7 +17,7 @@ void row_gather_impl(
     uint output_row = gid / num_cols;
     uint col = gid - output_row * num_cols;
     uint input_row = row_indices[output_row];
-    output[gid] = input[input_row * num_cols + col];
+    output[gid] = input[ulong(input_row) * num_cols + col];
 }
 
 kernel void row_gather_bf16(

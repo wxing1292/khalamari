@@ -147,7 +147,7 @@ Use these source files as concrete examples:
 ### Backend operator pattern
 
 This generic pattern shows a replay-recorded backend operator at the lowest component boundary. The names are
-placeholders.
+placeholders. Its invocation constructor validates the shape, buffer extents, and shader domain before recording.
 
 ```rust
 pub struct ComponentInvocation<'a> {
@@ -159,9 +159,6 @@ pub struct ComponentInvocation<'a> {
 
 impl Operator for ComponentInvocation<'_> {
     fn record(self, recorder: &CommandRecorder<'_>) {
-        self.shape.validate();
-        validate_buffers(self.shape, &self.buffers);
-
         recorder.set_kernel(&self.kernel.kernel);
         recorder.set_buffer_read(0, self.buffers.input, 0);
         recorder.set_buffer_write(1, self.buffers.output, 0);
@@ -173,7 +170,8 @@ impl Operator for ComponentInvocation<'_> {
 }
 ```
 
-The backend operator validates its invocation buffers and shader domain. It selects kernels and dispatch geometry.
+The backend operator selects kernels and dispatch geometry when it creates the invocation.
+Recording uses that validated selection and declares the submission-time parameter domains.
 It does not own model stage order, request lifecycle, or checkpoint names.
 
 ### Executor component pattern

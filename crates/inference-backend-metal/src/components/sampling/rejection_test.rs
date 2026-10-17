@@ -7,10 +7,9 @@ use crate::metal::Buffer;
 use crate::metal::Device;
 use crate::metal::ReplayArguments;
 use crate::metal::Stream;
-use crate::test_support::ReplayTestCache;
 
 #[test]
-fn test_replay_bucketing() {
+fn test_replay_active_counts() {
     let device = Device::system_default();
     let stream = Stream::new(&device);
     let shape = Shape {
@@ -87,16 +86,7 @@ fn test_replay_bucketing() {
     ];
     let runtime_params = Buffer::from_slice(&device, &runtime_params_values);
     let kernel = Compute::new(&device);
-    let cache_key = (
-        shape.num_total_reqs,
-        shape.num_total_target_distributions,
-        shape.num_total_draft_distributions,
-        shape.top_k,
-        shape.max_target_k,
-        shape.max_draft_k,
-    );
-    let mut cache = ReplayTestCache::new();
-    let (_, cache_hit) = cache.record(cache_key, || {
+    let replay = {
         let mut builder = stream.create_replay_program();
         builder.record(kernel.invoke_replay(
             shape,
@@ -118,8 +108,7 @@ fn test_replay_bucketing() {
             },
         ));
         builder.build()
-    });
-    assert!(!cache_hit);
+    };
 
     let expected = [
         rejection_sample_reference(
@@ -189,9 +178,7 @@ fn test_replay_bucketing() {
             }
         }
     };
-    let mut submit = |num_active_reqs: usize| {
-        let (replay, cache_hit) = cache.record(cache_key, || unreachable!());
-        assert!(cache_hit);
+    let submit = |num_active_reqs: usize| {
         let mut arguments = ReplayArguments::new();
         kernel.add_replay_arguments(
             shape,
@@ -200,7 +187,7 @@ fn test_replay_bucketing() {
             cu_draft_values[num_active_reqs],
             &mut arguments,
         );
-        stream.submit_replay_with_arguments(replay, &arguments).wait();
+        stream.submit_replay_with_arguments(&replay, &arguments).wait();
     };
 
     for num_active_reqs in [1_usize, 4, 3, 2] {

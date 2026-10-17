@@ -108,7 +108,6 @@ impl Shape {
     }
 
     fn num_total_tokens(self) -> u32 {
-        self.validate();
         self.num_total_query_blocks * self.query_block_size
     }
 }
@@ -157,13 +156,15 @@ impl Compute {
         side: Side,
         buffers: Buffers<'a>,
     ) -> Invocation<'a> {
-        Invocation {
+        let invocation = Invocation {
             compute: self,
             shape,
             num_active_query_blocks,
             side,
             buffers,
-        }
+        };
+        invocation.validate();
+        invocation
     }
 }
 
@@ -177,7 +178,6 @@ pub struct Invocation<'a> {
 
 impl Operator for Invocation<'_> {
     fn record(self, recorder: &CommandRecorder<'_>) {
-        self.validate();
         let config = self.compute.config;
         recorder.set_kernel(&self.compute.kernel);
         recorder.set_buffer_read(0, self.buffers.hidden, 0);
@@ -185,10 +185,7 @@ impl Operator for Invocation<'_> {
         recorder.set_buffer_read(2, self.buffers.base, 0);
         recorder.set_buffer_write(3, self.buffers.output, 0);
         match self.num_active_query_blocks {
-            ReplayU32::Fixed(value) => {
-                assert_eq!(value, self.shape.num_total_query_blocks);
-                recorder.set_u32(4, value);
-            },
+            ReplayU32::Fixed(value) => recorder.set_u32(4, value),
             ReplayU32::Parameter(key) => {
                 recorder.bind_u32(4, key, 1, self.shape.num_total_query_blocks);
             },
@@ -205,9 +202,10 @@ impl Operator for Invocation<'_> {
 
 impl Invocation<'_> {
     fn validate(&self) {
-        self.compute.config.validate();
-        self.shape.validate();
         let config = self.compute.config;
+        if let ReplayU32::Fixed(value) = self.num_active_query_blocks {
+            assert_eq!(value, self.shape.num_total_query_blocks);
+        }
         assert!(self.buffers.hidden.len_bytes() >= config.hidden_bytes(self.shape));
         assert!(self.buffers.projected_coefficients.len_bytes() >= config.projected_coefficients_bytes(self.shape));
         assert_eq!(self.buffers.base.len_bytes(), config.base_bytes());
@@ -235,7 +233,6 @@ mod tests {
     use crate::metal::ReplayArguments;
     use crate::metal::ReplayParameterKey;
     use crate::metal::Stream;
-    use crate::test_support::ReplayTestCache;
 
     const TEST_NUM_ACTIVE_QUERY_BLOCKS: ReplayParameterKey =
         ReplayParameterKey::new("test.dynamic_grouped_conv.num_active_query_blocks");
@@ -277,9 +274,7 @@ mod tests {
         let compute = Compute::new(&device, config);
 
         for side in [Side::Prepare, Side::Finish] {
-            let mut cache = ReplayTestCache::new();
-            let cache_key = shape.num_total_query_blocks;
-            let (_, cache_hit) = cache.record(cache_key, || {
+            let replay = {
                 let mut builder = stream.create_replay_program();
                 builder.record(compute.invoke(
                     shape,
@@ -293,13 +288,10 @@ mod tests {
                     },
                 ));
                 builder.build()
-            });
-            assert!(!cache_hit);
+            };
             for &num_active_query_blocks in active_query_block_counts {
-                let (replay, cache_hit) = cache.record(cache_key, || unreachable!());
-                assert!(cache_hit);
                 let arguments = ReplayArguments::new().with_u32(TEST_NUM_ACTIVE_QUERY_BLOCKS, num_active_query_blocks);
-                stream.submit_replay_with_arguments(replay, &arguments).wait();
+                stream.submit_replay_with_arguments(&replay, &arguments).wait();
 
                 let expected = reference(
                     config,

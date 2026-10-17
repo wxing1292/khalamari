@@ -222,6 +222,9 @@ GatedMoEInput
 
 `GatedMoE::record(...)` selects the token-major or expert-major path from `num_total_tokens`.
 It records all dispatch grids and validates all buffers at this total capacity.
+The routing, layout, pack, combine, and scatter leaves validate buffer lengths when they create an invocation.
+The affine leaves own input, output, weight, index, and scratch range checks for sparse MLP stages.
+These checks run before command recording. Cached submissions do not repeat them.
 `ReplayU32::Fixed(value)` requires `value == num_total_tokens`. `ReplayU32::Parameter(key)` supplies active work at
 submission. The submitted value must be in `[1, num_total_tokens]`.
 
@@ -799,7 +802,7 @@ expert-major execution.
 Changing the selector is a Metal backend performance change.
 Recommendation: Justify that change with full MoE wrapper numbers, not only isolated sparse MLP kernel timings.
 
-Focused leaf tests record one total capacity into an isolated test cache.
+Focused backend leaf tests record one replay at a fixed total capacity.
 They replay all legal active-token counts in non-monotonic order and compare the active logical domain with CPU
 references.
 The routing test covers normalized and non-normalized top-k probabilities, including 512 experts with top-10 and top-17.

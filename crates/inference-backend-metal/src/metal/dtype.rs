@@ -49,7 +49,6 @@ macro_rules! impl_buffer_element {
     };
 }
 
-impl_buffer_element!(bool, Dtype::Bool);
 impl_buffer_element!(u8, Dtype::Uint8);
 impl_buffer_element!(u16, Dtype::Uint16);
 impl_buffer_element!(u32, Dtype::Uint32);

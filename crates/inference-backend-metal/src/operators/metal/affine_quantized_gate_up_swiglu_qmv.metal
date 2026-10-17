@@ -26,8 +26,8 @@ METAL_FUNC void qmv_impl(
   thread U x_thread[values_per_thread];
   thread U result[results_per_simdgroup] = {0};
 
-  const int in_vec_size_w = in_vec_size * bytes_per_pack / pack_factor;
-  const int in_vec_size_g = in_vec_size / group_size;
+  const ulong in_vec_size_w = ulong(in_vec_size) * bytes_per_pack / pack_factor;
+  const ulong in_vec_size_g = ulong(in_vec_size) / group_size;
   const int out_row = column_group * (num_simdgroups * results_per_simdgroup) +
       simd_gid * results_per_simdgroup;
 
@@ -122,8 +122,8 @@ METAL_FUNC void qmv_gate_up_swiglu(
   thread U gate_result[results_per_simdgroup] = {0};
   thread U up_result[results_per_simdgroup] = {0};
 
-  const int in_vec_size_w = in_vec_size * bytes_per_pack / pack_factor;
-  const int in_vec_size_g = in_vec_size / group_size;
+  const ulong in_vec_size_w = ulong(in_vec_size) * bytes_per_pack / pack_factor;
+  const ulong in_vec_size_g = ulong(in_vec_size) / group_size;
   const int out_row = column_group * (num_simdgroups * results_per_simdgroup) +
       simd_gid * results_per_simdgroup;
 
@@ -213,9 +213,9 @@ dense_gate_up_swiglu(const device uint32_t *w [[buffer(0)]], const device T *sca
                      const constant int &in_vec_size [[buffer(5)]], const constant int &out_vec_size [[buffer(6)]],
                      uint3 tid [[threadgroup_position_in_grid]], uint simd_gid [[simdgroup_index_in_threadgroup]],
                      uint simd_lid [[thread_index_in_simdgroup]]) {
-  const int in_vec_size_w = in_vec_size * (bits == 3 || bits == 6 ? 3 : 4) /
+  const ulong in_vec_size_w = ulong(in_vec_size) * (bits == 3 || bits == 6 ? 3 : 4) /
       (bits == 3 ? 8 : bits == 6 ? 4 : 32 / bits);
-  const int in_vec_size_g = in_vec_size / group_size;
+  const ulong in_vec_size_g = ulong(in_vec_size) / group_size;
   const device uint32_t* gate_w = w;
   const device uint32_t* up_w = (const device uint32_t*)((const device uint8_t*)w + out_vec_size * in_vec_size_w);
   const device T* gate_scales = scales;
@@ -229,8 +229,8 @@ dense_gate_up_swiglu(const device uint32_t *w [[buffer(0)]], const device T *sca
       up_w,
       up_scales,
       up_biases,
-      x + tid.x * in_vec_size,
-      y + tid.x * out_vec_size,
+      x + ulong(tid.x) * in_vec_size,
+      y + ulong(tid.x) * out_vec_size,
       in_vec_size,
       out_vec_size,
       tid.y,
@@ -260,8 +260,8 @@ template <typename T, const int group_size, const int bits>
       up_w,
       up_scales,
       up_biases,
-      x + tid.x * in_vec_size,
-      y + tid.x * out_vec_size,
+      x + ulong(tid.x) * in_vec_size,
+      y + ulong(tid.x) * out_vec_size,
       in_vec_size,
       out_vec_size,
       tid.y,
@@ -293,11 +293,11 @@ template <typename T, const int group_size, const int bits>
   if (expert >= uint(num_experts)) {
     return;
   }
-  const int in_vec_size_w = in_vec_size * (bits == 3 || bits == 6 ? 3 : 4) /
+  const ulong in_vec_size_w = ulong(in_vec_size) * (bits == 3 || bits == 6 ? 3 : 4) /
       (bits == 3 ? 8 : bits == 6 ? 4 : 32 / bits);
-  const int in_vec_size_g = in_vec_size / group_size;
-  const int expert_weight_stride = out_vec_size * in_vec_size_w;
-  const int expert_affine_stride = out_vec_size * in_vec_size_g;
+  const ulong in_vec_size_g = ulong(in_vec_size) / group_size;
+  const ulong expert_weight_stride = out_vec_size * in_vec_size_w;
+  const ulong expert_affine_stride = out_vec_size * in_vec_size_g;
   qmv_gate_up_swiglu<T, group_size, bits>(
       (const device uint32_t*)((const device uint8_t*)gate_w + expert * expert_weight_stride),
       gate_scales + expert * expert_affine_stride,
@@ -305,8 +305,8 @@ template <typename T, const int group_size, const int bits>
       (const device uint32_t*)((const device uint8_t*)up_w + expert * expert_weight_stride),
       up_scales + expert * expert_affine_stride,
       up_biases + expert * expert_affine_stride,
-      x + input_row * in_vec_size,
-      y + route * out_vec_size,
+      x + ulong(input_row) * in_vec_size,
+      y + ulong(route) * out_vec_size,
       in_vec_size,
       out_vec_size,
       tid.y,
@@ -344,11 +344,11 @@ template <typename T, const int group_size, const int bits>
   if (expert >= uint(num_experts)) {
     return;
   }
-  const int in_vec_size_w = in_vec_size * (bits == 3 || bits == 6 ? 3 : 4) /
+  const ulong in_vec_size_w = ulong(in_vec_size) * (bits == 3 || bits == 6 ? 3 : 4) /
       (bits == 3 ? 8 : bits == 6 ? 4 : 32 / bits);
-  const int in_vec_size_g = in_vec_size / group_size;
-  const int expert_weight_stride = out_vec_size * in_vec_size_w;
-  const int expert_affine_stride = out_vec_size * in_vec_size_g;
+  const ulong in_vec_size_g = ulong(in_vec_size) / group_size;
+  const ulong expert_weight_stride = out_vec_size * in_vec_size_w;
+  const ulong expert_affine_stride = out_vec_size * in_vec_size_g;
   qmv_gate_up_swiglu<T, group_size, bits>(
       (const device uint32_t*)((const device uint8_t*)gate_w + expert * expert_weight_stride),
       gate_scales + expert * expert_affine_stride,
@@ -356,8 +356,8 @@ template <typename T, const int group_size, const int bits>
       (const device uint32_t*)((const device uint8_t*)up_w + expert * expert_weight_stride),
       up_scales + expert * expert_affine_stride,
       up_biases + expert * expert_affine_stride,
-      x + input_row * in_vec_size,
-      y + route * out_vec_size,
+      x + ulong(input_row) * in_vec_size,
+      y + ulong(route) * out_vec_size,
       in_vec_size,
       out_vec_size,
       tid.y,

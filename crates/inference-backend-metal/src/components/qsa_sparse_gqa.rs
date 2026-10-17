@@ -242,7 +242,7 @@ impl Compute {
         num_active_sparse_queries: crate::metal::ReplayU32,
         page_table_index: crate::metal::ReplayU32,
     ) -> MapInvocation<'a> {
-        MapInvocation {
+        let invocation = MapInvocation {
             pipeline: self.map.as_raw_retained(),
             config: self.config,
             shape: self.shape,
@@ -250,7 +250,9 @@ impl Compute {
             buffers,
             num_active_sparse_queries,
             page_table_index,
-        }
+        };
+        invocation.validate();
+        invocation
     }
 }
 
@@ -266,7 +268,6 @@ pub struct MapInvocation<'a> {
 
 impl Operator for MapInvocation<'_> {
     fn record(self, recorder: &CommandRecorder<'_>) {
-        self.validate();
         let layout = self.config.page_table_layout;
         recorder.set_retained_pipeline_state(&self.pipeline);
         recorder.set_buffer_read(0, self.buffers.q, 0);
@@ -287,16 +288,8 @@ impl Operator for MapInvocation<'_> {
                 self.num_active_sparse_queries,
                 0,
                 self.shape.num_total_sparse_queries,
-                "QSA active sparse query count",
             );
-            set_replay_u32_min(
-                recorder,
-                9,
-                self.page_table_index,
-                0,
-                layout.num_gqa_layers - 1,
-                "QSA page-table layer index",
-            );
+            set_replay_u32_min(recorder, 9, self.page_table_index, 0, layout.num_gqa_layers - 1);
         } else {
             let MapDestination::Partials {
                 exp_sums,
@@ -315,16 +308,8 @@ impl Operator for MapInvocation<'_> {
                 self.num_active_sparse_queries,
                 0,
                 self.shape.num_total_sparse_queries,
-                "QSA active sparse query count",
             );
-            set_replay_u32_min(
-                recorder,
-                11,
-                self.page_table_index,
-                0,
-                layout.num_gqa_layers - 1,
-                "QSA page-table layer index",
-            );
+            set_replay_u32_min(recorder, 11, self.page_table_index, 0, layout.num_gqa_layers - 1);
         }
         recorder.dispatch_threadblocks(
             (
@@ -341,6 +326,10 @@ impl MapInvocation<'_> {
     fn validate(&self) {
         let config = self.config;
         let shape = self.shape;
+        self.num_active_sparse_queries
+            .validate_range(0, shape.num_total_sparse_queries);
+        self.page_table_index
+            .validate_range(0, config.page_table_layout.num_gqa_layers - 1);
         let tasks = shape.num_total_map_tasks(self.kind.num_splits());
         let require = |buffer: &Buffer, bytes: usize, name: &str| {
             assert!(buffer.len_bytes() >= bytes, "QSA sparse {name} buffer is too small");
@@ -404,14 +393,9 @@ fn set_replay_u32_min(
     value: crate::metal::ReplayU32,
     min_value: u32,
     max_value: u32,
-    name: &str,
 ) {
     match value {
-        crate::metal::ReplayU32::Fixed(value) => {
-            assert!(value >= min_value, "{name} is below its minimum");
-            assert!(value <= max_value, "{name} exceeds recorded capacity");
-            recorder.set_u32(index, value);
-        },
+        crate::metal::ReplayU32::Fixed(value) => recorder.set_u32(index, value),
         crate::metal::ReplayU32::Parameter(key) => recorder.bind_u32(index, key, min_value, max_value),
     }
 }

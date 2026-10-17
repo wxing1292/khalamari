@@ -8,14 +8,12 @@ use crate::metal::ReplayArguments;
 use crate::metal::ReplayParameterKey;
 use crate::metal::ReplayProgram;
 use crate::metal::Stream;
-use crate::test_support::ReplayTestCache;
 
 const NUM_ACTIVE_TOKENS: ReplayParameterKey = ReplayParameterKey::new("test.moe.routing.num_active_tokens");
 const ACTIVE_SEQUENCE: [u32; 8] = [1, 8, 3, 7, 2, 6, 4, 5];
 
 #[test]
 fn test_replay_matches_reference_across_active_counts_and_normalization_modes() {
-    let mut cache = ReplayTestCache::new();
     for (num_experts, num_experts_per_token) in [(8, 3), (256, 16), (257, 1), (511, 10), (512, 10), (512, 17), (33, 33)]
     {
         for norm_topk_prob in [false, true] {
@@ -24,19 +22,10 @@ fn test_replay_matches_reference_across_active_counts_and_normalization_modes() 
                 num_experts_per_token,
                 norm_topk_prob,
             });
-            let key = (
-                fixture.shape.num_total_tokens,
-                num_experts,
-                num_experts_per_token,
-                norm_topk_prob,
-            );
-            let (_, cache_hit) = cache.record(key, || fixture.replay());
-            assert!(!cache_hit);
+            let replay = fixture.replay();
             for (case_index, num_active_tokens) in ACTIVE_SEQUENCE.into_iter().enumerate() {
                 let probs = fixture.write_probs(0x5A17_920B_u32.wrapping_add(case_index as u32));
-                let (replay, cache_hit) = cache.record(key, || unreachable!());
-                assert!(cache_hit);
-                fixture.submit(replay, num_active_tokens);
+                fixture.submit(&replay, num_active_tokens);
                 fixture.assert_active_output(&probs, num_active_tokens);
             }
         }

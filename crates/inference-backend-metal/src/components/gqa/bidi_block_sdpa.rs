@@ -232,13 +232,15 @@ impl Compute {
         num_active_q_token_ranges: ReplayU32,
         buffers: Buffers<'a>,
     ) -> Invocation<'a> {
-        Invocation {
+        let invocation = Invocation {
             constants: self.constants,
             kernel: &self.kernel,
             shape,
             num_active_q_token_ranges,
             buffers,
-        }
+        };
+        invocation.validate();
+        invocation
     }
 }
 
@@ -270,7 +272,6 @@ pub struct Invocation<'a> {
 
 impl Operator for Invocation<'_> {
     fn record(self, recorder: &CommandRecorder<'_>) {
-        self.validate();
         let config = self.constants.config;
         recorder.set_kernel(self.kernel);
         recorder.set_buffer_read(0, self.buffers.q, 0);
@@ -282,10 +283,7 @@ impl Operator for Invocation<'_> {
         recorder.set_buffer_write(6, self.buffers.partial_max_logits, 0);
         recorder.set_buffer_write(7, self.buffers.partial_output, 0);
         match self.num_active_q_token_ranges {
-            ReplayU32::Fixed(value) => {
-                assert_eq!(value, self.shape.num_total_q_token_ranges);
-                recorder.set_u32(8, value);
-            },
+            ReplayU32::Fixed(value) => recorder.set_u32(8, value),
             ReplayU32::Parameter(key) => {
                 recorder.bind_u32(8, key, 1, self.shape.num_total_q_token_ranges);
             },
@@ -305,6 +303,9 @@ impl Invocation<'_> {
     fn validate(&self) {
         let config = self.constants.config;
         self.shape.validate(config);
+        if let ReplayU32::Fixed(value) = self.num_active_q_token_ranges {
+            assert_eq!(value, self.shape.num_total_q_token_ranges);
+        }
         assert!(self.buffers.q.len_bytes() >= bytes(config.q_elements(self.shape), config.dtype));
         assert!(self.buffers.local_k.len_bytes() >= bytes(config.kv_elements(self.shape), config.dtype));
         assert!(self.buffers.local_v.len_bytes() >= bytes(config.kv_elements(self.shape), config.dtype));

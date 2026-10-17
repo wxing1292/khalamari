@@ -28,8 +28,8 @@ template <typename T, int group_size, int bits, int D, bool batched>
   thread U x_thread[values_per_thread];
   thread U result[results_per_quadgroup] = {0};
 
-  const int in_vec_size_w = in_vec_size / pack_factor;
-  const int in_vec_size_g = in_vec_size / group_size;
+  const ulong in_vec_size_w = ulong(in_vec_size) / pack_factor;
+  const ulong in_vec_size_g = ulong(in_vec_size) / group_size;
   const int out_row = tid.y * quads_per_simd * results_per_quadgroup + quad_gid;
   if (out_row >= out_vec_size) {
     return;
@@ -38,8 +38,8 @@ template <typename T, int group_size, int bits, int D, bool batched>
   w += out_row * in_vec_size_w + quad_lid * packs_per_thread;
   scales += out_row * in_vec_size_g + quad_lid / scale_step_per_thread;
   biases += out_row * in_vec_size_g + quad_lid / scale_step_per_thread;
-  x += tid.x * in_vec_size + quad_lid * values_per_thread;
-  y += tid.x * out_vec_size + out_row;
+  x += ulong(tid.x) * in_vec_size + quad_lid * values_per_thread;
+  y += ulong(tid.x) * out_vec_size + out_row;
 
   U sum = load_vector<T, U, values_per_thread, bits>(x, x_thread);
 

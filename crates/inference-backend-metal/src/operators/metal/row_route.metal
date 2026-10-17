@@ -20,7 +20,7 @@ void row_route_impl(
     uint col = gid - output_row * num_cols;
     uint2 route = routes[output_row];
     device const T* input = route.x == 0 ? first_input : (route.x == 1 ? second_input : third_input);
-    output[gid] = input[route.y * num_cols + col];
+    output[gid] = input[ulong(route.y) * num_cols + col];
 }
 
 kernel void row_route_bf16(

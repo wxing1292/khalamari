@@ -31,8 +31,20 @@ impl Compute {
         output: &'a Buffer,
     ) -> Invocation<'a> {
         assert!(num_total_tokens > 0);
+        num_active_tokens.validate_range(1, num_total_tokens);
+        // Initialization bounds columns * repeats by u32, so this value count fits u64.
+        let output_bytes = (u64::from(num_total_tokens) * u64::from(self.num_columns) * u64::from(self.num_repeats))
+            .checked_mul(2)
+            .expect("repeat rows output byte length must fit u64");
         let bytes = u64::from(num_total_tokens) * u64::from(self.num_columns) * 2;
-        assert!(input.len_bytes_u64() >= bytes && output.len_bytes_u64() >= bytes * u64::from(self.num_repeats));
+        assert!(input.len_bytes_u64() >= bytes && output.len_bytes_u64() >= output_bytes);
+        if self.num_repeats > 1 {
+            assert_ne!(
+                input.as_raw_ptr(),
+                output.as_raw_ptr(),
+                "repeat rows expansion output must not alias input"
+            );
+        }
         Invocation {
             compute: self,
             num_total_tokens,

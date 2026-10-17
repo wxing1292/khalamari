@@ -142,12 +142,17 @@ impl Compute {
         num_active_requests: ReplayU32,
         buffers: PredecessorIdBuffers<'a>,
     ) -> PredecessorIdInvocation<'a> {
-        PredecessorIdInvocation {
+        if let ReplayU32::Fixed(value) = num_active_requests {
+            assert_eq!(value, shape.num_total_requests);
+        }
+        let invocation = PredecessorIdInvocation {
             compute: self,
             shape,
             num_active_requests,
             buffers,
-        }
+        };
+        invocation.validate();
+        invocation
     }
 
     pub fn invoke_scores<'a>(
@@ -156,12 +161,17 @@ impl Compute {
         num_active_requests: ReplayU32,
         buffers: ScoreBuffers<'a>,
     ) -> ScoreInvocation<'a> {
-        ScoreInvocation {
+        if let ReplayU32::Fixed(value) = num_active_requests {
+            assert_eq!(value, shape.num_total_requests);
+        }
+        let invocation = ScoreInvocation {
             compute: self,
             shape,
             num_active_requests,
             buffers,
-        }
+        };
+        invocation.validate();
+        invocation
     }
 
     pub fn invoke_walk<'a>(
@@ -170,12 +180,17 @@ impl Compute {
         num_active_requests: ReplayU32,
         buffers: WalkBuffers<'a>,
     ) -> WalkInvocation<'a> {
-        WalkInvocation {
+        if let ReplayU32::Fixed(value) = num_active_requests {
+            assert_eq!(value, shape.num_total_requests);
+        }
+        let invocation = WalkInvocation {
             compute: self,
             shape,
             num_active_requests,
             buffers,
-        }
+        };
+        invocation.validate();
+        invocation
     }
 }
 
@@ -202,7 +217,6 @@ pub struct WalkInvocation<'a> {
 
 impl Operator for PredecessorIdInvocation<'_> {
     fn record(self, recorder: &CommandRecorder<'_>) {
-        self.validate();
         recorder.set_kernel(&self.compute.predecessor_ids);
         recorder.set_buffer_read(0, self.buffers.anchor_token_ids, 0);
         recorder.set_buffer_read(1, self.buffers.candidate_token_ids, 0);
@@ -216,8 +230,6 @@ impl Operator for PredecessorIdInvocation<'_> {
 
 impl PredecessorIdInvocation<'_> {
     fn validate(&self) {
-        self.compute.config.validate();
-        self.shape.validate();
         let candidates = self.compute.config.candidate_count(self.shape);
         assert!(self.buffers.anchor_token_ids.len_bytes() >= self.shape.num_total_requests as usize * size_of::<i32>());
         assert!(self.buffers.candidate_token_ids.len_bytes() >= candidates * size_of::<i32>());
@@ -231,7 +243,6 @@ impl PredecessorIdInvocation<'_> {
 
 impl Operator for ScoreInvocation<'_> {
     fn record(self, recorder: &CommandRecorder<'_>) {
-        self.validate();
         recorder.set_kernel(&self.compute.scores);
         recorder.set_buffer_read(0, self.buffers.candidate_logits, 0);
         recorder.set_buffer_read(1, self.buffers.projected_hidden, 0);
@@ -248,8 +259,6 @@ impl Operator for ScoreInvocation<'_> {
 
 impl ScoreInvocation<'_> {
     fn validate(&self) {
-        self.compute.config.validate();
-        self.shape.validate();
         let config = self.compute.config;
         let candidates = config.candidate_count(self.shape);
         assert!(self.buffers.candidate_logits.len_bytes() >= candidates * size_of::<f32>());
@@ -266,7 +275,6 @@ impl ScoreInvocation<'_> {
 
 impl Operator for WalkInvocation<'_> {
     fn record(self, recorder: &CommandRecorder<'_>) {
-        self.validate();
         recorder.set_kernel(&self.compute.walk);
         recorder.set_buffer_read(0, self.buffers.candidate_token_ids, 0);
         recorder.set_buffer_read(1, self.buffers.scores, 0);
@@ -289,8 +297,6 @@ impl Operator for WalkInvocation<'_> {
 
 impl WalkInvocation<'_> {
     fn validate(&self) {
-        self.compute.config.validate();
-        self.shape.validate();
         let config = self.compute.config;
         let proposals = self.shape.proposal_count();
         let candidates = config.candidate_count(self.shape);
@@ -318,10 +324,7 @@ impl WalkInvocation<'_> {
 
 fn bind_active_requests(recorder: &CommandRecorder<'_>, index: usize, shape: Shape, active: ReplayU32) {
     match active {
-        ReplayU32::Fixed(value) => {
-            assert_eq!(value, shape.num_total_requests);
-            recorder.set_u32(index, value);
-        },
+        ReplayU32::Fixed(value) => recorder.set_u32(index, value),
         ReplayU32::Parameter(key) => {
             recorder.bind_u32(index, key, 1, shape.num_total_requests);
         },

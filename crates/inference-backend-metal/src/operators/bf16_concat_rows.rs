@@ -49,7 +49,6 @@ impl Config {
     }
 
     fn validate_num_total_rows(self, num_total_rows: u32) {
-        self.validate();
         assert!(num_total_rows > 0, "bf16 row concat requires num_total_rows > 0");
         u32::try_from(self.output_elements_u64(num_total_rows))
             .expect("bf16 row concat output elements exceeds the shader u32 count domain");
@@ -115,6 +114,11 @@ impl Kernel {
         num_active_rows: ReplayU32,
         buffers: Buffers<'a>,
     ) -> Invocation<'a> {
+        self.constants.config.validate_num_total_rows(num_total_rows);
+        if let ReplayU32::Fixed(value) = num_active_rows {
+            assert_eq!(value, num_total_rows);
+        }
+        validate_buffers(self.constants.config, num_total_rows, buffers);
         Invocation {
             kernel: self,
             num_total_rows,
@@ -135,17 +139,12 @@ impl Operator for Invocation<'_> {
     fn record(self, recorder: &CommandRecorder<'_>) {
         let constants = self.kernel.constants;
         let config = constants.config;
-        config.validate_num_total_rows(self.num_total_rows);
-        validate_buffers(config, self.num_total_rows, self.buffers);
         recorder.set_kernel(&self.kernel.kernel);
         recorder.set_buffer_read(0, self.buffers.lhs, 0);
         recorder.set_buffer_read(1, self.buffers.rhs, 0);
         recorder.set_buffer_write(2, self.buffers.output, 0);
         match self.num_active_rows {
-            ReplayU32::Fixed(value) => {
-                assert_eq!(value, self.num_total_rows);
-                recorder.set_u32(3, value);
-            },
+            ReplayU32::Fixed(value) => recorder.set_u32(3, value),
             ReplayU32::Parameter(key) => recorder.bind_u32(3, key, 1, self.num_total_rows),
         }
         recorder.set_u32(4, config.num_columns);
@@ -200,7 +199,6 @@ mod tests {
     use crate::metal::ReplayArguments;
     use crate::metal::ReplayParameterKey;
     use crate::metal::Stream;
-    use crate::test_support::ReplayTestCache;
 
     const NUM_ACTIVE_ROWS: ReplayParameterKey = ReplayParameterKey::new("test.bf16_concat_rows.num_active_rows");
 
@@ -224,8 +222,7 @@ mod tests {
             Dtype::Bfloat16,
         );
         let kernel = Kernel::new(&device, config);
-        let mut cache = ReplayTestCache::new();
-        let (replay, cache_hit) = cache.record(num_total_rows, || {
+        let replay = {
             let mut recorder = stream.create_replay_program();
             recorder.record(kernel.invoke(
                 num_total_rows,
@@ -237,15 +234,12 @@ mod tests {
                 },
             ));
             recorder.build()
-        });
-        assert!(!cache_hit);
+        };
 
         for num_active_rows in [1_usize, 8, 3, 7, 2, 6, 4, 5] {
-            let (replay, cache_hit) = cache.record(num_total_rows, || unreachable!());
-            assert!(cache_hit);
             stream
                 .submit_replay_with_arguments(
-                    replay,
+                    &replay,
                     &ReplayArguments::new().with_u32(NUM_ACTIVE_ROWS, num_active_rows as u32),
                 )
                 .wait();

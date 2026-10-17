@@ -59,8 +59,8 @@ kernel void gdn_compute_short_conv(
         float x = 0.0f;
         if (sequence_index < 0) {
             const uint state_index = uint(sequence_index + (long)conv_state_len);
-            const uint state_offset = (src_state_slot * qkv_dim + channel_index) * conv_state_len + state_index;
-            x = conv_state[conv_state_base + (ulong)state_offset];
+            const ulong state_offset = (ulong(src_state_slot) * qkv_dim + channel_index) * conv_state_len + state_index;
+            x = conv_state[conv_state_base + state_offset];
         } else {
             const ulong input_offset = (ulong)(flat_token_begin + uint(sequence_index)) * input_qkv_stride + channel_index;
             x = qkv[input_offset];

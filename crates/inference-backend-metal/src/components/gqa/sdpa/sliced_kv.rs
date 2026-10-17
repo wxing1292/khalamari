@@ -361,7 +361,7 @@ impl Compute {
         num_active_tokens: ReplayU32,
         num_active_kv_splits: ReplayU32,
     ) -> MapInvocation<'a> {
-        MapInvocation {
+        let invocation = MapInvocation {
             pipeline: self.map.as_raw_retained(),
             constants: self.constants,
             shape: self.shape,
@@ -369,17 +369,21 @@ impl Compute {
             page_table_index,
             num_active_tokens,
             num_active_kv_splits,
-        }
+        };
+        invocation.validate();
+        invocation
     }
 
     pub fn invoke_reduce<'a>(&self, buffers: ReduceBuffers<'a>, num_active_tokens: ReplayU32) -> ReduceInvocation<'a> {
-        ReduceInvocation {
+        let invocation = ReduceInvocation {
             pipeline: self.reduce.as_raw_retained(),
             constants: self.constants,
             shape: self.shape,
             buffers,
             num_active_tokens,
-        }
+        };
+        invocation.validate();
+        invocation
     }
 }
 
@@ -424,7 +428,7 @@ impl MappedReduce {
         buffers: MappedReduceBuffers<'a>,
         num_active_queries: ReplayU32,
     ) -> MappedReduceInvocation<'a> {
-        MappedReduceInvocation {
+        let invocation = MappedReduceInvocation {
             pipeline: self.reduce.as_raw_retained(),
             config: self.config,
             shape: self.shape,
@@ -432,7 +436,9 @@ impl MappedReduce {
             required_threads: self.required_threads,
             buffers,
             num_active_queries,
-        }
+        };
+        invocation.validate();
+        invocation
     }
 }
 
@@ -450,7 +456,6 @@ impl Operator for MappedReduceInvocation<'_> {
     fn record(self, recorder: &CommandRecorder<'_>) {
         let config = self.config;
         let shape = self.shape;
-        self.validate();
         recorder.set_retained_pipeline_state(&self.pipeline);
         recorder.set_buffer_read(0, self.buffers.partial_exp_sums, 0);
         recorder.set_buffer_read(1, self.buffers.partial_max_logits, 0);
@@ -458,20 +463,14 @@ impl Operator for MappedReduceInvocation<'_> {
         recorder.set_buffer_read(3, self.buffers.cu_sdpa_partial_outputs, 0);
         recorder.set_buffer_read(4, self.buffers.output_query_indices, 0);
         recorder.set_buffer_write(5, self.buffers.output, 0);
-        set_replay_u32_min(
-            recorder,
-            6,
-            self.num_active_queries,
-            0,
-            shape.num_total_tokens,
-            "QSA mapped reducer active query count",
-        );
+        set_replay_u32_min(recorder, 6, self.num_active_queries, 0, shape.num_total_tokens);
         recorder.dispatch_1d(config.num_output_values(shape), self.required_threads as usize);
     }
 }
 
 impl MappedReduceInvocation<'_> {
     fn validate(&self) {
+        self.num_active_queries.validate_range(0, self.shape.num_total_tokens);
         let stats_bytes = self.config.partial_output_stats_bytes(self.shape);
         assert!(self.buffers.partial_exp_sums.len_bytes_u64() >= stats_bytes);
         assert!(self.buffers.partial_max_logits.len_bytes_u64() >= stats_bytes);
@@ -558,7 +557,6 @@ pub struct MapInvocation<'a> {
 
 impl Operator for MapInvocation<'_> {
     fn record(self, recorder: &CommandRecorder<'_>) {
-        self.validate();
         let shape = self.shape;
         recorder.set_retained_pipeline_state(&self.pipeline);
         recorder.set_buffer_read(0, self.buffers.q, 0);
@@ -571,29 +569,16 @@ impl Operator for MapInvocation<'_> {
         recorder.set_buffer_write(7, self.buffers.partial_output, 0);
         let max_page_table_index = self.constants.config.page_table_layout.num_gqa_layers - 1;
         match self.page_table_index {
-            ReplayU32::Fixed(page_table_index) => {
-                assert!(
-                    page_table_index <= max_page_table_index,
-                    "GQA page-table index exceeds layer count"
-                );
-                recorder.set_u32(8, page_table_index);
-            },
+            ReplayU32::Fixed(page_table_index) => recorder.set_u32(8, page_table_index),
             ReplayU32::Parameter(key) => recorder.bind_u32(8, key, 0, max_page_table_index),
         }
-        set_replay_u32(
-            recorder,
-            9,
-            self.num_active_tokens,
-            shape.num_total_tokens,
-            "GQA SplitKV SlicedKv active token count",
-        );
+        set_replay_u32(recorder, 9, self.num_active_tokens, shape.num_total_tokens);
         set_replay_u32_min(
             recorder,
             10,
             self.num_active_kv_splits,
             0,
             shape.num_total_sdpa_map_task_templates,
-            "GQA SplitKV SlicedKv active KV split count",
         );
         recorder.dispatch_threadblocks(
             (
@@ -609,6 +594,11 @@ impl Operator for MapInvocation<'_> {
 impl MapInvocation<'_> {
     fn validate(&self) {
         let config = self.constants.config;
+        self.page_table_index
+            .validate_range(0, config.page_table_layout.num_gqa_layers - 1);
+        self.num_active_tokens.validate_range(1, self.shape.num_total_tokens);
+        self.num_active_kv_splits
+            .validate_range(0, self.shape.num_total_sdpa_map_task_templates);
         assert!(self.buffers.q.len_bytes_u64() >= config.q_bytes(self.shape));
         assert!(self.buffers.kv_pages.len_bytes_u64() >= config.page_bytes as u64);
         assert!(self.buffers.req_slots.len_bytes_u64() >= config.req_slots_bytes(self.shape));
@@ -632,7 +622,6 @@ pub struct ReduceInvocation<'a> {
 
 impl Operator for ReduceInvocation<'_> {
     fn record(self, recorder: &CommandRecorder<'_>) {
-        self.validate();
         let shape = self.shape;
         recorder.set_retained_pipeline_state(&self.pipeline);
         recorder.set_buffer_read(0, self.buffers.partial_exp_sums, 0);
@@ -640,13 +629,7 @@ impl Operator for ReduceInvocation<'_> {
         recorder.set_buffer_read(2, self.buffers.partial_output, 0);
         recorder.set_buffer_read(3, self.buffers.cu_sdpa_partial_outputs, 0);
         recorder.set_buffer_write(4, self.buffers.output, 0);
-        set_replay_u32(
-            recorder,
-            5,
-            self.num_active_tokens,
-            shape.num_total_tokens,
-            "GQA SplitKV SlicedKv active token count",
-        );
+        set_replay_u32(recorder, 5, self.num_active_tokens, shape.num_total_tokens);
         recorder.dispatch_1d(
             self.constants.config.num_output_values(shape),
             self.constants.reduce.thread_block.required_threads as usize,
@@ -654,30 +637,20 @@ impl Operator for ReduceInvocation<'_> {
     }
 }
 
-fn set_replay_u32(recorder: &CommandRecorder<'_>, index: usize, value: ReplayU32, max_value: u32, name: &str) {
-    set_replay_u32_min(recorder, index, value, 1, max_value, name);
+fn set_replay_u32(recorder: &CommandRecorder<'_>, index: usize, value: ReplayU32, max_value: u32) {
+    set_replay_u32_min(recorder, index, value, 1, max_value);
 }
 
-fn set_replay_u32_min(
-    recorder: &CommandRecorder<'_>,
-    index: usize,
-    value: ReplayU32,
-    min_value: u32,
-    max_value: u32,
-    name: &str,
-) {
+fn set_replay_u32_min(recorder: &CommandRecorder<'_>, index: usize, value: ReplayU32, min_value: u32, max_value: u32) {
     match value {
-        ReplayU32::Fixed(value) => {
-            assert!(value >= min_value, "{name} is below its minimum");
-            assert!(value <= max_value, "{name} exceeds recorded capacity");
-            recorder.set_u32(index, value);
-        },
+        ReplayU32::Fixed(value) => recorder.set_u32(index, value),
         ReplayU32::Parameter(key) => recorder.bind_u32(index, key, min_value, max_value),
     }
 }
 
 impl ReduceInvocation<'_> {
     fn validate(&self) {
+        self.num_active_tokens.validate_range(1, self.shape.num_total_tokens);
         let config = self.constants.config;
         assert!(self.buffers.partial_exp_sums.len_bytes_u64() >= config.partial_output_stats_bytes(self.shape));
         assert!(self.buffers.partial_max_logits.len_bytes_u64() >= config.partial_output_stats_bytes(self.shape));

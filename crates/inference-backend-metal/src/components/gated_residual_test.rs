@@ -6,7 +6,6 @@ use super::*;
 use crate::metal::ReplayArguments;
 use crate::metal::ReplayParameterKey;
 use crate::metal::Stream;
-use crate::test_support::ReplayTestCache;
 
 const ACTIVE: ReplayParameterKey = ReplayParameterKey::new("test.gr.num_active_tokens");
 
@@ -27,8 +26,7 @@ fn test_read_write_bucketing() {
         let fixture = Fixture::new(&device, branches, hidden, rank, dtype, 4);
         let output = if in_place { &fixture.residual } else { &fixture.output };
         let shape = Shape { num_total_tokens: 4 };
-        let mut cache = ReplayTestCache::new();
-        let (_, hit) = cache.record(shape, || {
+        let replay = {
             let mut builder = stream.create_replay_program();
             builder.record(fixture.compute.read(
                 shape,
@@ -43,15 +41,12 @@ fn test_read_write_bucketing() {
                 fixture.write_buffers(output),
             ));
             builder.build()
-        });
-        assert!(!hit);
+        };
         for active in [1, 4, 3, 2] {
-            let (replay, hit) = cache.record(shape, || unreachable!());
-            assert!(hit);
             let residual = values(&fixture.residual, active * branches * hidden, dtype);
             let before = values(output, 4 * branches * hidden, dtype);
             stream
-                .submit_replay_with_arguments(replay, &ReplayArguments::new().with_u32(ACTIVE, active as u32))
+                .submit_replay_with_arguments(&replay, &ReplayArguments::new().with_u32(ACTIVE, active as u32))
                 .wait();
             fixture.check(&residual, output, active);
             let after = values(output, 4 * branches * hidden, dtype);
@@ -60,19 +55,6 @@ fn test_read_write_bucketing() {
                 &before[active * branches * hidden..]
             );
         }
-        let second = Shape { num_total_tokens: 2 };
-        let (_, hit) = cache.record(second, || {
-            let mut builder = stream.create_replay_program();
-            builder.record(fixture.compute.read(
-                second,
-                ReplayU32::Fixed(2),
-                fixture.read_buffers(),
-                fixture.scratch(),
-                fixture.weights(),
-            ));
-            builder.build()
-        });
-        assert!(!hit);
     }
 }
 

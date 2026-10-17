@@ -104,6 +104,14 @@ The model initializer passes one shared Metal resource arena to the Audio encode
 The shared Qwen3 executor owns text embedding, decoder execution, unembedding, and sampling.
 The Metal backend owns buffers, kernels, and replay submission.
 
+Backend constructors validate static shader dimensions, including the MLX LayerNorm loop tile.
+Invocation constructors validate dynamic counts, signed coordinates, padded layouts, and attention window ends.
+They also validate bound buffer lengths and byte ranges, including byte offsets, before command recording.
+Conv2D unfold input and output must use separate buffers. Invocation construction rejects aliases.
+Invalid shapes or buffer ranges panic. Command recording and recorded submissions do not repeat these checks.
+Single-row BF16 matmul uses MLX GEMV. Its invocation requires at least four output columns and weight element indices
+that fit `i32`. Multi-row GEMM does not use these GEMV limits.
+
 Runtime core does not decode media and does not parse model-specific metadata.
 The executor does not schedule requests.
 
@@ -218,6 +226,10 @@ destination_hidden_row <- source_resource_embedding
 
 The model-level operation is replacement.
 The Metal kernel can implement the source read as a gather.
+
+`MappingTable` retains the configuration that defines its source and destination byte ranges.
+The invocation constructor must reject a table whose configuration differs from the compute configuration.
+Table construction must bound both dispatch values and mapping ABI indices by the shader `u32` domain.
 
 The Audio Tower output width must equal the Qwen3 text hidden width.
 The executor addresses a source row as:

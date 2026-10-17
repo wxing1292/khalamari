@@ -163,6 +163,8 @@ impl Compute {
         num_active_tokens: ReplayU32,
         buffers: WithoutSharedExpertsBuffers<'a>,
     ) -> WithoutSharedExpertsInvocation<'a> {
+        self.config.validate_shape(shape);
+        validate_without_shared_experts_buffers(self.config, shape, &buffers);
         WithoutSharedExpertsInvocation {
             config: self.config,
             constants: self.constants,
@@ -179,6 +181,8 @@ impl Compute {
         num_active_tokens: ReplayU32,
         buffers: WithSharedExpertsBuffers<'a>,
     ) -> WithSharedExpertsInvocation<'a> {
+        self.config.validate_shape(shape);
+        validate_with_shared_experts_buffers(self.config, shape, &buffers);
         WithSharedExpertsInvocation {
             config: self.config,
             constants: self.constants,
@@ -212,8 +216,6 @@ pub struct WithoutSharedExpertsInvocation<'a> {
 impl Operator for WithoutSharedExpertsInvocation<'_> {
     fn record(self, recorder: &CommandRecorder<'_>) {
         let config = self.config;
-        config.validate_shape(self.shape);
-        debug_validate_without_shared_experts_buffers(config, self.shape, &self.buffers);
         recorder.set_kernel(self.kernel);
         recorder.set_buffer_read(0, self.buffers.routed_hidden, 0);
         recorder.set_buffer_read(1, self.buffers.routed_probs, 0);
@@ -240,8 +242,6 @@ pub struct WithSharedExpertsInvocation<'a> {
 impl Operator for WithSharedExpertsInvocation<'_> {
     fn record(self, recorder: &CommandRecorder<'_>) {
         let config = self.config;
-        config.validate_shape(self.shape);
-        debug_validate_with_shared_experts_buffers(config, self.shape, &self.buffers);
         recorder.set_kernel(self.kernel);
         recorder.set_buffer_read(0, self.buffers.routed_hidden, 0);
         recorder.set_buffer_read(1, self.buffers.routed_probs, 0);
@@ -268,20 +268,6 @@ fn record_num_active_tokens(
         Some(key) => recorder.bind_u32(binding_index, key, 1, num_total_tokens),
         None => recorder.set_u32(binding_index, num_total_tokens),
     }
-}
-
-fn debug_validate_without_shared_experts_buffers(
-    config: Config,
-    shape: Shape,
-    buffers: &WithoutSharedExpertsBuffers<'_>,
-) {
-    #[cfg(debug_assertions)]
-    validate_without_shared_experts_buffers(config, shape, buffers);
-}
-
-fn debug_validate_with_shared_experts_buffers(config: Config, shape: Shape, buffers: &WithSharedExpertsBuffers<'_>) {
-    #[cfg(debug_assertions)]
-    validate_with_shared_experts_buffers(config, shape, buffers);
 }
 
 fn validate_without_shared_experts_buffers(config: Config, shape: Shape, buffers: &WithoutSharedExpertsBuffers<'_>) {

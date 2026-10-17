@@ -64,6 +64,10 @@ impl Shape {
             .num_total_mappings
             .checked_mul(config.hidden_dim)
             .expect("resource embed grid value count must fit the shader u32 domain");
+        let _ = self
+            .num_total_mappings
+            .checked_mul(NUM_U32S_PER_MAPPING as u32)
+            .expect("resource embed mapping index must fit the shader u32 domain");
     }
 
     fn mapping_bytes(self) -> u64 {
@@ -80,6 +84,7 @@ pub struct Mapping {
 }
 
 pub struct MappingTable {
+    config: Config,
     shape: Shape,
     required_resource_arena_bytes: u64,
     required_hidden_bytes: u64,
@@ -129,6 +134,7 @@ impl MappingTable {
             encoded_u32s.push((mapping.source_offset_bytes >> 32) as u32);
         }
         Self {
+            config,
             shape,
             required_resource_arena_bytes,
             required_hidden_bytes,
@@ -175,14 +181,20 @@ impl Compute {
         num_active_mappings: ReplayU32,
         buffers: Buffers<'a>,
     ) -> Invocation<'a> {
-        Invocation {
+        assert_eq!(
+            mappings.config, self.config,
+            "resource embed mapping table configuration must match compute"
+        );
+        let invocation = Invocation {
             compute: self,
             shape: mappings.shape,
             required_resource_arena_bytes: mappings.required_resource_arena_bytes,
             required_hidden_bytes: mappings.required_hidden_bytes,
             num_active_mappings,
             buffers,
-        }
+        };
+        invocation.validate();
+        invocation
     }
 }
 
@@ -197,16 +209,12 @@ pub struct Invocation<'a> {
 
 impl Operator for Invocation<'_> {
     fn record(self, recorder: &CommandRecorder<'_>) {
-        self.validate();
         recorder.set_kernel(&self.compute.kernel);
         recorder.set_buffer_read(0, self.buffers.resource_arena, 0);
         recorder.set_buffer_read(1, self.buffers.mappings, 0);
         recorder.set_buffer_read_write(2, self.buffers.hidden, 0);
         match self.num_active_mappings {
-            ReplayU32::Fixed(value) => {
-                assert!(value > 0 && value <= self.shape.num_total_mappings);
-                recorder.set_u32(3, value);
-            },
+            ReplayU32::Fixed(value) => recorder.set_u32(3, value),
             ReplayU32::Parameter(key) => recorder.bind_u32(3, key, 1, self.shape.num_total_mappings),
         }
         recorder.set_u32(4, self.compute.config.hidden_dim);
@@ -220,7 +228,8 @@ impl Operator for Invocation<'_> {
 
 impl Invocation<'_> {
     fn validate(&self) {
-        self.shape.validate(self.compute.config);
+        self.num_active_mappings
+            .validate_range(1, self.shape.num_total_mappings);
         assert!(self.buffers.resource_arena.len_bytes_u64() >= self.required_resource_arena_bytes);
         assert!(self.buffers.mappings.len_bytes_u64() >= self.shape.mapping_bytes());
         assert!(self.buffers.hidden.len_bytes_u64() >= self.required_hidden_bytes);
