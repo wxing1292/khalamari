@@ -13,7 +13,6 @@ Current behavior and completed designs belong in the [owning documents](README.m
 - Discuss runtime cache-block sizing separately after wiring. Compare the current 2048-token block, 32 KiB physical pages, and QSA four-token groups. The executor owns their mapping.
 - Keep MTP, external speculative acceptance, vision, and SSD offload outside this integration. Define retained QSA carry and PLE history before adding speculation.
 
-
 ## Agent Integration
 
 - Separate turn interruption from session shutdown in the Pi provider. Its `AbortSignal` currently closes the complete generation stream.
@@ -218,9 +217,7 @@ Extend the [existing component matrix](executor_benchmarks.md#component-latency-
 - Isolate one-row/multi-row Qwen3 Main divergence through GQA, dense MLP, and unembedding.
   Keep exact batch-shape reproducibility separate from rejection correctness.
 - Integrate [gated residual](executor_gated_residual.md) through a supported model checkpoint contract.
-- Add gated DSpark attention or new checkpoint variants only from real checkpoint requirements.
   Keep gate-neutral history/block/reducer/scratch contracts; preserve official target layers and proposal layouts.
-- Permit overlapping DSpark batches only after scratch, outputs, replay arguments, and probability stores have bounded in-flight ownership.
 - Compare a DFlash2 ring cache with paged history for ephemeral requests, window overflow, prefix reuse, forks, eviction, and fragmentation.
   Measure retained bytes, page-table work, copies, and E2E latency before changing the owner-local default.
 - Evaluate grouped draft Prefill projections only for a measured bottleneck.

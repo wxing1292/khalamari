@@ -79,7 +79,7 @@ mod tests {
     }
 
     #[test]
-    fn test_split_main_lane_page_ids_writes_independent_main_and_dspark_tables() {
+    fn test_split_main_lane_page_ids_writes_independent_main_and_dflash2_tables() {
         let device = Device::system_default();
         let main = GQARequestPageTable::new(
             &device,
@@ -90,7 +90,7 @@ mod tests {
                 num_page_ids_per_block: 2,
             },
         );
-        let dspark = GQARequestPageTable::new(
+        let dflash2 = GQARequestPageTable::new(
             &device,
             GQAPageTableLayout {
                 num_req_slots: 2,
@@ -100,18 +100,18 @@ mod tests {
             },
         );
         let page_ids = [10, 11, 20, 21, 30, 31, 32];
-        let (main_page_ids, dspark_page_ids) = split_main_lane_page_ids(&page_ids, 4, 3);
+        let (main_page_ids, dflash2_page_ids) = split_main_lane_page_ids(&page_ids, 4, 3);
 
         let (main_page_ids_by_layer, remainder) = main_page_ids.as_chunks::<2>();
         assert!(remainder.is_empty());
         for (layer_index, layer_page_ids) in main_page_ids_by_layer.iter().enumerate() {
             main.write_page_ids(1, layer_index, 2, layer_page_ids);
         }
-        dspark.write_page_ids(1, 0, 2, dspark_page_ids);
+        dflash2.write_page_ids(1, 0, 2, dflash2_page_ids);
 
         assert_eq!(main.read_page_ids(1, 0, 2), vec![10, 11]);
         assert_eq!(main.read_page_ids(1, 1, 2), vec![20, 21]);
-        assert_eq!(dspark.read_page_ids(1, 0, 2), vec![30, 31, 32]);
+        assert_eq!(dflash2.read_page_ids(1, 0, 2), vec![30, 31, 32]);
     }
 
     #[test]

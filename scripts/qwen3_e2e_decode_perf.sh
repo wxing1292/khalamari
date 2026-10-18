@@ -2,7 +2,7 @@
 set -euo pipefail
 
 RUNS=7
-CASES="14b_off,14b_dspark"
+CASES="14b_off"
 TOKENS="256,1024"
 GRPC_PORT=50061
 HTTP_PORT=8000
@@ -24,11 +24,8 @@ CACHE_BLOCK_TOKENS=16
 
 MODEL_ROOT="$HOME/Workspace/models"
 MODEL_DIR=""
-DSPARK_DIR=""
 TOKENIZER_DIR=""
 MODEL_REPO="mlx-community/Qwen3-14B-4bit"
-# No public affine DSpark repo is assumed. Set this only if you have one.
-DSPARK_REPO=""
 
 ACTIVE_SERVER_PID=""
 
@@ -48,27 +45,20 @@ usage() {
     cat <<'USAGE'
 Usage: scripts/qwen3_e2e_decode_perf.sh [options]
 
-Runs Qwen3-14B with DSpark disabled/enabled, one server at a time.
+Runs Qwen3-14B Main-only, one server at a time.
 
 Cases:
   14b_off              Qwen3-14B Main only
-  14b_dspark           Qwen3-14B + affine DSpark with checkpoint-defined block geometry
-                       A missing DSpark checkpoint without a repo is warned and skipped.
 
 Model options:
   --model-root DIR     Default: $HOME/Workspace/models
   --model DIR          Default: MODEL_ROOT/Qwen3-14B-4bit
-  --dspark DIR         Default: MODEL_ROOT/dspark_qwen3_14b_block7-affine
   --tokenizer DIR      Default: Main model directory
   --model-repo REPO    Download source if Main is missing.
                        Default: mlx-community/Qwen3-14B-4bit
-  --dspark-repo REPO   Download source if affine DSpark is missing.
-                       No default is assumed because the official DeepSeek
-                       checkpoint is BF16, while this executor requires a
-                       quantization config.
 
 Benchmark options:
-  --cases LIST         Default: 14b_off,14b_dspark
+  --cases LIST         Default: 14b_off
   --runs N             Default: 7
   --tokens LIST        Default: 256,1024
   --grpc-port N        Default: 50061
@@ -93,13 +83,11 @@ Benchmark options:
 Examples:
   scripts/qwen3_e2e_decode_perf.sh \
     --model-root "$HOME/Workspace/models" \
-    --cases 14b_off,14b_dspark \
+    --cases 14b_off \
     --runs 3
 
   scripts/qwen3_e2e_decode_perf.sh \
     --model "$HOME/Workspace/models/Qwen3-14B-4bit" \
-    --dspark "$HOME/Workspace/models/dspark_qwen3_14b_block7-affine" \
-    --cases 14b_dspark \
     --runs 3
 USAGE
 }
@@ -195,11 +183,6 @@ while (($# > 0)); do
         MODEL_DIR="$2"
         shift 2
         ;;
-    --dspark)
-        need_value "$1" "$#"
-        DSPARK_DIR="$2"
-        shift 2
-        ;;
     --tokenizer)
         need_value "$1" "$#"
         TOKENIZER_DIR="$2"
@@ -208,11 +191,6 @@ while (($# > 0)); do
     --model-repo)
         need_value "$1" "$#"
         MODEL_REPO="$2"
-        shift 2
-        ;;
-    --dspark-repo)
-        need_value "$1" "$#"
-        DSPARK_REPO="$2"
         shift 2
         ;;
     --case-cooldown-secs)
@@ -299,7 +277,6 @@ info | debug) ;;
 esac
 
 MODEL_DIR="${MODEL_DIR:-$MODEL_ROOT/Qwen3-14B-4bit}"
-DSPARK_DIR="${DSPARK_DIR:-$MODEL_ROOT/dspark_qwen3_14b_block7-affine}"
 TOKENIZER_DIR="${TOKENIZER_DIR:-$MODEL_DIR}"
 
 IFS=, read -r -a SELECTED_CASES <<<"$CASES"
@@ -308,11 +285,9 @@ if ((${#SELECTED_CASES[@]} == 0)); then
     exit 2
 fi
 
-NEED_DSPARK=0
 for case_name in "${SELECTED_CASES[@]}"; do
     case "$case_name" in
     14b_off) ;;
-    14b_dspark) NEED_DSPARK=1 ;;
     *)
         echo "unknown case: $case_name" >&2
         exit 2
@@ -398,10 +373,6 @@ ensure_checkpoint() {
 
     if [[ -z "$repo" ]]; then
         echo "$label checkpoint is missing: $dir" >&2
-        if [[ "$label" == "DSpark" ]]; then
-            echo "Pass --dspark DIR, or pass --dspark-repo REPO for an affine checkpoint." >&2
-            echo "Do not place deepseek-ai/dspark_qwen3_14b_block7 directly in the -affine directory; it is BF16." >&2
-        fi
         exit 1
     fi
 
@@ -412,76 +383,9 @@ ensure_checkpoint() {
     fi
 }
 
-ensure_optional_checkpoint() {
-    local case_name="$1"
-    local option="$2"
-    local repo="$3"
-    local dir="$4"
 
-    if checkpoint_present "$dir"; then
-        echo "==> Found DSpark checkpoint: $dir"
-        return 0
-    fi
-    if [[ -z "$repo" ]]; then
-        echo "WARNING: skipping $case_name because its checkpoint is missing: $dir" >&2
-        echo "Pass $option DIR or ${option}-repo REPO to enable this case." >&2
-        return 1
-    fi
-    ensure_checkpoint DSpark "$repo" "$dir"
-}
-
-validate_affine_dspark() {
-    DSPARK_DIR="$DSPARK_DIR" python3 - <<'PY'
-import json
-import os
-from pathlib import Path
-
-path = Path(os.environ["DSPARK_DIR"]) / "config.json"
-try:
-    config = json.loads(path.read_text())
-except (OSError, json.JSONDecodeError) as exc:
-    raise SystemExit(f"unable to read {path}: {exc}") from exc
-
-quantization = config.get("quantization_config") or config.get("quantization")
-if not isinstance(quantization, dict):
-    raise SystemExit(
-        f"{path} has no quantization config; use the affine DSpark checkpoint "
-        "(for example, dspark_qwen3_14b_block7-affine)"
-    )
-
-block_size = config.get("block_size")
-if not isinstance(block_size, int) or isinstance(block_size, bool) or block_size < 1:
-    raise SystemExit(f"{path} must have a positive DSpark block_size")
-PY
-}
-
-if ((NEED_DSPARK)); then
-    if ! ensure_optional_checkpoint 14b_dspark --dspark "$DSPARK_REPO" "$DSPARK_DIR"; then
-        NEED_DSPARK=0
-        runnable_cases=()
-        for case_name in "${SELECTED_CASES[@]}"; do
-            [[ "$case_name" == 14b_dspark ]] || runnable_cases+=("$case_name")
-        done
-        if ((${#runnable_cases[@]})); then
-            SELECTED_CASES=("${runnable_cases[@]}")
-        else
-            SELECTED_CASES=()
-        fi
-        if ((${#SELECTED_CASES[@]} == 0)); then
-            echo "WARNING: no runnable cases remain after checkpoint discovery; exiting." >&2
-            exit 0
-        fi
-        CASES="$(
-            IFS=,
-            printf '%s' "${SELECTED_CASES[*]}"
-        )"
-    fi
-fi
 
 ensure_checkpoint "Main" "$MODEL_REPO" "$MODEL_DIR"
-if ((NEED_DSPARK)); then
-    validate_affine_dspark
-fi
 
 if [[ ! -d "$TOKENIZER_DIR" ]]; then
     echo "tokenizer directory does not exist: $TOKENIZER_DIR" >&2
@@ -796,19 +700,6 @@ run_server_case() {
     cleanup_server
 }
 
-run_dspark_case() {
-    run_server_case 14b_dspark \
-        target/release/qwen3 \
-        --grpc-listen-addr "127.0.0.1:${GRPC_PORT}" \
-        --http-listen-addr "127.0.0.1:${HTTP_PORT}" \
-        --hf-model-dir "$MODEL_DIR" \
-        --hf-spec-model-dir "$DSPARK_DIR" \
-        --spec-type dspark \
-        --num-cache-pages "$NUM_CACHE_PAGES" \
-        --max-requests "$MAX_REQUESTS" \
-        --max-tokens "$MAX_TOKENS" \
-        --max-tokens-per-request "$MAX_TOKENS_PER_REQUEST"
-}
 
 run_case() {
     case "$1" in
@@ -823,7 +714,6 @@ run_case() {
             --max-tokens "$MAX_TOKENS" \
             --max-tokens-per-request "$MAX_TOKENS_PER_REQUEST"
         ;;
-    14b_dspark) run_dspark_case ;;
     esac
 }
 
@@ -837,7 +727,7 @@ ARCH="$(uname -m)"
 MACHINE="$(machine_id)"
 PROMPT_SHA256="$(printf '%s' "$PROMPT" | shasum -a 256 | awk '{print $1}')"
 
-echo "CONFIG commit=$GIT_COMMIT dirty=$GIT_DIRTY machine=$MACHINE os=$OS_VERSION arch=$ARCH model=$MODEL_DIR dspark=$DSPARK_DIR tokenizer=$TOKENIZER_DIR cases=$CASES max_new=$TOKENS runs=$RUNS build=$BUILD grpc_port=$GRPC_PORT http_port=$HTTP_PORT num_cache_pages=$NUM_CACHE_PAGES cache_block_tokens=$CACHE_BLOCK_TOKENS max_requests=$MAX_REQUESTS max_tokens=$MAX_TOKENS max_tokens_per_request=$MAX_TOKENS_PER_REQUEST dspark_geometry=checkpoint case_cooldown_secs=$CASE_COOLDOWN_SECS logging=$LOGGING seed=$SEED temperature=$TEMPERATURE top_k=$TOP_K top_p=$TOP_P enable_thinking=1 prompt_sha256=$PROMPT_SHA256 prompt_chars=${#PROMPT}"
+echo "CONFIG commit=$GIT_COMMIT dirty=$GIT_DIRTY machine=$MACHINE os=$OS_VERSION arch=$ARCH model=$MODEL_DIR tokenizer=$TOKENIZER_DIR cases=$CASES max_new=$TOKENS runs=$RUNS build=$BUILD grpc_port=$GRPC_PORT http_port=$HTTP_PORT num_cache_pages=$NUM_CACHE_PAGES cache_block_tokens=$CACHE_BLOCK_TOKENS max_requests=$MAX_REQUESTS max_tokens=$MAX_TOKENS max_tokens_per_request=$MAX_TOKENS_PER_REQUEST case_cooldown_secs=$CASE_COOLDOWN_SECS logging=$LOGGING seed=$SEED temperature=$TEMPERATURE top_k=$TOP_K top_p=$TOP_P enable_thinking=1 prompt_sha256=$PROMPT_SHA256 prompt_chars=${#PROMPT}"
 
 for index in "${!SELECTED_CASES[@]}"; do
     case_name="${SELECTED_CASES[$index]}"

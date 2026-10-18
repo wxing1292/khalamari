@@ -1,5 +1,4 @@
 use std::mem::size_of;
-use std::num::NonZeroUsize;
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -18,9 +17,6 @@ use inference_executor_core::model::qwen::v3_asr::Qwen3ASRModelConfig;
 use inference_executor_core::model::qwen::v3_asr::audio_output_rows;
 use inference_executor_core::model::qwen::v3_asr::init_qwen3_asr_config;
 use inference_executor_core::model::qwen::v3_asr::weight_layout::resolve_qwen3_asr_weight_bindings;
-use inference_executor_core::model::qwen::v3_x::dspark::Qwen3xDSparkConfig;
-use inference_executor_core::model::qwen::v3_x::dspark::Qwen3xDSparkMainConfig;
-use inference_executor_core::model::qwen::v3_x::dspark::init_qwen3x_dspark_config;
 use inference_executor_core::sampling::HFGenerationConfig;
 use inference_executor_core::sampling::MAX_TOP_K;
 use inference_executor_core::sampling::RequestSamplingState;
@@ -31,16 +27,11 @@ use crate::checkpoint::SafeTensorStore;
 use crate::mlp::dense::scratch::DenseMLPScratch;
 use crate::model::embedding::Embed;
 use crate::model::embedding::EmbedConfig;
-use crate::model::main_residual_capture::MainResidualCapture;
 use crate::model::main_resource_embed::MainResourceEmbed;
 use crate::model::page_arena::PageArena;
 use crate::model::qwen::v3::executor::Qwen3Checkpoint;
-use crate::model::qwen::v3::executor::Qwen3DSparkSpeculator;
 use crate::model::qwen::v3::executor::Qwen3Executor;
 use crate::model::qwen::v3::executor::Qwen3PendingTransactions;
-use crate::model::qwen::v3::executor::Qwen3Speculator;
-use crate::model::qwen::v3::executor::Qwen3WeightSource;
-use crate::model::qwen::v3::executor::compact_target_distribution_indices;
 use crate::model::qwen::v3::executor::num_page_ids_per_block;
 use crate::model::qwen::v3::main::Qwen3Main;
 use crate::model::qwen::v3::main::component_config::Qwen3MainConfig;
@@ -51,19 +42,12 @@ use crate::model::qwen::v3::main::layer::Qwen3MainLayerScratch;
 use crate::model::qwen::v3::main::output::Qwen3GatherUnembed;
 use crate::model::qwen::v3::main::text_embed::Qwen3MainTextEmbed;
 use crate::model::qwen::v3_asr::Qwen3ASRAudioProcessor;
-use crate::model::qwen::v3_x::dspark::execution::Qwen3xDSparkExecution;
-use crate::model::qwen::v3_x::dspark::load::Qwen3xDSparkLoadConfig;
-use crate::model::qwen::v3_x::dspark::load::Qwen3xDSparkLoaded;
-use crate::model::qwen::v3_x::dspark::load::load_qwen3x_dspark;
 use crate::model::resource_arena::MetalResourceArena;
 use crate::model::resource_arena::new_resource_arena;
 use crate::model::unembedding::Unembed;
 use crate::model::unembedding::UnembedConfig;
 use crate::replay::Replay;
-use crate::sampling::rejection_replay::RejectionSampler;
-use crate::sampling::rejection_replay::RejectionSampling;
 use crate::sampling::sampling_params::SamplingParamsStore;
-use crate::sampling::spec_probs::SpecProbsStore;
 use crate::sampling::top_k_replay::Sampling;
 use crate::sampling::top_k_sampling::TopKSampling;
 use crate::sampling::top_k_sampling::TopKSamplingOutputBuffers;
@@ -212,22 +196,12 @@ impl Qwen3ModelLayout {
     }
 }
 
-enum Qwen3InitMode<'a> {
+enum Qwen3InitMode {
     Vanilla,
     Asr {
         config: Box<Qwen3ASRModelConfig>,
         resource_arena: Arc<MetalResourceArena>,
     },
-    DSpark {
-        model_dir: &'a Path,
-        config: Box<Qwen3xDSparkConfig>,
-        num_spec_tokens: NonZeroUsize,
-    },
-}
-
-enum Qwen3SpecLoad {
-    Vanilla,
-    DSpark(Box<Qwen3xDSparkLoaded>),
 }
 
 pub fn init_qwen_3_model(
@@ -282,55 +256,15 @@ pub fn init_qwen3_asr_model(
     })
 }
 
-pub fn init_qwen_3_model_with_dspark(
-    model_dir: impl AsRef<Path>,
-    dspark_model_dir: impl AsRef<Path>,
-    num_spec_tokens: NonZeroUsize,
-    config: Qwen3ExecutorConfig,
-) -> Result<Qwen3Executor, ModelExecutorError> {
-    config.validate();
-    let dspark_model_dir = dspark_model_dir.as_ref();
-    let dspark_config = init_qwen3x_dspark_config(dspark_model_dir)?;
-    if num_spec_tokens.get() >= dspark_config.max_position_embeddings {
-        return Err(ModelExecutorError::custom(
-            "DSpark num_spec_tokens must be smaller than max_position_embeddings",
-        ));
-    }
-    init_qwen_3_model_inner(
-        model_dir.as_ref(),
-        Qwen3InitMode::DSpark {
-            model_dir: dspark_model_dir,
-            config: Box::new(dspark_config),
-            num_spec_tokens,
-        },
-        config,
-    )
-}
-
 fn init_qwen_3_model_inner(
     model_dir: &Path,
-    init_mode: Qwen3InitMode<'_>,
+    init_mode: Qwen3InitMode,
     config: Qwen3ExecutorConfig,
 ) -> Result<Qwen3Executor, ModelExecutorError> {
     let checkpoint = match &init_mode {
         Qwen3InitMode::Asr { config, .. } => Qwen3Checkpoint::Asr(config.clone()),
-        Qwen3InitMode::Vanilla | Qwen3InitMode::DSpark { .. } => {
-            Qwen3Checkpoint::Text(init_qwen3_model_config(model_dir)?)
-        },
+        Qwen3InitMode::Vanilla => Qwen3Checkpoint::Text(init_qwen3_model_config(model_dir)?),
     };
-    if let Qwen3InitMode::DSpark {
-        config: dspark_config, ..
-    } = &init_mode
-    {
-        let text = checkpoint.text();
-        dspark_config.validate_main(Qwen3xDSparkMainConfig {
-            hidden_size: text.hidden_size,
-            num_hidden_layers: text.num_hidden_layers,
-            vocab_size: text.vocab_size,
-            max_position_embeddings: text.max_position_embeddings,
-            rope_theta: text.rope_theta,
-        })?;
-    }
     let eos_token_ids = match &checkpoint {
         Qwen3Checkpoint::Text(model_config) => {
             let generation_config = HFGenerationConfig::load(model_dir)?;
@@ -422,21 +356,8 @@ fn init_qwen_3_model_inner(
     let embed = Rc::new(embed);
     let token_hidden_input = Rc::new(Buffer::new_zeroed(&device, layout.hidden_bytes()));
     let hidden_output = Rc::new(Buffer::new_zeroed(&device, layout.hidden_bytes()));
-    let max_spec_tokens = match &init_mode {
-        Qwen3InitMode::Vanilla | Qwen3InitMode::Asr { .. } => 0,
-        Qwen3InitMode::DSpark { num_spec_tokens, .. } => num_spec_tokens.get(),
-    };
-    // Output rows contain one target per draft and one final target per request.
-    // Prefill workspace rows do not require vocabulary projection or sampling.
-    let max_sampling_inputs = config
-        .max_requests
-        .checked_mul(
-            max_spec_tokens
-                .checked_add(1)
-                .expect("qwen3 target rows per request must fit usize"),
-        )
-        .expect("qwen3 sampling row capacity must fit usize")
-        .min(config.max_tokens) as u32;
+    // Only the last token of each request requires vocabulary projection and sampling.
+    let max_sampling_inputs = config.max_requests.min(config.max_tokens) as u32;
     let unembed_config = layout.unembed_config(max_sampling_inputs);
     let mut unembed = Unembed::new(&device, unembed_config);
     match unembed_bindings {
@@ -455,105 +376,13 @@ fn init_qwen_3_model_inner(
         sampler_bounds,
         config.max_requests as u32,
     ));
-    let spec_load = match &init_mode {
-        Qwen3InitMode::Vanilla | Qwen3InitMode::Asr { .. } => Qwen3SpecLoad::Vanilla,
-        Qwen3InitMode::DSpark {
-            model_dir: dspark_model_dir,
-            config: dspark_config,
-            num_spec_tokens,
-        } => {
-            Qwen3SpecLoad::DSpark(Box::new(load_qwen3x_dspark(
-                &device,
-                dspark_model_dir,
-                dspark_config,
-                Qwen3xDSparkLoadConfig {
-                    num_spec_tokens: *num_spec_tokens,
-                    page_size_bytes: QWEN3_PAGE_SIZE_BYTES,
-                    max_position_embeddings: text.max_position_embeddings,
-                    max_requests: config.max_requests,
-                    max_tokens: config.max_tokens,
-                    num_cache_pages: config.num_cache_pages,
-                    num_tokens_per_block: config.num_tokens_per_block,
-                },
-                Rc::clone(&embed),
-                gather_unembed.unembed(),
-                Rc::clone(&sampling_params),
-            )?))
-        },
-    };
-    let residual_capture = match &spec_load {
-        Qwen3SpecLoad::Vanilla => None,
-        Qwen3SpecLoad::DSpark(loaded) => {
-            let capture: Rc<dyn MainResidualCapture> = loaded.model.main_feature_projector();
-            Some(capture)
-        },
-    };
-    let mut main = Qwen3Main::new(
-        &device,
-        main_config,
-        &main_gqa_state,
-        residual_capture,
-        layer_scratch,
-        &dense_scratch,
-    )?;
+    let mut main = Qwen3Main::new(&device, main_config, &main_gqa_state, layer_scratch, &dense_scratch)?;
     main.load_weights(&device, &mut store, text, main_bindings)?;
     drop(store);
 
     let sampler = Rc::new(TopKSampling::new(&device, sampling_params));
-    let (speculator, num_dspark_gqa_page_ids_per_block) = match spec_load {
-        Qwen3SpecLoad::Vanilla => (Qwen3Speculator::Vanilla, 0),
-        Qwen3SpecLoad::DSpark(loaded) => {
-            let execution = Qwen3xDSparkExecution::new(&device, *loaded, config.max_requests, unembed_config);
-            let num_spec_tokens = execution.num_spec_tokens();
-            let num_gqa_page_ids_per_block = execution.num_gqa_page_ids_per_block();
-            let rejector = Rc::new(RejectionSampler::new(
-                &device,
-                num_spec_tokens,
-                config.max_requests,
-                max_sampling_inputs as usize,
-                sampler_bounds.top_k,
-            ));
-            (
-                Qwen3Speculator::DSpark(Box::new(Qwen3DSparkSpeculator {
-                    execution,
-                    rejection_sampling: Replay::new(
-                        "qwen3 rejection sampling",
-                        RejectionSampling::new(Rc::clone(&sampler), rejector),
-                    ),
-                    spec_probs: SpecProbsStore::new(
-                        &device,
-                        num_spec_tokens,
-                        config.max_requests,
-                        max_sampling_inputs as usize,
-                        MAX_TOP_K,
-                    ),
-                    target_distribution_indices: Buffer::from_slice(
-                        &device,
-                        &compact_target_distribution_indices(max_sampling_inputs as usize),
-                    ),
-                })),
-                num_gqa_page_ids_per_block,
-            )
-        },
-    };
-    let num_main_gqa_page_ids_per_block = (gqa_page_table_layout.num_gqa_layers as usize)
-        .checked_mul(gqa_page_table_layout.num_page_ids_per_block as usize)
-        .expect("qwen3 Main page IDs per block must fit usize");
-    let num_gqa_page_ids_per_main_lane_block = num_main_gqa_page_ids_per_block
-        .checked_add(num_dspark_gqa_page_ids_per_block)
-        .expect("Qwen3 Main cache-lane page IDs per block must fit usize");
-    let weight_source = match &init_mode {
-        Qwen3InitMode::Vanilla => Qwen3WeightSource::Vanilla,
-        Qwen3InitMode::Asr { .. } => Qwen3WeightSource::Vanilla,
-        Qwen3InitMode::DSpark { model_dir, config, .. } => {
-            Qwen3WeightSource::DSpark {
-                model_dir: model_dir.to_path_buf(),
-                config: config.clone(),
-            }
-        },
-    };
     let main_resource_embed = match &init_mode {
-        Qwen3InitMode::Vanilla | Qwen3InitMode::DSpark { .. } => None,
+        Qwen3InitMode::Vanilla => None,
         Qwen3InitMode::Asr { resource_arena, .. } => {
             Some(MainResourceEmbed::new(
                 &device,
@@ -573,7 +402,6 @@ fn init_qwen_3_model_inner(
     Ok(Qwen3Executor {
         model_name: model_name.to_string(),
         model_dir: model_dir.to_path_buf(),
-        weight_source,
         checkpoint,
         default_stop_sequences,
         config,
@@ -591,15 +419,12 @@ fn init_qwen_3_model_inner(
         gather_unembed: Replay::new("qwen3 GatherUnembed", gather_unembed),
         sampling: Replay::new("qwen3 sampling", Sampling::new(Rc::clone(&sampler))),
         sampler,
-        sampler_bounds,
         sampler_output: TopKSamplingOutputBuffers::new(&device, sampler_bounds),
         request_sampling: RequestSamplingState::new(config.max_requests),
         main_gqa_state,
-        speculator,
         pages: PageArena::new(&device, config.num_cache_pages, QWEN3_PAGE_SIZE_BYTES),
         pending_transactions: Qwen3PendingTransactions::new(),
         gqa_page_table_layout,
-        num_gqa_page_ids_per_main_lane_block,
         unloaded_embed: None,
         unloaded_unembed: None,
     })

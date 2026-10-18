@@ -18,7 +18,6 @@ use crate::checkpoint::SafeTensorStore;
 use crate::def::replay_op::ReplayOp;
 use crate::def::replay_op::ReplayRecorder;
 use crate::mlp::dense::scratch::DenseMLPScratch;
-use crate::model::main_residual_capture::MainResidualCapture;
 use crate::model::qwen::v3::main::gqa::Qwen3MainGQAState;
 use crate::model::qwen::v3::main::layer::Qwen3MainLayer;
 use crate::model::qwen::v3::main::layer::Qwen3MainLayerInput;
@@ -38,7 +37,6 @@ pub mod component_config;
 pub struct Qwen3Main {
     layers: Vec<Qwen3MainLayer>,
     final_norm: RMSNorm,
-    residual_capture: Option<Rc<dyn MainResidualCapture>>,
 }
 
 #[derive(Clone, Copy)]
@@ -57,7 +55,6 @@ impl Qwen3Main {
         device: &Device,
         config: Qwen3MainConfig<'_>,
         gqa_state: &Qwen3MainGQAState,
-        residual_capture: Option<Rc<dyn MainResidualCapture>>,
         layer_scratch: Rc<Qwen3MainLayerScratch>,
         dense_scratch: &Rc<DenseMLPScratch>,
     ) -> Result<Self, ModelExecutorError> {
@@ -76,7 +73,6 @@ impl Qwen3Main {
         Ok(Self {
             layers,
             final_norm: RMSNorm::new(device, text.hidden_size, text.rms_norm_eps),
-            residual_capture,
         })
     }
 
@@ -111,26 +107,10 @@ impl Qwen3Main {
     }
 
     pub fn unload_weights(&mut self) {
-        assert!(
-            self.residual_capture.is_none(),
-            "qwen3 Main residual capture must be detached before weight unloading"
-        );
         self.final_norm.unload_weights();
         for layer in self.layers.iter_mut().rev() {
             layer.unload_weights();
         }
-    }
-
-    pub fn set_residual_capture(&mut self, residual_capture: Option<Rc<dyn MainResidualCapture>>) {
-        assert!(
-            self.residual_capture.is_none(),
-            "qwen3 Main residual capture is already attached"
-        );
-        self.residual_capture = residual_capture;
-    }
-
-    pub fn unset_residual_capture(&mut self) {
-        self.residual_capture.take();
     }
 
     pub fn unload_state(&mut self) {
@@ -186,10 +166,6 @@ impl Qwen3Main {
                     pages: args.pages,
                     residual_input: hidden,
                     residual_output,
-                    residual_capture_dest: self
-                        .residual_capture
-                        .as_ref()
-                        .and_then(|capture| capture.capture_for_model_layer(layer.layer_index())),
                 },
             );
         }

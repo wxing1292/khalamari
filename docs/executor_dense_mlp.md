@@ -168,7 +168,6 @@ The guards ensure that later stages do not consume or overwrite them.
 Qwen3.5 Main calls this API with the Main stage-owned total token count and active-token value.
 Qwen3.5 MTP calls this API with its separate body stage-owned token capacity and active-token key when the physical MTP
 layer uses dense MLP.
-The DSpark path supplies equal active and total counts.
 
 ## Data flow and backend stages
 

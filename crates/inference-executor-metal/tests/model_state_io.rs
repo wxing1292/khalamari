@@ -9,9 +9,7 @@ use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
 use inference_executor_core::model::ReplayableDecoderModel;
-use inference_executor_core::model::qwen::v3_x::dspark::init_qwen3x_dspark_config;
 use inference_executor_metal::model::qwen::v3_5::executor::Qwen35ExecutorConfig;
-use inference_executor_metal::model::qwen::v3_5::executor::init_qwen_3_5_model_with_dspark;
 use inference_executor_metal::model::qwen::v3_5::executor::init_qwen_3_5_model_with_mtp;
 use inference_runtime_core::compute::BatchDeviceRequest;
 use inference_runtime_core::compute::DecoderSyncBlocks;
@@ -22,10 +20,8 @@ use inference_runtime_core::runtime::Token;
 
 const MODEL_27B_DIR_ENV: &str = "PSI_DEC_MODEL_STATE_IO_TEST_27B_MODEL_DIR";
 const MTP_27B_DIR_ENV: &str = "PSI_DEC_MODEL_STATE_IO_TEST_27B_MTP_MODEL_DIR";
-const DSPARK_27B_DIR_ENV: &str = "PSI_DEC_MODEL_STATE_IO_TEST_27B_DSPARK_MODEL_DIR";
 const MODEL_35B_DIR_ENV: &str = "PSI_DEC_MODEL_STATE_IO_TEST_35B_MODEL_DIR";
 const MTP_35B_DIR_ENV: &str = "PSI_DEC_MODEL_STATE_IO_TEST_35B_MTP_MODEL_DIR";
-const DSPARK_35B_DIR_ENV: &str = "PSI_DEC_MODEL_STATE_IO_TEST_35B_DSPARK_MODEL_DIR";
 const NUM_CACHE_PAGES: usize = 1024;
 const SNAPSHOT_COMPARE_CHUNK_BYTES: usize = 16 * 1024 * 1024;
 
@@ -56,36 +52,6 @@ fn model_state_io_27b_mtp_selected_state_unload_load() {
 }
 
 #[test]
-#[ignore = "requires Qwen3.6 27B Main and DSpark checkpoints and substantial unified memory"]
-fn model_state_io_27b_dspark_full_state_unload_load() {
-    let model = init_qwen_3_5_model_with_dspark(
-        model_dir(MODEL_27B_DIR_ENV),
-        model_dir(DSPARK_27B_DIR_ENV),
-        init_qwen3x_dspark_config(model_dir(DSPARK_27B_DIR_ENV))
-            .unwrap()
-            .num_spec_tokens(),
-        executor_config(),
-    )
-    .expect("Qwen3.6 27B with DSpark must initialize");
-    run_full_state_unload_load(model);
-}
-
-#[test]
-#[ignore = "requires Qwen3.6 27B Main and DSpark checkpoints and substantial unified memory"]
-fn model_state_io_27b_dspark_selected_state_unload_load() {
-    let model = init_qwen_3_5_model_with_dspark(
-        model_dir(MODEL_27B_DIR_ENV),
-        model_dir(DSPARK_27B_DIR_ENV),
-        init_qwen3x_dspark_config(model_dir(DSPARK_27B_DIR_ENV))
-            .unwrap()
-            .num_spec_tokens(),
-        executor_config(),
-    )
-    .expect("Qwen3.6 27B with DSpark must initialize");
-    run_selected_state_unload_load(model);
-}
-
-#[test]
 #[ignore = "requires Qwen3.6 35B Main and MTP checkpoints and substantial unified memory"]
 fn model_state_io_35b_mtp_full_state_unload_load() {
     let model = init_qwen_3_5_model_with_mtp(
@@ -108,36 +74,6 @@ fn model_state_io_35b_mtp_selected_state_unload_load() {
         executor_config(),
     )
     .expect("Qwen3.6 35B with MTP must initialize");
-    run_selected_state_unload_load(model);
-}
-
-#[test]
-#[ignore = "requires Qwen3.6 35B Main and DSpark checkpoints and substantial unified memory"]
-fn model_state_io_35b_dspark_full_state_unload_load() {
-    let model = init_qwen_3_5_model_with_dspark(
-        model_dir(MODEL_35B_DIR_ENV),
-        model_dir(DSPARK_35B_DIR_ENV),
-        init_qwen3x_dspark_config(model_dir(DSPARK_35B_DIR_ENV))
-            .unwrap()
-            .num_spec_tokens(),
-        executor_config(),
-    )
-    .expect("Qwen3.6 35B with DSpark must initialize");
-    run_full_state_unload_load(model);
-}
-
-#[test]
-#[ignore = "requires Qwen3.6 35B Main and DSpark checkpoints and substantial unified memory"]
-fn model_state_io_35b_dspark_selected_state_unload_load() {
-    let model = init_qwen_3_5_model_with_dspark(
-        model_dir(MODEL_35B_DIR_ENV),
-        model_dir(DSPARK_35B_DIR_ENV),
-        init_qwen3x_dspark_config(model_dir(DSPARK_35B_DIR_ENV))
-            .unwrap()
-            .num_spec_tokens(),
-        executor_config(),
-    )
-    .expect("Qwen3.6 35B with DSpark must initialize");
     run_selected_state_unload_load(model);
 }
 

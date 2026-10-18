@@ -12,7 +12,6 @@ impl Qwen3Executor {
             self.config.max_tokens,
             core_batch_req.token_cost()
         );
-        let max_spec_tokens = self.speculator.num_spec_tokens();
         for request in &core_batch_req.dev_reqs {
             assert!(
                 request.decoder_query_tokens.token_consumption() <= self.config.max_tokens_per_request,
@@ -20,18 +19,11 @@ impl Qwen3Executor {
                 request.decoder_query_tokens.token_consumption(),
                 self.config.max_tokens_per_request
             );
-            let num_spec_tokens = request.decoder_query_tokens.num_spec_tokens();
-            if max_spec_tokens == 0 {
-                assert_eq!(
-                    num_spec_tokens, 0,
-                    "qwen3 executor without DSpark does not accept speculative input tokens"
-                );
-            } else {
-                assert!(
-                    num_spec_tokens <= max_spec_tokens,
-                    "qwen3 speculative-token count exceeds the configured DSpark capacity"
-                );
-            }
+            assert_eq!(
+                request.decoder_query_tokens.num_spec_tokens(),
+                0,
+                "qwen3 does not accept speculative input tokens"
+            );
         }
         let max_context_tokens = core_batch_req
             .dev_reqs
@@ -53,17 +45,6 @@ impl Qwen3Executor {
             num_physical_pages,
             page_capacity
         );
-        if self.speculator.is_dspark() {
-            let dspark = &self.speculator.dspark().execution;
-            let num_dspark_pages = max_context_tokens.div_ceil(dspark.num_tokens_per_page());
-            let dspark_page_capacity = dspark.num_physical_pages_per_request();
-            assert!(
-                num_dspark_pages <= dspark_page_capacity,
-                "qwen3 DSpark request context needs {} physical pages but capacity is {}",
-                num_dspark_pages,
-                dspark_page_capacity
-            );
-        }
     }
 
     pub fn model_config(&self) -> &Qwen3ModelConfig {
@@ -81,7 +62,7 @@ impl Qwen3Executor {
     }
 
     pub fn num_spec_tokens(&self) -> usize {
-        self.speculator.num_spec_tokens()
+        0
     }
 
     pub fn num_main_gqa_page_ids_per_block(&self) -> usize {
@@ -93,18 +74,11 @@ impl Qwen3Executor {
     }
 
     pub fn num_kv_page_ids_per_block(&self) -> usize {
-        self.num_gqa_page_ids_per_main_lane_block
+        self.num_main_gqa_page_ids_per_block()
     }
 
     fn prepare_gqa_page_ids(&self, batch: &BatchDeviceRequest) {
         let num_main_gqa_page_ids = self.num_main_gqa_page_ids_per_block();
-        let num_speculator_gqa_page_ids = self.speculator.num_gqa_page_ids_per_main_lane_block();
-        debug_assert_eq!(
-            num_main_gqa_page_ids
-                .checked_add(num_speculator_gqa_page_ids)
-                .expect("qwen3 Main cache-lane page-ID count must fit usize"),
-            self.num_gqa_page_ids_per_main_lane_block
-        );
         for request in &batch.dev_reqs {
             let page_ids_by_block = request
                 .decoder_sync_blocks
@@ -117,12 +91,13 @@ impl Qwen3Executor {
                     .block_index()
                     .checked_add(block_offset)
                     .expect("qwen3 Main cache-block index must fit usize");
-                let (main_page_ids, speculator_page_ids) =
-                    split_main_lane_page_ids(page_ids, num_main_gqa_page_ids, num_speculator_gqa_page_ids);
+                assert_eq!(
+                    page_ids.len(),
+                    num_main_gqa_page_ids,
+                    "Qwen3 Main cache block must contain exactly its Main page IDs"
+                );
                 self.main_gqa_state
-                    .write_page_ids(request.req_slot, block_index, main_page_ids);
-                self.speculator
-                    .write_page_ids(request.req_slot, block_index, speculator_page_ids);
+                    .write_page_ids(request.req_slot, block_index, page_ids);
             }
         }
     }

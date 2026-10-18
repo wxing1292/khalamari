@@ -2,11 +2,9 @@ use std::sync::Arc;
 
 use clap::Parser;
 use inference_executor_core::model::ReplayableDecoderModel;
-use inference_executor_core::model::qwen::v3_x::dspark::init_qwen3x_dspark_config;
 use inference_executor_metal::model::qwen::v3::executor::Qwen3Executor;
 use inference_executor_metal::model::qwen::v3::executor::Qwen3ExecutorConfig;
 use inference_executor_metal::model::qwen::v3::executor::init_qwen_3_model;
-use inference_executor_metal::model::qwen::v3::executor::init_qwen_3_model_with_dspark;
 use inference_runtime_core::Result;
 use inference_runtime_core::config::CacheLaneRuntimeConfig;
 use inference_runtime_core::config::RuntimeConfig;
@@ -18,7 +16,6 @@ use inference_runtime_launcher::args::Qwen3Args;
 use crate::codec::qwen::QwenCodec;
 use crate::executor::ReplayableModelExecutors;
 use crate::qwen_server::config::Qwen3Config;
-use crate::qwen_server::config::Qwen3ModelMode;
 use crate::qwen_server::sizing::block_cache_capacity;
 use crate::qwen_server::sizing::context_window;
 use crate::rpc::HTTPService;
@@ -58,42 +55,12 @@ fn run_inner() -> Result<()> {
         num_cache_pages,
         num_tokens_per_block: TOKENS_PER_CACHE_BLOCK,
     };
-    let model = match config.model_mode() {
-        Qwen3ModelMode::DSpark {
-            model_dir: dspark_model_dir,
-            num_spec_tokens,
-        } => {
-            let num_spec_tokens = match num_spec_tokens {
-                Some(count) => *count,
-                None => {
-                    init_qwen3x_dspark_config(dspark_model_dir)
-                        .map_err(|error| log_err_unavailable!("unable to read DSpark config: {error}"))?
-                        .num_spec_tokens()
-                },
-            };
-            init_qwen_3_model_with_dspark(
-                config.hf_model_dir(),
-                dspark_model_dir,
-                num_spec_tokens,
-                executor_config,
-            )
-            .map_err(|error| {
-                log_err_internal!(
-                    "unable to initialize qwen3 Main model from {:?} with DSpark model from {:?}: {error}",
-                    config.hf_model_dir(),
-                    dspark_model_dir,
-                )
-            })?
-        },
-        Qwen3ModelMode::Vanilla => {
-            init_qwen_3_model(config.hf_model_dir(), executor_config).map_err(|error| {
-                log_err_internal!(
-                    "unable to initialize qwen3 Main model from {:?}: {error}",
-                    config.hf_model_dir()
-                )
-            })?
-        },
-    };
+    let model = init_qwen_3_model(config.hf_model_dir(), executor_config).map_err(|error| {
+        log_err_internal!(
+            "unable to initialize qwen3 Main model from {:?}: {error}",
+            config.hf_model_dir()
+        )
+    })?;
     tracing::info!("model executor initialized");
 
     let runtime_config = build_runtime_config(&config, &model)?;
@@ -145,15 +112,11 @@ fn build_runtime_config(service_config: &Qwen3Config, model: &Qwen3Executor) -> 
     let text = &model_config.text_config;
     let num_pages_per_kv_block = model.num_kv_page_ids_per_block();
     let cache_lane = main_cache_lane(num_cache_pages, num_pages_per_kv_block)?;
-    let dspark_num_spec_tokens = match service_config.model_mode() {
-        Qwen3ModelMode::Vanilla => 0,
-        Qwen3ModelMode::DSpark { .. } => model.num_spec_tokens(),
-    };
     Ok(RuntimeConfig {
         max_running_requests: service_config.max_running_requests(),
         executor_hibernation_timeout: service_config.executor_hibernation_timeout(),
         executor_hibernation_mode: service_config.executor_hibernation_mode(),
-        context_window: context_window(text.max_position_embeddings, dspark_num_spec_tokens)?,
+        context_window: context_window(text.max_position_embeddings, 0)?,
         num_tokens_per_cache_block: TOKENS_PER_CACHE_BLOCK,
         num_pages: num_cache_pages,
         cache_lanes: vec![cache_lane],

@@ -32,7 +32,7 @@ You need these items:
 - Hugging Face CLI with access to the model
 
 Run the commands from the repository root. This example uses Qwen3.8 dense 27B with multi-token prediction (MTP).
-See [other service modes](#other-service-modes) for sparse, DSpark, and DFlash2 examples.
+See [other service modes](#other-service-modes) for sparse, and DFlash2 examples.
 
 ### Download checkpoints
 
@@ -118,52 +118,32 @@ cargo run --release --bin qwen3_5_sparse -- \
   --num-spec-tokens 1
 ```
 
-### DSpark and DFlash2
+### DFlash2
 
-DSpark and DFlash2 support is experimental.
+DFlash2 support is experimental.
 See the [service guide](docs/service.md#binaries-and-checkpoints) for checkpoint and compatibility contracts.
 
-Download the BF16 speculative checkpoints from
-[RadixArk/Qwen3.8-27B-DSpark](https://huggingface.co/RadixArk/Qwen3.8-27B-DSpark) and
+Download the BF16 speculative checkpoint from
 [z-lab/Qwen3.8-27B-DFlash2](https://huggingface.co/z-lab/Qwen3.8-27B-DFlash2):
 
 ```sh
-hf download RadixArk/Qwen3.8-27B-DSpark \
-  --local-dir models/Qwen3.8-27B-DSpark
-
 hf download z-lab/Qwen3.8-27B-DFlash2 \
   --local-dir models/Qwen3.8-27B-DFlash2
 ```
 
-Convert the source checkpoints to the psi-dec affine format:
+Convert the source checkpoint to the psi-dec affine format:
 
 ```sh
-cargo run --release -p inference-executor-core --bin qwen3x_spec_quantize -- dspark \
-  --input-dir "$PWD/models/Qwen3.8-27B-DSpark" \
-  --output-dir "$PWD/models/Qwen3.8-27B-DSpark-affine"
-
 cargo run --release -p inference-executor-core --bin qwen3x_spec_quantize -- dflash2 \
   --input-dir "$PWD/models/Qwen3.8-27B-DFlash2" \
   --output-dir "$PWD/models/Qwen3.8-27B-DFlash2-affine"
 ```
 
 Each output directory must not exist before conversion.
-Both commands use group size 64 and 4-bit matrix payloads by default.
-DSpark uses 8 bits for `markov_head.markov_w2`.
+The command uses group size 64 and 4-bit matrix payloads by default.
 DFlash2 uses 6 bits for the selected layer 2 and layer 4 projections.
-Both formats store affine scales and biases as BF16.
+The format stores affine scales and biases as BF16.
 See the [service guide](docs/service.md) for the full conversion and startup contracts.
-
-Start the dense 27B service with DSpark:
-
-```sh
-cargo run --release --bin qwen3_5_dense -- \
-  --grpc-listen-addr 127.0.0.1:50061 \
-  --http-listen-addr 127.0.0.1:8000 \
-  --hf-model-dir "$PWD/models/Qwen3.8-27B-4bit" \
-  --hf-spec-model-dir "$PWD/models/Qwen3.8-27B-DSpark-affine" \
-  --spec-type dspark
-```
 
 Start the dense 27B service with DFlash2:
 
@@ -207,7 +187,6 @@ The producing profile was Apple M3 Max (40 GPU cores), macOS 27.0, arm64, with a
 | MTP=2     |    39.618 |   30.503 |   154.959 |  128.282 |
 | MTP=3     |    38.399 |   22.353 |   163.067 |  117.661 |
 | MTP=4     |    36.361 |   18.693 |   148.795 |  105.720 |
-| DSpark=7  |    43.603 |   15.790 |         — |        — |
 | DFlash2=7 |    47.769 |   21.303 |         — |        — |
 
 The historical source was `d6dc5da7`, before history cleanup.
@@ -228,7 +207,7 @@ inference-runtime-launcher  Qwen CLI and const-specialized worker builds
 inference-runtime-core      scheduling, lifecycle, and cache ownership
 inference-runtime-service   inference API, RPC, codecs, and model services
 inference-executor-core     backend-neutral model/component contracts
-inference-executor-metal    Qwen execution, replay, sampling, MTP, DSpark, and DFlash2
+inference-executor-metal    Qwen execution, replay, sampling, MTP and DFlash2
 inference-backend-metal     Metal resources, kernels, and ICB runtime
 ```
 
@@ -240,8 +219,7 @@ All paths above live under `crates/`.
 - [Pi provider](agent-plugins/pi/README.md): Install and configure the resident-session Pi extension.
 - [Runtime core](docs/core.md): Scheduling, request lifecycle, and cache ownership.
 - [Executor](docs/executor.md): Qwen execution and component composition.
-- [Qwen executor](docs/executor_qwen.md): Vanilla, MTP, DSpark, and DFlash2 ownership and replay architecture.
-- [DSpark](docs/dspark_design.md): Fixed-block attention, Markov sampling, state, and lifecycle.
+- [Qwen executor](docs/executor_qwen.md): Vanilla, MTP and DFlash2 ownership and replay architecture.
 - [DFlash2](docs/dflash2_design.md): Persistent history, sliding attention, convolution, selection, and lifecycle.
 - [Metal backend](crates/inference-backend-metal/README.md): Resources, kernels, and replay.
 - [Verification](docs/executor_benchmarks.md): Correctness, benchmarks, profiling, and performance evidence.

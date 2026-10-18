@@ -718,8 +718,8 @@ mod api_test_vanilla;
 mod api_test_w_mtp;
 
 #[cfg(test)]
-#[path = "./api_test_w_dspark.rs"]
-mod api_test_w_dspark;
+#[path = "./api_test_single_lane.rs"]
+mod api_test_single_lane;
 
 #[cfg(test)]
 #[path = "./api_test_resource.rs"]

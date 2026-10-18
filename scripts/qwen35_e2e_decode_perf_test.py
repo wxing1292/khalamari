@@ -51,7 +51,7 @@ class PerfScriptTest(unittest.TestCase):
         expected += [
             f"{model}_{mode}"
             for model in ("27b", "35b")
-            for mode in ("dspark", "dflash2")
+            for mode in ("dflash2",)
         ]
         self.assertEqual(self.cases(default), expected)
 
@@ -63,9 +63,9 @@ class PerfScriptTest(unittest.TestCase):
             self.assertEqual(
                 self.cases(f"{model}_on"),
                 [f"{model}_mtp{k}" for k in range(1, 5)]
-                + [f"{model}_dspark", f"{model}_dflash2"],
+                + [f"{model}_dflash2"],
             )
-            for mode in ("dspark", "dflash2"):
+            for mode in ("dflash2",):
                 sweep = [f"{model}_{mode}_k{k}" for k in (1, 2, 3, 4, 8)]
                 self.assertEqual(self.cases(",".join(sweep)), sweep)
                 self.assertEqual(
@@ -86,7 +86,7 @@ class PerfScriptTest(unittest.TestCase):
         with self.assertRaises(subprocess.CalledProcessError):
             self.cases("27b_mtp5")
 
-    def launch(self, case, dspark, dflash2):
+    def launch(self, case, dflash2):
         functions = "\n".join(
             function(name)
             for name in ("run_mtp_case", "run_block_spec_case", "run_named_case")
@@ -105,8 +105,6 @@ class PerfScriptTest(unittest.TestCase):
                 MODEL_35B="main",
                 MTP_27B="mtp",
                 MTP_35B="mtp",
-                DSPARK_27B=dspark,
-                DSPARK_35B=dspark,
                 DFLASH2_27B=dflash2,
                 DFLASH2_35B=dflash2,
             )
@@ -114,20 +112,18 @@ class PerfScriptTest(unittest.TestCase):
 
     def test_checkpoint_defaults_and_explicit_counts_reach_server(self):
         with tempfile.TemporaryDirectory() as directory:
-            dspark, dflash2 = (Path(directory) / mode for mode in ("dspark", "dflash2"))
-            dspark.mkdir()
+            dflash2 = Path(directory) / "dflash2"
             dflash2.mkdir()
-            (dspark / "config.json").write_text(json.dumps({"block_size": 3}))
             (dflash2 / "config.json").write_text(
                 json.dumps({"dflash_config": {"block_size": 4}})
             )
             for model in ("27b", "35b"):
-                for mode in ("dspark", "dflash2"):
+                for mode in ("dflash2",):
                     for suffix, k in [("", 3)] + [
                         (f"_k{k}", k) for k in (1, 2, 3, 4, 8)
                     ]:
                         args = self.launch(
-                            f"{model}_{mode}{suffix}", str(dspark), str(dflash2)
+                            f"{model}_{mode}{suffix}", str(dflash2)
                         )
                         self.assertEqual(args[0], f"{model}_{mode}_k{k}")
                         self.assertEqual(args[1], "256 1024")
@@ -135,14 +131,14 @@ class PerfScriptTest(unittest.TestCase):
                             args[args.index("--num-spec-tokens") + 1], str(k)
                         )
                 for k in range(1, 5):
-                    args = self.launch(f"{model}_mtp{k}", str(dspark), str(dflash2))
+                    args = self.launch(f"{model}_mtp{k}", str(dflash2))
                     self.assertEqual(args[1], "256 1024")
                     self.assertEqual(args[args.index("--num-spec-tokens") + 1], str(k))
 
     def test_reference_contains_only_reported_rows(self):
         ref = function("reference_row")
         rows = re.findall(r'gpu_cores:([^)]*)\) echo "([^"]*)"', ref)
-        self.assertEqual(len(rows), 48)
+        self.assertEqual(len(rows), 44)
         self.assertFalse(any(":384:" in key for key, _ in rows))
         self.assertFalse(any("_k8:" in key for key, _ in rows))
         self.assertIn(("27b_mtp4:1024:chat", "18.693|2.197|1024|1853|558"), rows)

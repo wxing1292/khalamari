@@ -26,21 +26,11 @@ struct SpecCheckpoint {
     spec_type: QwenSpecType,
 }
 
-#[derive(Debug, Eq, PartialEq)]
-pub enum Qwen3ModelMode {
-    Vanilla,
-    DSpark {
-        model_dir: PathBuf,
-        num_spec_tokens: Option<NonZeroUsize>,
-    },
-}
-
 #[derive(Debug)]
 pub struct Qwen3Config {
     grpc_listen_addr: SocketAddr,
     http_listen_addr: SocketAddr,
     hf_model_dir: PathBuf,
-    model_mode: Qwen3ModelMode,
     telemetry: TelemetryConfig,
     executor_hibernation_timeout: Duration,
     executor_hibernation_mode: ExecutorHibernationMode,
@@ -50,10 +40,6 @@ pub struct Qwen3Config {
 
 impl Qwen3Config {
     pub fn from_args(args: Qwen3Args) -> Result<Self> {
-        let spec_checkpoint = normalize_spec_checkpoint(args.spec.hf_spec_model_dir, args.spec.spec_type)?;
-        if args.spec.num_spec_tokens.is_some() && spec_checkpoint.is_none() {
-            return Err(log_info_invalid_argument!("--num-spec-tokens requires --spec-type"));
-        }
         validate_scheduler_token_capacity(args.max_tokens, args.max_tokens_per_request)?;
         if u32::try_from(args.max_requests.get()).is_err() {
             return Err(log_info_invalid_argument!(
@@ -72,26 +58,10 @@ impl Qwen3Config {
             ));
         }
 
-        let model_mode = match spec_checkpoint {
-            None => Qwen3ModelMode::Vanilla,
-            Some(SpecCheckpoint {
-                model_dir,
-                spec_type: QwenSpecType::DSpark,
-            }) => {
-                Qwen3ModelMode::DSpark {
-                    model_dir,
-                    num_spec_tokens: args.spec.num_spec_tokens,
-                }
-            },
-            Some(_) => {
-                return Err(log_info_invalid_argument!("Qwen3 supports only --spec-type dspark"));
-            },
-        };
         Ok(Self {
             grpc_listen_addr: args.grpc_listen_addr,
             http_listen_addr: args.http_listen_addr,
             hf_model_dir: args.hf_model_dir,
-            model_mode,
             telemetry: TelemetryConfig {
                 profiling: ProfilingConfig {
                     mode: args.profile.map(ProfileMode::from),
@@ -121,10 +91,6 @@ impl Qwen3Config {
 
     pub fn hf_model_dir(&self) -> &Path {
         self.hf_model_dir.as_path()
-    }
-
-    pub fn model_mode(&self) -> &Qwen3ModelMode {
-        &self.model_mode
     }
 
     pub fn telemetry_config(&self) -> TelemetryConfig {
@@ -252,10 +218,6 @@ pub enum Qwen35ModelMode {
         model_dir: PathBuf,
         num_spec_tokens: NonZeroUsize,
     },
-    DSpark {
-        model_dir: PathBuf,
-        num_spec_tokens: Option<NonZeroUsize>,
-    },
     DFlash2 {
         model_dir: PathBuf,
         num_spec_tokens: Option<NonZeroUsize>,
@@ -271,7 +233,7 @@ impl Qwen35ModelMode {
                     .checked_add(1)
                     .expect("validated Qwen3.5 MTP cache-lane count must fit usize")
             },
-            Self::Vanilla | Self::DSpark { .. } | Self::DFlash2 { .. } => 1,
+            Self::Vanilla | Self::DFlash2 { .. } => 1,
         }
     }
 }
@@ -304,15 +266,6 @@ impl Qwen35Config {
                 Qwen35ModelMode::MTP {
                     num_spec_tokens: num_mtp_tokens.expect("configured Qwen3.5 MTP must have a proposal length"),
                     model_dir,
-                }
-            },
-            Some(SpecCheckpoint {
-                model_dir,
-                spec_type: QwenSpecType::DSpark,
-            }) => {
-                Qwen35ModelMode::DSpark {
-                    model_dir,
-                    num_spec_tokens: args.spec.num_spec_tokens,
                 }
             },
             Some(SpecCheckpoint {

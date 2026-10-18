@@ -14,7 +14,7 @@ use inference_backend_metal::operators::affine_quantized;
 
 const VOCAB_SIZE: i32 = 151_936;
 const TOKENS: [i32; 9] = [1, 5, 6, 7, 8, 14, 16, 21, 28];
-const PROFILES: [Profile; 3] = [Profile::Qwen27, Profile::Qwen35, Profile::DSparkMarkov];
+const PROFILES: [Profile; 2] = [Profile::Qwen27, Profile::Qwen35];
 const MATMUL_PATHS: [MatmulPath; 5] = [
     MatmulPath::Auto,
     MatmulPath::QmvBn8Bk32,
@@ -68,7 +68,6 @@ impl MatmulPath {
 enum Profile {
     Qwen27,
     Qwen35,
-    DSparkMarkov,
 }
 
 impl Profile {
@@ -76,7 +75,6 @@ impl Profile {
         match self {
             Self::Qwen27 => "qwen27",
             Self::Qwen35 => "qwen35",
-            Self::DSparkMarkov => "dspark-markov",
         }
     }
 
@@ -84,14 +82,12 @@ impl Profile {
         match self {
             Self::Qwen27 => 5120,
             Self::Qwen35 => 2048,
-            Self::DSparkMarkov => 256,
         }
     }
 
     fn bits(self) -> i32 {
         match self {
             Self::Qwen27 | Self::Qwen35 => 4,
-            Self::DSparkMarkov => 8,
         }
     }
 }

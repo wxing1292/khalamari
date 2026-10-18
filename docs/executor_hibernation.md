@@ -88,7 +88,7 @@ trait ReplayableDecoderModel {
 ```
 
 Qwen3 and Qwen3.5 implement these operations.
-GQA, GDN, MTP, DSpark, DFlash2, MLP, embed, unembed, and sampling owners participate in symmetric resource traversal.
+GQA, GDN, MTP, DFlash2, MLP, embed, unembed, and sampling owners participate in symmetric resource traversal.
 The operations run synchronously on the model executor thread.
 The event loop also stops and starts registered encoder executors around decoder state unload and load.
 
@@ -125,7 +125,7 @@ The selected snapshot contains these resources:
 
 - The `PageArena` payload for every allocated runtime page ID.
 - Main GQA request rows for every allocated request slot.
-- MTP, DSpark, or DFlash2 GQA request rows for every allocated request slot when configured.
+- MTP or DFlash2 GQA request rows for every allocated request slot when configured.
 - The current GDN recurrent state for every allocated request slot.
 - The current GDN convolution state for every allocated request slot.
 - The durable GDN request state table.
@@ -258,7 +258,7 @@ The two semantic snapshot directories must be byte-for-byte equal.
 The final decode verifies the reloaded checkpoint weights and the second state restore.
 Separate tests run `ExecutorHibernationPlan::All` and `ExecutorHibernationPlan::Selected` for each model configuration.
 The selected plan uses request-slot and page-ID ranges from the synthetic decode.
-The test matrix contains eight cases: Qwen3.6 27B and 35B, MTP and DSpark, and full and selected state.
+The test matrix contains four cases: Qwen3.6 27B and 35B with MTP, and full and selected state.
 Each test requires the matching Main and speculative checkpoint environment variables.
 
 Run the matrix with this command:

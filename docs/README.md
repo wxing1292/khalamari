@@ -41,13 +41,12 @@ The Qwen guide owns whole-model composition. The other guides own the named comp
 | MoE | [MoE](executor_moe.md) |
 | Sampling and rejection sampling | [Sampling](executor_sampling.md) |
 | Qwen3.5 MTP | [Scheduler/executor protocol](mtp_design.md#schedulerexecutor-protocol) |
-| Qwen3x DSpark | [DSpark](dspark_design.md) |
 | Qwen3x DFlash2 | [DFlash2](dflash2_design.md) |
 | Qwen3-ASR | [Audio transcription](qwen3_asr.md) |
 | Whole-model Stop/Start | [Executor hibernation](executor_hibernation.md) |
 | Snapshot I/O and request/cache movement | [Model state I/O](model_state_io.md) |
 
-Current component documents describe current `src`, including the MTP, DSpark, and DFlash2 `*_design.md` files.
+Current component documents describe current `src`, including the MTP and DFlash2 `*_design.md` files.
 `model_state_io.md` marks implemented and planned work separately.
 [Future work](future_work.md) tracks active investigations and incomplete work.
 

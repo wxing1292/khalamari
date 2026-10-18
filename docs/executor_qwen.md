@@ -2,9 +2,9 @@
 
 This document describes the current Qwen3, Qwen3-ASR, and Qwen3.5/Qwen3.6/Qwen3.8 Metal executors.
 The document covers checkpoint configuration, top-down loading, state preparation, cached replay, and sampling.
-Qwen3 supports separate Vanilla and fixed-block DSpark modes.
-Qwen3.5 supports separate Vanilla, reusable-layer MTP, fixed-block DSpark, and DFlash2 modes.
-The `v3_x` directories contain version-neutral leaf components, utilities, and the Qwen3x DSpark and DFlash2 models.
+Qwen3 supports Main-only text and ASR execution.
+Qwen3.5 supports separate Vanilla, reusable-layer MTP, and fixed-block DFlash2 modes.
+The `v3_x` directories contain version-neutral leaf components, utilities, and the Qwen3x DFlash2 model.
 Each model owns its structural contracts and execution graph.
 
 Qwen4x has an independent [Main-only executor](executor_qwen4x.md).
@@ -55,10 +55,6 @@ crates/inference-executor-core/src/model/qwen/v3_x/
   dflash2/
     config.rs               official DFlash2 schema adapter and canonical configuration contract
     weight_layout.rs        exact source and affine DFlash2 binding trees
-  dspark/
-    config.rs               official Qwen3 DSpark configuration contract
-    weight_layout.rs        exact source and affine DSpark binding trees
-
 crates/inference-executor-core/src/model/qwen/v3_5/
   config.rs                 Qwen35ModelConfig/Qwen35TextConfig parsing and normalization
   batch.rs                  Qwen35Microbatch, request, response, and sampled-decision contracts
@@ -66,9 +62,8 @@ crates/inference-executor-core/src/model/qwen/v3_5/
   weight_layout.rs          exact Qwen35 Main/unembed/MTP binding trees
 
 crates/inference-executor-core/src/bin/qwen3x_spec_quantize/
-  main.rs                   shared DSpark/DFlash2 converter CLI
+  main.rs                   DFlash2 converter CLI
   checkpoint.rs             shared safetensors and BF16 affine conversion
-  dspark.rs                 DSpark tensor and bit policy
   dflash2.rs                DFlash2 tensor and bit policy
 
 crates/inference-executor-metal/src/
@@ -93,16 +88,6 @@ crates/inference-executor-metal/src/
         layer.rs            independent Qwen3xDFlash2Layer
         model.rs            Prefill and body replay owners
         output.rs           raw Top-K, candidate lattice, path selection, and sparse output
-      dspark/
-        embed.rs            Qwen3x DSpark embedding replay
-        execution.rs        shared execution resources and per-batch recording
-        load.rs             shared checkpoint and resource load
-        main_feature.rs     all-row projection from selected Main layers
-        attention.rs        paged-history plus bidirectional local-block attention
-        layer.rs            independent Qwen3xDSparkLayer
-        model.rs            Prefill and body replay owners
-        output.rs           gather/unembed and Markov sampling
-        sampling.rs         Qwen3x Markov checkpoint weights and generic backend adapter
       layer/
         gqa.rs              shared Qwen3xGQA leaf load and record
         gdn.rs              shared Qwen3xGDN leaf load and record
@@ -122,12 +107,11 @@ crates/inference-executor-metal/src/
         component_config.rs Qwen3 QKV GQA and dense-MLP core/Metal configuration
       executor/
         mod.rs              Qwen3Executor, private pending transactions, and runtime integration
-        load.rs             separate Vanilla and DSpark top-down load
+        load.rs             text and ASR top-down load
         batch.rs            validation, prepare, reset, and commit lifecycle
         recording.rs        recorder lifecycle and Main replay submission
         main.rs             MainTextEmbed, MainResourceEmbed, Main, and GatherUnembed orchestration
-        sampling.rs         ordinary or rejection sampling and readback
-        dspark.rs           DSpark Spec proposal orchestration
+        sampling.rs         ordinary sampling and readback
     qwen/v3_asr/
       audio.rs              Audio Tower load, model graph, and execution
       resource.rs           prepared audio registration and async materialization
@@ -147,13 +131,12 @@ crates/inference-executor-metal/src/
       component_config.rs   Qwen35 component configuration and MTP validation
       executor/
         mod.rs              Qwen35Executor fields and ReplayableDecoderModel integration
-        load.rs             layer count pass and separate Vanilla/MTP/DSpark/DFlash2 top-down load
+        load.rs             layer count pass and separate Vanilla/MTP/DFlash2 top-down load
         batch.rs            validation, prepare, reset, and commit lifecycle
         recording.rs        recorder lifecycle and common replay submission
         main.rs             MainTextEmbed, MainResourceEmbed, Main, and GatherUnembed orchestration
         sampling.rs         Main/Spec/rejection orchestration and readback
         mtp.rs              MTP request, proposal-batch, and proposal flow
-        dspark.rs           DSpark Spec proposal orchestration
         dflash2.rs          DFlash2 Spec proposal orchestration
 
 crates/inference-executor-metal/src/sampling/
@@ -161,7 +144,6 @@ crates/inference-executor-metal/src/sampling/
   top_k_sampling.rs         TopKSampling and TopKSamplingOutputBuffers
   top_k_replay.rs           Sampling/DraftSampling replay components
   rejection_replay.rs       generic sparse rejection replay owner
-  dspark_markov.rs          DSpark Markov correction and sequential sampling
   spec_probs.rs             SpecProbsStore sparse Spec/Main probability workspace
 
 crates/inference-backend-metal/src/components/
@@ -192,11 +174,11 @@ Qwen3 and Qwen3.5 each own these model-level objects:
 
 Structural APIs stay in their model directories.
 
-`qwen/v3_x` contains shared leaf components, values, and the reusable Qwen3x DSpark and DFlash2 models.
+`qwen/v3_x` contains shared leaf components, values, and the reusable Qwen3x DFlash2 model.
 These leaves include quantization, RoPE, tensor-path values, weight bindings, checkpoint helpers, and GQA/GDN state
 owners.
 They also include `Qwen3xGQA`, `Qwen3xGDN`, `Qwen3xDenseMLP`, and `Qwen3xMoE`.
-The DSpark and DFlash2 models compose compatible generic leaf owners into independent model roles.
+The DFlash2 model composes compatible generic leaf owners into an independent model role.
 Qwen3 has no GDN transaction, state-page metadata, MTP lane, or Qwen3.5 replay key.
 
 ## Semantic object tree
@@ -209,12 +191,6 @@ Qwen3Executor
   main: Replay<Qwen3Main>
   gather_unembed: Replay<Qwen3GatherUnembed>
   sampling: Replay<Sampling>
-  speculator: Qwen3Speculator
-    Vanilla
-    DSpark
-      execution: Qwen3xDSparkExecution
-      rejection_sampling: Replay<RejectionSampling>
-      spec_probs: SpecProbsStore
   pages: PageArena
 
 Qwen3-ASR service composition
@@ -244,9 +220,6 @@ Qwen35Executor
       sampling: Replay<DraftSampling>
       execution: Qwen35MTPExecution
       common: Qwen35SpeculativeResources
-    DSpark
-      execution: Qwen3xDSparkExecution
-      common: Qwen35SpeculativeResources
     DFlash2
       execution: Qwen3xDFlash2Execution
       common: Qwen35SpeculativeResources
@@ -255,18 +228,6 @@ Qwen35Executor
 Qwen35SpeculativeResources
   rejection_sampling: Replay<RejectionSampling>
   spec_probs: SpecProbsStore
-
-Qwen3xDSparkExecution
-  prefill: Replay<Qwen3xDSparkPrefill>
-  gqa_state: BiDiBlockGQAState
-  embed: Replay<Qwen3xDSparkEmbed>
-  body: Replay<Qwen3xDSparkBody>
-  gather_unembed: Replay<Qwen3xDSparkGatherUnembed>
-  sampling: Replay<Qwen3xDSparkSampling>
-    markov: Qwen3xDSparkMarkov
-  decode_input: Replay<SpecDecodeInput>
-  reusable hidden/logit workspaces
-  page layout and block geometry
 
 Qwen3xDFlash2Execution
   prefill: Replay<Qwen3xDFlash2Prefill>
@@ -281,20 +242,9 @@ Qwen3xDFlash2Execution
   reusable hidden, convolution, selector, and attention workspaces
   page layout, query-block geometry, and sliding-window contract
 
-Qwen3ModelOpsRecorder / Qwen35ModelOpsRecorder
-  dspark_spec_prefill: Option<Qwen3xDSparkPrefillRecording>
-  dspark_spec_decode: Option<Qwen3xDSparkDecodeRecording>
+Qwen35ModelOpsRecorder
   dflash2_spec_prefill: Option<Qwen3xDFlash2PrefillRecording>
   dflash2_spec_decode: Option<Qwen3xDFlash2DecodeRecording>
-
-Qwen3xDSparkPrefillRecording
-  Prefill replay key
-
-Qwen3xDSparkDecodeRecording
-  optional Spec Decode prepare replay key and arguments
-  embed/body/gather/sampling replay keys
-  sampling arguments
-  request slots
 
 Qwen3xDFlash2PrefillRecording
   Prefill replay key
@@ -306,7 +256,7 @@ Qwen3xDFlash2DecodeRecording
   request slots
 ```
 
-The shared recorder keeps the Spec Prefill and Spec Decode fields for each fixed-block mode optional. Vanilla and MTP
+The Qwen3.5 recorder keeps the Spec Prefill and Spec Decode fields for each fixed-block mode optional. Vanilla and MTP
 use `None/None`. A fixed-block Prefill-only batch uses `Some/None`. A fixed-block Spec Decode batch uses `Some/Some`.
 This state table does not require a separate enum because the selected outer model mode already owns the valid
 transition.
@@ -315,10 +265,8 @@ transition.
 
 Vanilla executes Main embedding, Main, output projection, and target sampling.
 MTP adds its separate embedding, reusable physical body layer, and draft sampling owner.
-DSpark and DFlash2 remain peer model roles with independent Spec Prefill and Spec Decode recordings.
-They share only compatible lower-level BiDiBlockGQA components.
+DFlash2 owns separate Spec Prefill and Spec Decode recordings.
 
-[`dspark_design.md`](dspark_design.md) defines DSpark fixed-block attention, Markov sampling, state, and lifecycle.
 [`dflash2_design.md`](dflash2_design.md) defines DFlash2 persistent history, sliding attention, dynamic convolution,
 candidate selection, state, and lifecycle.
 
@@ -328,11 +276,11 @@ Weight reload uses this retained contract and does not derive the backend config
 `Replay<T>` owns the related replay cache.
 Each executor owns its dynamic workspaces, lifecycle order, and submissions.
 Each executor stores one closed speculator enum.
-The enum cannot represent a partial resource set or simultaneous MTP, DSpark, and DFlash2 resources.
+The enum cannot represent a partial resource set or simultaneous MTP and DFlash2 resources.
 Vanilla executors do not allocate rejection or speculative-probability resources.
-Each initialized executor is one outer model composition: Vanilla, MTP, DSpark, or DFlash2.
+Each initialized executor is one outer model composition: Vanilla, MTP or DFlash2.
 The selected composition owns its lifecycle contract.
-The common Main implementation does not merge MTP, DSpark, or DFlash2 into one high-level model role.
+The common Main implementation does not merge MTP or DFlash2 into one high-level model role.
 Per-batch recorders retain optional replay keys because a batch can omit output or Spec stages.
 These lifecycle keys do not own initialized model resources.
 
@@ -349,7 +297,7 @@ Only `Unembed` exposes replay topology because its affine operator selects QMV o
 `Qwen3Microbatch` records decode requests and an optional speculative suffix.
 It identifies the Main rows that require unembedding.
 It implements the backend-neutral executor-core `SpecMicrobatch` rejection-input contract.
-The Qwen3 executor rejects speculative input when DSpark is disabled.
+The Qwen3 executor rejects speculative input.
 
 The model role is also a structural boundary.
 `Qwen3MainLayer` owns the fixed-QKV `Qwen3MainGQA` and `Qwen3xDenseMLP` topology for Qwen3 Main.
@@ -357,18 +305,12 @@ The model role is also a structural boundary.
 `Qwen35MTPLayer` independently owns the MTP decoder-layer graph.
 The MTP embed, layer norms, and final norm load bounded tensor maps for their exact binding subtrees.
 Each MTP owner removes its tensors before it creates Metal buffers.
-`Qwen3xDSparkLayer` independently owns the DSpark decoder-layer graph.
 `Qwen3xDFlash2Layer` independently owns the DFlash2 decoder-layer graph.
 These role-specific layers can compose the same leaf components.
 They do not share a structural layer type.
 
-`Qwen3xDSparkLayer` composes ungated DSpark GQA, RMSNorm, dense MLP, and residual components.
-It does not extend `Qwen3MainLayer`.
-It does not add a variant to `Qwen35MTPLayer`.
-
 `Qwen3xDFlash2Layer` composes its own attention, dynamic grouped-convolution, RMSNorm, dense MLP, and residual
 components.
-It is not a DSpark flag or a `Qwen3xDSparkLayer` variant.
 
 Qwen3-ASR composes a separate Audio Tower with the Qwen3 text decoder.
 The CPU audio preprocessor and Audio Tower are model-owned components.
@@ -385,11 +327,6 @@ state-arena addressing.
 `Qwen3ModelConfig` strictly parses the flat Hugging Face Qwen3 schema.
 It rejects unsupported GDN, MoE, MTP, sliding-window, and RoPE-scaling variants.
 Its EOS token IDs provide a Qwen3 fallback when `generation_config.json` supplies none.
-`Qwen3xDSparkConfig` independently validates the repository's flat canonical DSpark schema.
-The checkpoint boundary uses an architecture adapter table to convert supported external schemas before canonical
-deserialization.
-It validates Main compatibility, `target_layer_ids`, fixed-block geometry, ungated GQA, default or Yarn RoPE, and the
-`vanilla` Markov head.
 `Qwen3xDFlash2Config` independently adapts `DFlash2DraftModel` configuration to the repository's flat canonical
 schema.
 It validates Main compatibility, sliding-window attention, query-block geometry, dynamic-convolution geometry, and
@@ -401,18 +338,18 @@ That schema includes layer-kind, MoE, MTP, and partial-RoPE fields.
 `Qwen3ExecutorConfig` and `Qwen35ExecutorConfig` keep runtime capacities model-specific.
 
 CLI parser structs accept `Option` values for checkpoint arguments.
-The service validates these values once and converts them to `Qwen3ModelMode` or `Qwen35ModelMode`.
+The Qwen3.5 service validates these values once and converts them to `Qwen35ModelMode`.
 The normalized service configuration stores only the closed model mode.
 The executor public API has one initializer for each supported mode.
 The private loader receives one closed init enum.
-The constructed executor receives one closed speculator enum.
+The constructed Qwen3.5 executor receives one closed speculator enum.
 
 `Qwen35ExecutorConfig::max_requests` is the executor request-slot capacity.
 `Qwen35Config` derives it from the same `--max-requests` value as the scheduler per-batch request capacity.
 The service passes that value to `Qwen35ExecutorConfig::max_requests`, `RuntimeConfig::max_running_requests`, and
 `SchedulerConfig::max_requests`.
 GQA page tables, GDN request state, sampling state, and request-indexed workspaces share this slot domain.
-Main, MTP, DSpark, and DFlash2 use this same configuration flow.
+Main, MTP and DFlash2 use this same configuration flow.
 
 Each model resolves its own exact typed binding tree before real tensor reads:
 
@@ -425,21 +362,6 @@ Qwen3ModelWeightBindings
       gqa: Qwen3xGQAWeightBindings
       mlp: Qwen3xDenseMLPWeightBindings
   unembed: QuantizedTensorBindings
-
-Qwen3xDSparkWeightBindings
-  optional embed: QuantizedTensorBindings
-  main_feature:
-    hidden_norm_weight
-    fc: QuantizedTensorBindings
-  layers: Vec<Qwen3xDSparkLayerWeightBindings>
-    gqa: Qwen3xGQAWeightBindings
-    mlp: Qwen3xDenseMLPWeightBindings
-    input_layernorm_weight
-    post_attention_layernorm_weight
-  final_norm_weight
-  optional unembed: QuantizedTensorBindings
-  markov: Qwen3xDSparkMarkovWeightBindings
-  confidence: Qwen3xDSparkConfidenceWeightBindings
 
 Qwen3xDFlash2WeightBindings
   main_feature:
@@ -478,7 +400,7 @@ Qwen35MTPWeightBindings
 
 Initialization is top-down:
 
-1. Select one closed Vanilla, MTP, DSpark, or DFlash2 init mode.
+1. Select one closed Vanilla, MTP or DFlash2 init mode.
 2. Parse and validate the Main configuration and the selected Spec configuration.
 3. Count Main GQA/GDN layers and Dense/MoE scratch requirements.
 4. Construct Main state domains and the selected Spec state domain.
@@ -488,15 +410,10 @@ Initialization is top-down:
 8. Aggregate all selected Spec resources into one enum variant.
 9. Construct `PageArena` and wrap each cached stage in `Replay<T>`.
 
-Qwen3 follows the same ownership order with separate Vanilla and DSpark graphs.
-It parses its flat Main configuration and resolves its Main binding tree.
-When configured, it parses the DSpark configuration and passes it to the shared DSpark loader.
-It constructs one QKV GQA state domain and dense scratch.
-It constructs a second ungated GQA state domain and `BiDiBlockGQAScratch` when DSpark is enabled.
-It loads Main and Main output for both modes.
-The DSpark mode also loads the shared DSpark execution owner and rejection resources.
+Qwen3 parses its Main configuration and resolves its Main binding tree.
+It constructs one QKV GQA state domain and dense scratch, then loads Main and Main output.
 
-Qwen3.5 loads Vanilla, its MTP graph, the reusable Qwen3x DSpark graph, or the reusable Qwen3x DFlash2 graph.
+Qwen3.5 loads Vanilla, its MTP graph, or the reusable Qwen3x DFlash2 graph.
 The loader cannot receive or construct more than one speculator.
 When Main and MTP both use MoE, they reuse one model-owned `MoEScratch`.
 The MTP compatibility check requires exact matches for `num_experts_per_tok`, `moe_intermediate_size`, and
@@ -506,40 +423,22 @@ A positive value means that the branch is present, and both models must specify 
 `norm_topk_prob` does not determine scratch geometry and may differ.
 If only Main or only MTP uses MoE, the unused model-side MoE geometry does not constrain the scratch allocation.
 An incompatible shared geometry returns a recoverable model initialization error.
-For DSpark, the loader validates Main hidden width, layer count, vocabulary, position limit, and RoPE values.
-It permits the DSpark query projection width to differ from the Main hidden width.
-The checkpoint `block_size` is the DSpark proposal count.
-The loader does not accept a separate proposal-length override.
-The DSpark proposal length is independent of the Main per-request verification budget.
-The scheduler may verify only a proposal prefix.
-DSpark derives its row capacity as `max_requests * block_size`.
-If the checkpoint omits embedding or unembedding weights, DSpark creates a
-caller-capacity view that shares the immutable Main kernel and weights.
-It adds DSpark context K/V pages to the Main cache lane and retains the Main GDN state domain.
-
 For DFlash2, the loader validates the Main hidden width, selected residual layers, vocabulary, position limit, RoPE,
 query-block limit, sliding window, convolution geometry, and selector geometry.
 The checkpoint `block_size` is the complete Decode query-block size.
 The block has one anchor row and `block_size - 1` MASK proposal rows.
-The loader does not accept a separate proposal-length override.
+The loader validates the requested proposal count against the checkpoint geometry.
 DFlash2 derives its row capacity as `max_requests * block_size`.
 It reuses the immutable Main embedding and unembedding owners.
 It adds persistent DFlash2 history K/V pages to the Main cache lane.
 It retains the Main GDN state domain.
 
 Qwen3 has one runtime cache lane and allocates no GDN state domain.
-The executor splits each runtime block between Main K/V and persistent DSpark context K/V.
+Each runtime block contains only Main K/V page IDs.
 
 There is no Main/MTP plan object tree or aggregate component-weight owner.
 Qwen3 Main owns QKV GQA and dense-MLP geometry conversion in `qwen/v3/main/component_config.rs`.
 Qwen3.5 owns QGKV GQA, GDN, dense-MLP, MoE, and MTP validation in `qwen/v3_5/component_config.rs`.
-Qwen3x DSpark has no plan object or plan source file.
-Each DSpark semantic owner derives its proposal geometry from `Qwen3xDSparkConfig::block_size` and resolves its affine
-layout from the exact binding subtree that it consumes.
-Each owner loads a bounded `TensorMap`, removes its tensors, performs its required fusion, and requires an empty map.
-Each DSpark layer owns its weight-dependent GQA and dense-MLP backend.
-The DSpark state domain shares only page tables, metadata, scratch, and geometry-dependent compute selection.
-
 Qwen3x DFlash2 has no plan object or plan source file.
 Each DFlash2 semantic owner derives its geometry from `Qwen3xDFlash2Config` and resolves its affine layout from its
 exact binding subtree.
@@ -583,17 +482,9 @@ The independent cached graphs are:
 ```text
 Replay<Qwen3MainTextEmbed>   Qwen3 token embedding
 Replay<Qwen3Main>            Qwen3 dense full-attention layers -> final norm
-Replay<Qwen3xDSparkPrefill>   all captured rows from selected Main layers -> persistent DSpark context K/V
 Replay<Qwen3GatherUnembed>   Qwen3 gather -> unembed
 Replay<Sampling>             ordinary Main sampling
 Replay<RejectionSampling>    Main sparse distributions -> speculative rejection
-Replay<Qwen3xDSparkEmbed>     anchor + MASK block embedding
-Replay<Qwen3xDSparkBody>      fixed DSpark layers -> final norm
-Replay<Qwen3xDSparkGatherUnembed>
-                             request-major hidden -> step-major logits
-Replay<Qwen3xDSparkSampling>
-                             Markov correction, sampling, and sparse draft storage
-Replay<SpecDecodeInput>      Qwen3/Qwen3.5 sparse rejection output -> fixed DSpark Spec Decode input and sampling positions
 Replay<Qwen3xDFlash2Prefill>
                              all captured rows from selected Main layers -> persistent DFlash2 history K/V
 Replay<Qwen3xDFlash2Embed>    anchor + MASK block embedding through the Main Embed view
@@ -636,7 +527,7 @@ It binds the caller-provided active-row key with the range `1..=capacity`.
 The kernel checks the active row count before it reads an inactive row index or input value and before it writes an
 inactive output value.
 Qwen3.5 MTPEmbed and GatherUnembed use a parameter active count.
-Qwen3 and DSpark GatherUnembed use stage-owned active-row parameters with identity capacity.
+Qwen3 GatherUnembed use stage-owned active-row parameters with identity capacity.
 
 The shared unembedding leaf has one active/total recording API.
 It uses the caller-provided total row count and `ReplayU32` active row count.
@@ -647,7 +538,7 @@ The leaf exposes the affine kernel topology for a row capacity and every row cou
 The stage bucket policy must include these topology boundaries.
 This rule lets Gather and Unembed use one active-row key without padding across an affine kernel change.
 Qwen3.5 GatherUnembed uses a parameter active count.
-Qwen3 and DSpark GatherUnembed use parameter active counts with identity capacity.
+Qwen3 GatherUnembed use parameter active counts with identity capacity.
 
 The shared BF16 row-concat leaf has one active/total recording API.
 The API names the recorded row count `num_total_rows` and the active row count `num_active_rows`.
@@ -721,7 +612,7 @@ It also normally fuses each Main MLP residual with the next layer input normaliz
 These adjacencies are optimization opportunities, not correctness requirements.
 The Main residual-capture path has the same optional fusion opportunity.
 Both the standalone and fused capture commands write only active rows.
-DSpark or DFlash2 can consume this Main capture.
+DFlash2 can consume this Main capture.
 Each Spec owner retains its own replay keys, arguments, and recording policies.
 
 Qwen3.5 MTPEmbed owns one token-capacity replay domain.
@@ -788,7 +679,7 @@ Its Main key owns the total token capacity, every layer MLP topology, and the un
 Active token, Q-token-range, and KV-split counts do not enter the key.
 It never aliases a Qwen3.5 key or stores an optional GDN key.
 
-DSpark and DFlash2 use identity capacity for Prefill rows, Embed rows, fixed-block token rows, and output rows.
+DFlash2 uses identity capacity for Prefill rows, Embed rows, fixed-block token rows, and output rows.
 Each replay key still stores a `num_total_*` value, and each submission still supplies the matching `num_active_*`
 parameter.
 The BiDiBlockGQA body independently pads the history Map TaskTemplate domain to a power-of-two total capacity.
@@ -828,7 +719,7 @@ Qwen3.5 MTP owns separate layer scratch.
 All configured logical MTP steps reuse this scratch and the same physical weights.
 Similar workspace roles do not imply shared structural ownership.
 
-`Qwen3Main` and `Qwen35Main` accept the shared `MainResidualCapture` boundary.
+`Qwen35Main` accepts the shared `MainResidualCapture` boundary.
 Main queries the capture owner immediately before each layer's final post-MLP residual add.
 The capture owner returns an optional opaque `residual_add::CaptureTarget`.
 The destination selects a stable BF16 column range that the capture owner owns.
@@ -839,11 +730,9 @@ Spec Prefill projects the complete captured Main-row prefix.
 
 The object-safe capture contract returns only this descriptor.
 It never receives a recorder.
-Both Main record methods remain generic over `Recorder<Operator = ReplayOp>`.
+The Main record method remains generic over `Recorder<Operator = ReplayOp>`.
 
-The Qwen3 and Qwen3.5 loaders supply no capture owner when fixed-block Spec Prefill is disabled.
-When DSpark is enabled for Qwen3 or Qwen3.5, `Qwen3xDSparkMainFeatureProjector` owns the capture destinations.
-Both executors record `Qwen3xDSparkPrefill` before the combined Main and Spec submission.
+The Qwen3.5 loader supplies no capture owner when fixed-block Spec Prefill is disabled.
 When DFlash2 is enabled for Qwen3.5, `Qwen3xDFlash2MainFeatureProjector` owns its separate capture destinations.
 Qwen3.5 records `Qwen3xDFlash2Prefill` before the combined Main and Spec submission.
 Main depends only on `MainResidualCapture`.
@@ -868,7 +757,7 @@ It does not submit backend work.
 It returns immediately when the batch has no sampled rows.
 
 `sample_main` materializes Sampling or RejectionSampling when the batch has sampled rows.
-For Qwen3 and Qwen3.5 DSpark, and for Qwen3.5 DFlash2, it also calls `record_spec` before submission.
+For Qwen3.5 DFlash2, it also calls `record_spec` before submission.
 Spec Prefill borrows the active token count, request slots, and flat token indices from the current Main GQA metadata.
 These buffers contain the complete captured Main-row prefix and remain valid through recording and submission.
 `record_spec_prefill` records physical Spec Prefill for every Main row.
@@ -895,14 +784,6 @@ For MTP, `submit_main` submits this sequence:
 
 ```text
 MainTextEmbed -> MainResourceEmbed? -> Main -> GatherUnembed -> RejectionSampling
-```
-
-For Qwen3 or Qwen3.5 DSpark, it submits one ordered serial sequence:
-
-```text
-MainTextEmbed -> MainResourceEmbed? -> Main -> GatherUnembed -> RejectionSampling
-  -> SpecDecodeInput -> DSparkPrefill
-  -> DSparkEmbed -> DSpark -> DSparkGatherUnembed -> DSparkSampling
 ```
 
 For Qwen3.5 DFlash2, it submits one ordered serial sequence:
@@ -945,7 +826,7 @@ Its `embed_spec`, `forward_spec`, `unembed_spec`, and `sample_spec` hooks materi
 DraftSampling.
 MTP does not use the fixed-block Prefill or Decode hooks.
 
-For Qwen3 and Qwen3.5 DSpark, and for Qwen3.5 DFlash2, `run_spec_prefill` and `run_spec_decode` return false because the
+For Qwen3.5 DFlash2, `run_spec_prefill` and `run_spec_decode` return false because the
 fixed-block path is already part of `submit_main`.
 The later fixed-block hooks are impossible for these executor paths.
 
@@ -956,7 +837,6 @@ The next transaction overwrites that tail before a later logical range can expos
 
 `SpecDecodeInput` owns the static and GPU-written Decode-input lifecycle.
 Its `prepare` method fills its reusable resources for the current batch.
-`Qwen3xDSparkExecution` constructs this resource for both Qwen3 and Qwen3.5.
 `Qwen3xDFlash2Execution` constructs the same owner for Qwen3.5 DFlash2.
 `record_decode_prepare` reads `SparseRejectionSamplingOutput` and writes accepted-dependent anchor positions, anchor
 tokens, block token IDs, GQA metadata, and sampling positions.
@@ -998,7 +878,7 @@ if run_spec(model_batch_req, sampled_output):
     embed_spec -> forward_spec -> unembed_spec -> sample_spec
     submit_spec -> wait -> read_spec
 
-# Generic fixed-block interface vocabulary. Current Qwen DSpark and DFlash2 paths do not select these hooks.
+# Generic fixed-block interface vocabulary. Current Qwen DFlash2 paths do not select these hooks.
 if run_spec_prefill(model_batch_req):
     prefill_spec
 if run_spec_decode(model_batch_req, sampled_output):
@@ -1010,8 +890,8 @@ if Spec Decode was recorded:
 commit
 ```
 
-Qwen3 and Qwen3.5 DSpark, and Qwen3.5 DFlash2, complete during `submit_main -> wait -> read_main`.
-The MTP, DSpark, and DFlash2 branches are mutually exclusive.
+Qwen3.5 DFlash2 completes during `submit_main -> wait -> read_main`.
+The MTP and DFlash2 branches are mutually exclusive.
 
 ## GQA/GDN lifecycle
 
@@ -1019,7 +899,7 @@ The MTP, DSpark, and DFlash2 branches are mutually exclusive.
 It accepts only complete Qwen3 Main page-ID blocks. It does not interpret runtime cache lanes.
 Qwen3 has zero state pages.
 It does not construct, restore, publish, commit, or reset a GDN state table.
-`BiDiBlockGQAState` owns a separate DSpark or DFlash2 page table, metadata buffers, backend, and block scratch.
+`BiDiBlockGQAState` owns a separate DFlash2 page table, metadata buffers, backend, and block scratch.
 In a fixed-block Spec mode, runtime cache lane 0 stores `[Main page IDs | Spec page IDs]` for each logical block.
 `prepare_batch` validates the exact combined length and splits this list once.
 It sends each complete role-local list to the applicable state owner.
@@ -1066,7 +946,7 @@ It commits `input_state_version + num_fixed_tokens + num_accepted_tokens`.
 `num_spec_tokens` does not directly adjust this state version.
 The next Main call starts at that selected state version. It does not replay verified tail tokens.
 A replay transaction permits `S + 1` accepted-prefix choices for `S` speculative tokens. It retains deltas until commit.
-DSpark, DFlash2, and MTP use the same unshifted Main state-version domain.
+DFlash2 and MTP use the same unshifted Main state-version domain.
 Cache-boundary versions are an independent materialization requirement.
 Commit materializes the selected final state and accepted cache boundaries. It does not materialize rejected prefixes.
 The next newly sampled token index remains the verified state version.
@@ -1106,56 +986,14 @@ Only Decode writes the retained hidden rows. Metadata changes after the full MTP
 
 [`mtp_design.md`](mtp_design.md) documents the complete current component contract.
 
-## Supported DSpark
-
-DSpark support is experimental.
-The Qwen3 and Qwen3.5 DSpark modes support one fixed-block DSpark checkpoint.
-The checkpoint `block_size` defines the fixed proposal count.
-`--num-spec-tokens` is an MTP-only service option.
-Qwen3.5 MTP, DSpark, and DFlash2 are mutually exclusive.
-
-Qwen3 and Qwen3.5 record Spec Decode prepare, DSpark Prefill, Spec Decode, and proposal sampling before submission.
-The GPU Spec Decode prepare stage reads rejection-sampling output directly.
-A decode-ready Qwen3 or Qwen3.5 batch uses this single submission:
-
-```text
-MainTextEmbed -> MainResourceEmbed? -> Main -> GatherUnembed -> RejectionSampling
-  -> SpecDecodeInput -> DSparkPrefill
-  -> DSparkEmbed -> DSpark -> DSparkGatherUnembed -> DSparkSampling
-```
-
-DSpark input is request-major.
-`DSparkGatherUnembed` converts body output to the step-major order required by sequential Markov sampling.
-It validates the maximum request-by-step row domain at construction.
-DSpark reads stable temperature, top-p, seed, and top-k values from the shared request-slot `SamplingParamsStore`.
-Spec Decode prepare writes one first sample position for each request. DSpark step `i` adds `i` to that position.
-The draft probability store uses request-slot identity because these rows cross a batch boundary.
-Main verification distributions use compact active-row identity because they exist only in one submission.
-
-Main K/V and persistent DSpark context K/V share one runtime cache-block lifecycle.
-The executor owns separate page tables and splits each runtime page span.
-Proposal-local Q/K/V and attention partials remain in executor-owned `BiDiBlockGQAScratch`.
-
-Qwen3.5 GDN uses the same accepted-prefix replay commit for MTP, DSpark, and DFlash2.
-It retains per-forward deltas and materializes only the accepted final state and crossed cache boundaries.
-The state-slot capacity does not grow with speculative width. See [`executor_gdn.md`](executor_gdn.md).
-The Qwen3.5 service sets the running-slot capacity from `--max-requests` for Main, MTP, DSpark, and DFlash2.
-These state buffers remain allocated and reusable while model state is loaded.
-`unload_state` writes persistent cache state to SSD and releases its loaded resources.
-`clear_replay_cache` and `unload_weights` release replay resources and model weights.
-
-[`dspark_design.md`](dspark_design.md) documents the complete current component contract.
-
 ## Supported DFlash2
 
 DFlash2 support is experimental.
 Qwen3.5-family executors support the affine Qwen3x DFlash2 checkpoint contract.
-The DFlash2 owner is a peer of the DSpark owner.
-It is not a mode flag inside DSpark.
 
 The checkpoint `block_size` defines the complete Decode query block.
 The Decode block contains one anchor row followed by `block_size - 1` MASK rows.
-`--num-spec-tokens` is an MTP-only service option.
+`--num-spec-tokens` overrides the MTP or DFlash2 proposal count.
 Prefill and Decode are independent replay recordings:
 
 ```text
@@ -1170,8 +1008,7 @@ Spec Decode prepare depends on rejection sampling.
 The serial sequence emits Spec Decode prepare first, then Prefill, and then the remaining Spec Decode work.
 This order makes the acceptance-dependent chain ready first and preserves both dependencies without a CPU boundary.
 
-DFlash2 reads stable temperature and seed values from the same request-slot `SamplingParamsStore` as Main, MTP, and
-DSpark. The sequential path walk adds each proposal step to the first sample position from Spec Decode prepare.
+DFlash2 reads stable temperature and seed values from the same request-slot `SamplingParamsStore` as Main and MTP. The sequential path walk adds each proposal step to the first sample position from Spec Decode prepare.
 
 Prefill projects every physical Main residual row once.
 Logical history contains the fixed Main rows and the accepted speculative prefix.
@@ -1213,23 +1050,21 @@ Unit tests cover:
 - GQA/GDN state and page overwrite/reset.
 - GDN transactions and snapshot I/O.
 - Generic replay idempotence and strict lookup.
-- MTP cache-lane mapping and MTP, DSpark, and DFlash2 sparse rejection.
-- DSpark configuration, bindings, attention, Markov sampling, and page splitting.
+- MTP cache-lane mapping and MTP and DFlash2 sparse rejection.
 - DFlash2 configuration adaptation, exact bindings, per-row sliding ranges, convolution, selector, and page splitting.
 - Embed, RowGather, and Unembed active-row replay against CPU references.
 - Qwen3 and Qwen3.5 GatherUnembed composition for every active row count in one recorded capacity.
-- DSpark GatherUnembed request-major to step-major conversion and affine unembedding for every active request count.
 - Qwen3.5 MTPEmbed previous-hidden gather, token embedding, both norms, concatenation, and input projection with nonzero
   weights for every active token count.
 
-The Qwen3, Qwen3.5, DSpark, and DFlash2 Embed owners only bind model-local replay keys around the shared `Embed` leaf.
+The Qwen3, Qwen3.5, and DFlash2 Embed owners only bind model-local replay keys around the shared `Embed` leaf.
 They do not duplicate its numerical test. DFlash2 Output has a candidate-selection contract instead of the
 GatherUnembed contract. Its Gather, Unembed, Top-K, codebook Embed, and selector leaves retain independent numerical
 coverage.
 
 End-to-end verification exercises Qwen3-ASR transcription through the service endpoint.
-End-to-end tests exercise Qwen3 Main-only and Qwen3 DSpark through server/decode.
-They also exercise Qwen3.5 Vanilla, MTP, and DSpark modes.
+End-to-end tests exercise Qwen3 Main-only through server/decode.
+They also exercise Qwen3.5 Vanilla, MTP, and DFlash2 modes.
 Focused DFlash2 unit tests cover its new model and backend contracts.
 The tests inspect generated text.
 Performance evidence follows [`executor_benchmarks.md`](executor_benchmarks.md).

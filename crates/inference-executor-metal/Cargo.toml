@@ -29,26 +29,6 @@ path = "benches/qwen3/gqa.rs"
 harness = false
 
 [[bench]]
-name = "qwen3_dspark"
-path = "benches/qwen3/dspark.rs"
-harness = false
-
-[[bench]]
-name = "qwen3_dspark_sampling"
-path = "benches/qwen3/dspark_sampling.rs"
-harness = false
-
-[[bench]]
-name = "qwen3_dspark_forward"
-path = "benches/qwen3/dspark_forward.rs"
-harness = false
-
-[[bench]]
-name = "qwen3_dspark_unembedding"
-path = "benches/qwen3/dspark_unembedding.rs"
-harness = false
-
-[[bench]]
 name = "qwen35_gdn"
 path = "benches/qwen35/gdn.rs"
 harness = false

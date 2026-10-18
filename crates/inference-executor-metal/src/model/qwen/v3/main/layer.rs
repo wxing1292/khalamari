@@ -1,7 +1,6 @@
 use std::rc::Rc;
 
 use inference_backend_metal::components::dense_mlp;
-use inference_backend_metal::components::residual_add;
 use inference_backend_metal::metal::Buffer;
 use inference_backend_metal::metal::Device;
 use inference_backend_metal::metal::Dtype;
@@ -52,7 +51,6 @@ pub struct Qwen3MainLayerInput<'a> {
     pub pages: &'a Buffer,
     pub residual_input: &'a Buffer,
     pub residual_output: &'a Buffer,
-    pub residual_capture_dest: Option<residual_add::CaptureTarget<'a>>,
 }
 
 impl Qwen3MainLayer {
@@ -194,31 +192,16 @@ impl Qwen3MainLayer {
             num_total_tokens,
             num_active_tokens,
         );
-        match input.residual_capture_dest {
-            Some(capture) => {
-                self.residual_add.record_with_capture(
-                    recorder,
-                    num_total_tokens,
-                    hidden_dim,
-                    num_active_tokens,
-                    &self.scratch.post_attention_hidden,
-                    &self.scratch.branch_output,
-                    input.residual_output,
-                    capture,
-                )
-            },
-            None => {
-                self.residual_add.record(
-                    recorder,
-                    num_total_tokens,
-                    hidden_dim,
-                    num_active_tokens,
-                    &self.scratch.post_attention_hidden,
-                    &self.scratch.branch_output,
-                    input.residual_output,
-                )
-            },
-        }
+
+        self.residual_add.record(
+            recorder,
+            num_total_tokens,
+            hidden_dim,
+            num_active_tokens,
+            &self.scratch.post_attention_hidden,
+            &self.scratch.branch_output,
+            input.residual_output,
+        );
         input.residual_output
     }
 }

@@ -69,7 +69,7 @@ type TestImmutableBlock = ImmutableBlock<
 >;
 
 #[test]
-fn test_init_block_once_half_block_success_w_dspark() {
+fn test_init_block_once_half_block_success_single_lane() {
     let total_tokens = token_vec([1, 2]);
     let block_cache = initialize_block_cache(1024);
     let mut blocks = initialize_blocks(block_cache, total_tokens.clone());
@@ -86,7 +86,7 @@ fn test_init_block_once_half_block_success_w_dspark() {
 }
 
 #[test]
-fn test_init_block_once_half_block_resource_limit_exceeded_w_dspark() {
+fn test_init_block_once_half_block_resource_limit_exceeded_single_lane() {
     let total_tokens = token_vec([1, 2]);
     let block_cache = initialize_block_cache(2);
     let random_block = allocate_mutable_block(&block_cache);
@@ -102,7 +102,7 @@ fn test_init_block_once_half_block_resource_limit_exceeded_w_dspark() {
 }
 
 #[test]
-fn test_init_block_once_full_block_cache_bypass_w_dspark() {
+fn test_init_block_once_full_block_cache_bypass_single_lane() {
     let total_tokens = token_vec([1, 2, 3, 4]);
     let block_cache = initialize_block_cache(1024);
     insert_immutable_block(&block_cache, 0, None, total_tokens.clone());
@@ -120,7 +120,7 @@ fn test_init_block_once_full_block_cache_bypass_w_dspark() {
 }
 
 #[test]
-fn test_init_block_once_full_and_half_block_cache_hit_w_dspark() {
+fn test_init_block_once_full_and_half_block_cache_hit_single_lane() {
     let total_tokens = token_vec([1, 2, 3, 4, 5, 6]);
     let block_cache = initialize_block_cache(1024);
     insert_immutable_block(&block_cache, 0, None, token_vec([1, 2, 3, 4]));
@@ -138,7 +138,7 @@ fn test_init_block_once_full_and_half_block_cache_hit_w_dspark() {
 }
 
 #[test]
-fn test_init_block_once_full_and_half_block_cache_miss_no_semi_immutable_success_w_dspark() {
+fn test_init_block_once_full_and_half_block_cache_miss_no_semi_immutable_success_single_lane() {
     let total_tokens = token_vec([1, 2, 3, 4, 5, 6]);
     let block_cache = initialize_block_cache(1024);
     let mut blocks = initialize_blocks(block_cache, total_tokens.clone());
@@ -155,7 +155,7 @@ fn test_init_block_once_full_and_half_block_cache_miss_no_semi_immutable_success
 }
 
 #[test]
-fn test_init_block_once_full_and_half_block_cache_miss_resource_not_found_w_dspark() {
+fn test_init_block_once_full_and_half_block_cache_miss_resource_not_found_single_lane() {
     let total_tokens = token_vec([0, 1, 2, 3, 4, 5]);
     let block_cache = initialize_block_cache(1024);
     let resource_id = ResourceID::new(ResourceTypeID::new(7));
@@ -184,7 +184,7 @@ fn test_init_block_once_full_and_half_block_cache_miss_resource_not_found_w_dspa
 }
 
 #[test]
-fn test_init_block_once_full_and_half_block_cache_miss_resource_found_w_dspark() {
+fn test_init_block_once_full_and_half_block_cache_miss_resource_found_single_lane() {
     let total_tokens = token_vec([0, 1, 2, 3, 4, 5]);
     let block_cache = initialize_block_cache(1024);
     let resource_id = ResourceID::new(ResourceTypeID::new(7));
@@ -212,7 +212,7 @@ fn test_init_block_once_full_and_half_block_cache_miss_resource_found_w_dspark()
 }
 
 #[test]
-fn test_init_block_once_full_and_half_block_cache_hit_bypasses_resource_w_dspark() {
+fn test_init_block_once_full_and_half_block_cache_hit_bypasses_resource_single_lane() {
     let total_tokens = token_vec([0, 1, 2, 3, 4, 5]);
     let block_cache = initialize_block_cache(1024);
     let resource_id = ResourceID::new(ResourceTypeID::new(7));
@@ -235,7 +235,7 @@ fn test_init_block_once_full_and_half_block_cache_hit_bypasses_resource_w_dspark
 }
 
 #[test]
-fn test_init_block_once_full_and_half_block_cache_miss_no_semi_immutable_resource_limit_exceeded_w_dspark() {
+fn test_init_block_once_full_and_half_block_cache_miss_no_semi_immutable_resource_limit_exceeded_single_lane() {
     let total_tokens = token_vec([1, 2, 3, 4, 5, 6]);
     let block_cache = initialize_block_cache(2);
     let random_block = allocate_mutable_block(&block_cache);
@@ -251,7 +251,7 @@ fn test_init_block_once_full_and_half_block_cache_miss_no_semi_immutable_resourc
 }
 
 #[test]
-fn test_init_block_once_full_and_half_block_cache_reserved_await_w_dspark() {
+fn test_init_block_once_full_and_half_block_cache_reserved_await_single_lane() {
     let total_tokens = token_vec([1, 2, 3, 4, 5, 6]);
     let block_cache = initialize_block_cache(1024);
     let mut random_block = reserve_semi_immutable_block(&block_cache, 0, None, token_vec([1, 2, 3, 4]));
@@ -291,7 +291,7 @@ fn test_init_block_once_full_and_half_block_cache_reserved_await_w_dspark() {
 }
 
 #[test]
-fn test_init_block_once_full_and_half_block_cache_bypass_with_semi_immutable_success_w_dspark() {
+fn test_init_block_once_full_and_half_block_cache_bypass_with_semi_immutable_success_single_lane() {
     let total_tokens = token_vec([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
     let block_cache = initialize_block_cache(1024);
     let mut blocks = initialize_blocks(block_cache, total_tokens.clone());
@@ -321,7 +321,7 @@ fn test_init_block_once_full_and_half_block_cache_bypass_with_semi_immutable_suc
 }
 
 #[test]
-fn test_init_block_once_full_and_half_block_cache_bypass_with_semi_immutable_resource_limit_exceeded_w_dspark() {
+fn test_init_block_once_full_and_half_block_cache_bypass_with_semi_immutable_resource_limit_exceeded_single_lane() {
     let total_tokens = token_vec([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
     let block_cache = initialize_block_cache(2);
     let mut blocks = initialize_blocks(block_cache, total_tokens.clone());
@@ -348,7 +348,7 @@ fn test_init_block_once_full_and_half_block_cache_bypass_with_semi_immutable_res
 }
 
 #[test]
-fn test_init_block_once_full_and_half_block_cache_bypass_with_mutable_success_w_dspark() {
+fn test_init_block_once_full_and_half_block_cache_bypass_with_mutable_success_single_lane() {
     let block_cache = initialize_block_cache(1024);
     let mut blocks = initialize_blocks(block_cache, token_vec([1, 2]));
 
@@ -380,7 +380,7 @@ fn test_init_block_once_full_and_half_block_cache_bypass_with_mutable_success_w_
 }
 
 #[test]
-fn test_init_block_once_full_and_half_block_cache_bypass_with_mutable_resource_limit_exceeded_w_dspark() {
+fn test_init_block_once_full_and_half_block_cache_bypass_with_mutable_resource_limit_exceeded_single_lane() {
     let block_cache = initialize_block_cache(2);
     let mut blocks = initialize_blocks(block_cache, token_vec([1, 2]));
 
@@ -409,7 +409,7 @@ fn test_init_block_once_full_and_half_block_cache_bypass_with_mutable_resource_l
 }
 
 #[test]
-fn test_uninit_block_once_noop_block_w_dspark() {
+fn test_uninit_block_once_noop_block_single_lane() {
     let total_tokens = token_vec([1, 2]);
     let block_cache = initialize_block_cache(1024);
     let mut blocks = initialize_blocks(block_cache, total_tokens.clone());
@@ -425,7 +425,7 @@ fn test_uninit_block_once_noop_block_w_dspark() {
 }
 
 #[test]
-fn test_uninit_block_once_mutable_block_w_dspark() {
+fn test_uninit_block_once_mutable_block_single_lane() {
     let total_tokens = token_vec([1, 2]);
     let block_cache = initialize_block_cache(1024);
     let mut blocks = initialize_blocks(block_cache, total_tokens.clone());
@@ -446,7 +446,7 @@ fn test_uninit_block_once_mutable_block_w_dspark() {
 }
 
 #[test]
-fn test_uninit_block_once_semi_immutable_block_w_dspark() {
+fn test_uninit_block_once_semi_immutable_block_single_lane() {
     let total_tokens = token_vec([1, 2, 3, 4, 5, 6]);
     let block_cache = initialize_block_cache(1024);
     let mut blocks = initialize_blocks(block_cache, total_tokens.clone());
@@ -467,7 +467,7 @@ fn test_uninit_block_once_semi_immutable_block_w_dspark() {
 }
 
 #[test]
-fn test_uninit_block_once_immutable_block_w_dspark() {
+fn test_uninit_block_once_immutable_block_single_lane() {
     let total_tokens = token_vec([1, 2, 3, 4, 5, 6]);
     let block_cache = initialize_block_cache(1024);
     insert_immutable_block(&block_cache, 0, None, token_vec([1, 2, 3, 4]));
@@ -490,7 +490,7 @@ fn test_uninit_block_once_immutable_block_w_dspark() {
 }
 
 #[test]
-fn test_prepare_cancel_commit_prefill_zero_token_index_w_dspark() {
+fn test_prepare_cancel_commit_prefill_zero_token_index_single_lane() {
     let total_tokens = token_vec([1, 2, 3]);
     let block_cache = initialize_block_cache(1024);
     let mut blocks = initialize_blocks(block_cache, total_tokens.clone());
@@ -537,7 +537,7 @@ fn test_prepare_cancel_commit_prefill_zero_token_index_w_dspark() {
 }
 
 #[test]
-fn test_prepare_resource_not_found_w_dspark() {
+fn test_prepare_resource_not_found_single_lane() {
     const REQUEST_ID: usize = 1;
 
     let total_tokens = token_vec([0, 1, 2, 3, 4, 5]);
@@ -579,7 +579,7 @@ fn test_prepare_resource_not_found_w_dspark() {
 }
 
 #[test]
-fn test_prepare_commit_resource_unload_w_dspark() {
+fn test_prepare_commit_resource_unload_single_lane() {
     let total_tokens = token_vec([0, 1, 2, 3, 4, 5, 6, 7, 8]);
     let block_cache = initialize_block_cache(1024);
     let resource_id = ResourceID::new(ResourceTypeID::new(7));
@@ -618,7 +618,7 @@ fn test_prepare_commit_resource_unload_w_dspark() {
 }
 
 #[test]
-fn test_prepare_cancel_commit_prefill_nonzero_token_index_w_dspark() {
+fn test_prepare_cancel_commit_prefill_nonzero_token_index_single_lane() {
     let total_tokens = token_vec([1, 2, 3, 4, 5, 6, 7]);
     let block_cache = initialize_block_cache(1024);
     insert_immutable_block(&block_cache, 0, None, token_vec([1, 2, 3, 4]));
@@ -702,7 +702,7 @@ fn test_prepare_cancel_commit_prefill_nonzero_token_index_w_dspark() {
 }
 
 #[test]
-fn test_prepare_cancel_commit_overlapping_prefill_decode_w_dspark() {
+fn test_prepare_cancel_commit_overlapping_prefill_decode_single_lane() {
     let total_tokens = token_vec([1, 2, 3]);
     let block_cache = initialize_block_cache(1024);
     let mut blocks = initialize_blocks(block_cache, total_tokens.clone());
@@ -772,7 +772,7 @@ fn test_prepare_cancel_commit_overlapping_prefill_decode_w_dspark() {
 }
 
 #[test]
-fn test_prepare_cancel_commit_decode_zero_token_index_w_dspark_w_spec_token() {
+fn test_prepare_cancel_commit_decode_zero_token_index_single_lane_w_spec_token() {
     let total_tokens = token_vec([0]);
     let spec_tokens = token_vec([10, 11, 12]);
     let output_sampled_token = Token::new(20);
@@ -849,7 +849,7 @@ fn test_prepare_cancel_commit_decode_zero_token_index_w_dspark_w_spec_token() {
 }
 
 #[test]
-fn test_prepare_cancel_commit_decode_nonzero_token_index_w_dspark_w_spec_token() {
+fn test_prepare_cancel_commit_decode_nonzero_token_index_single_lane_w_spec_token() {
     let total_tokens = token_vec([0, 1, 2, 3, 4]);
     let spec_tokens = token_vec([10, 11, 12]);
     let output_sampled_token = Token::new(20);
@@ -953,7 +953,7 @@ fn test_prepare_cancel_commit_decode_nonzero_token_index_w_dspark_w_spec_token()
 }
 
 #[test]
-fn test_prepare_cancel_commit_full_block_w_dspark() {
+fn test_prepare_cancel_commit_full_block_single_lane() {
     let total_tokens = token_vec([1, 2, 3, 4]);
     let output_sampled_token = Token::new(5);
     let block_cache = initialize_block_cache(1024);
@@ -1014,7 +1014,7 @@ fn test_prepare_cancel_commit_full_block_w_dspark() {
 }
 
 #[test]
-fn test_prepare_commit_full_and_half_block_semi_immutable_collision_w_dspark() {
+fn test_prepare_commit_full_and_half_block_semi_immutable_collision_single_lane() {
     let total_tokens = token_vec([0, 1, 2, 3, 4, 5]);
     let block_cache = initialize_block_cache(1024);
     let mut blocks = initialize_blocks(block_cache.clone(), total_tokens.clone());
@@ -1072,7 +1072,7 @@ fn test_prepare_commit_full_and_half_block_semi_immutable_collision_w_dspark() {
 }
 
 #[test]
-fn test_prepare_commit_full_and_half_block_mutable_collision_w_dspark() {
+fn test_prepare_commit_full_and_half_block_mutable_collision_single_lane() {
     let block_cache = initialize_block_cache(1024);
     let mut blocks = initialize_blocks(block_cache.clone(), token_vec([0, 1]));
     let InitBlockOnceResult::Success { ready_token_slots } = blocks.init_block_once() else {
@@ -1132,7 +1132,7 @@ fn test_prepare_commit_full_and_half_block_mutable_collision_w_dspark() {
 }
 
 #[test]
-fn test_prepare_commit_mutable_collision_additional_validated_token_w_dspark() {
+fn test_prepare_commit_mutable_collision_additional_validated_token_single_lane() {
     let block_cache = initialize_block_cache(1024);
     let mut blocks = initialize_blocks(block_cache.clone(), token_vec([0, 1, 2]));
     blocks.spec_tokens = token_vec([10]);
@@ -1210,7 +1210,7 @@ fn test_prepare_commit_mutable_collision_additional_validated_token_w_dspark() {
 }
 
 #[test]
-fn test_enqueue_tokens_w_dspark() {
+fn test_enqueue_tokens_single_lane() {
     let block_cache = initialize_block_cache(1024);
     let mut blocks = initialize_blocks(block_cache, token_vec([1, 2]));
 
@@ -1229,7 +1229,7 @@ fn test_enqueue_tokens_w_dspark() {
 }
 
 #[test]
-fn test_parent_node_w_dspark() {
+fn test_parent_node_single_lane() {
     let root_total_tokens = token_vec([1, 2, 3, 4]);
     let child_total_tokens = token_vec([5, 6, 7, 8]);
     let block_cache = initialize_block_cache(1024);

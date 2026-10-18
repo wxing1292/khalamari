@@ -615,7 +615,7 @@ before its prior reset notification.
 It uses before/input/after tables for Prefill and Decode transitions, including all three speculative acceptance outcomes.
 See [scheduler cache commit](mtp_design.md#scheduler-cache-commit) for token storage, mutable overwrite, block crossings, and publication.
 The source owners are `TrieDecoderBlocks::prepare`, `commit`, and `write_tokens`.
-Vanilla, DSpark, and DFlash2 use the same Main progress and block commit operations without shifted MTP lanes.
+Vanilla and DFlash2 use the same Main progress and block commit operations without shifted MTP lanes.
 
 If the scheduler guarantees a condition, rely on it and assert at the boundary where violations become visible.
 

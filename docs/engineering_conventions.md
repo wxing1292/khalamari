@@ -35,7 +35,7 @@ Apply strong symmetry to these peer groups when their contracts match:
 
 - GQA and GDN
 - dense MLP, sparse MLP, and MoE
-- Main, MTP, and DSpark model roles at shared role boundaries
+- Main, MTP, and DFlash2 model roles at shared role boundaries
 
 Compare public APIs, owner structure, source layout, replay policy, and test classification. Keep component-specific
 state transitions and compute paths when the contracts differ.
@@ -43,7 +43,7 @@ state transitions and compute paths when the contracts differ.
 Production source may change when the change clarifies a real owner, API, resource, or lifecycle. Production source
 must not change only to reduce test setup or expose an implementation detail.
 
-Runtime core must not own model-specific GQA, GDN, MLP, MoE, sampling, MTP, or DSpark policy. The model executor owns
+Runtime core must not own model-specific GQA, GDN, MLP, MoE, sampling, MTP, or DFlash2 policy. The model executor owns
 these semantics. The Metal backend owns their reusable kernels and dispatch implementation.
 
 ## Rust semantic workflow
@@ -513,7 +513,7 @@ Keep historical results separate from current results. Put cross-framework compa
 Keep the public surface small. Items remain private unless an external caller needs them. Do not use `pub(crate)` or
 `pub(super)`.
 
-Treat a model role as a structural ownership boundary. Main, MTP, and DSpark use different concrete layer types. This
+Treat a model role as a structural ownership boundary. Main, MTP, and DFlash2 use different concrete layer types. This
 rule applies when they use some of the same operators.
 
 Share true leaf components and utilities across roles. Do not share a structural layer facade that mixes their

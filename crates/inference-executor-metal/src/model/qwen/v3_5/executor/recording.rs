@@ -87,25 +87,7 @@ impl Qwen35Executor {
             }
         }
 
-        if self.speculator.is_dspark() {
-            let spec_stage_ends = self.speculator.dspark().execution.append_spec_replays(
-                &mut sequence,
-                recorder
-                    .dspark_spec_prefill
-                    .as_ref()
-                    .expect("qwen3.5 combined DSpark sequence requires Spec Prefill"),
-                recorder.dspark_spec_decode.as_ref(),
-            );
-            if let Some(stage_ends) = &mut timestamp_stage_ends {
-                if let Some(decode_prepare) = spec_stage_ends.decode_prepare {
-                    stage_ends.push(decode_prepare);
-                }
-                stage_ends.push(spec_stage_ends.prefill);
-                if let Some(decode) = spec_stage_ends.decode {
-                    stage_ends.push(decode);
-                }
-            }
-        } else if self.speculator.is_dflash2() {
+        if self.speculator.is_dflash2() {
             let spec_stage_ends = self.speculator.dflash2().execution.append_spec_replays(
                 &mut sequence,
                 recorder

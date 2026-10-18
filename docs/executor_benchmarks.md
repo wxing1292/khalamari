@@ -61,8 +61,7 @@ embedding  unembedding  norm  gated_residual  affine_quantized_matmul  matmul_bf
 `rejection_sampling` and `gqa_sdpa_matrix` are backend custom-CLI targets. Model-executor targets:
 
 ```text
-qwen3_gqa              qwen3_dspark           qwen3_dspark_forward
-qwen3_dspark_unembedding                       qwen3_dspark_sampling
+qwen3_gqa
 qwen35_dense_mlp       qwen35_moe             qwen35_gqa
 qwen35_gdn             qwen35_main_layers     qwen35_main
 qwen35_main_text_embed qwen35_main_gather_unembed
@@ -70,7 +69,6 @@ qwen35_main_sampling   qwen35_vanilla_prefill_decode
 ```
 
 Real-weight targets accept the model paths that their production owner needs.
-`qwen3_dspark_sampling` needs only `--dspark-model-dir`.
 `qwen35_main_sampling` does not load model weights.
 These targets share `--iters`, `--warmup-iters`, and `--runs`.
 
@@ -82,7 +80,7 @@ Production `src` must not gain benchmark-only state, feature paths, or environme
 The [QSA indexer guide](executor_qsa_indexer.md#benchmarks) separates the production replay benchmark from
 the cross-framework scorer study. Its [result snapshot](qsa_indexer_performance.json) preserves the measured candidate medians and source identity.
 
-For the Qwen3x GPU-prepared DSpark path or the Qwen3.5 DFlash2 path, compare a baseline commit or binary with the
+For the Qwen3.5 DFlash2 path, compare a baseline commit or binary with the
 current commit or binary.
 Do not add a production executor mode, service option, or configuration key to select the old CPU read boundary.
 Use the same process shape, model, request batch, seeds, and sampler parameters for both runs.
@@ -90,7 +88,7 @@ Record CPU preparation/read time, combined Main-and-Spec wall time, replay cache
 throughput.
 The combined submission duration is not a Main-only metric.
 
-For full-cycle measurements, start the Qwen3 or Qwen3.5 DSpark service, or the Qwen3.5 DFlash2 service, with the
+For full-cycle measurements, start the Qwen3.5 DFlash2 service, with the
 production commands in [`service.md`](service.md), and drive it with the production `decode` client. This path
 exercises the combined Main-and-Spec submission and reports
 `main_spec_replay_elapsed` through the executor timing data. Use identical server and client arguments for the
@@ -279,40 +277,6 @@ An external comparison must match weights, input tensors, state contents, precis
   It accepts block size, request count, head geometry, partial-state Q width, and dtype as CLI arguments.
   The default `max_q_tokens = 8` matches the current production SlicedQ partial-state layout.
   The backend owns its 32-thread threadgroup geometry.
-- `qwen3_dspark` loads real Main and DSpark checkpoints.
-  It runs the public executor lifecycle for `main` or `dspark`.
-  It uses the checkpoint `block_size` as the DSpark proposal length.
-  It reports each record, submit/wait, read, and commit boundary.
-  It reports `num_spec_tokens`, proposed tokens, accepted tokens, generated proposals, and acceptance.
-- `qwen3_dspark_forward` loads real Main and DSpark weights.
-  It compares the complete `MainTextEmbed` and Main forward with `DSparkEmbed` plus the complete DSpark backbone and
-  final norm.
-  The Main and DSpark depth-comparison cases use the same request count, seven rows per request, and history length.
-  The result reports total and per-layer time.
-  Use the per-layer value to compare the 40-layer Main stack with the five-layer DSpark stack.
-  The additional `main-verification` result uses eight rows per request and a DSpark-enabled Main executor.
-  It includes `MainTextEmbed`, all Main layers, Main residual capture, and DSpark context projection.
-  It excludes Main `GatherUnembed` and rejection sampling.
-- `qwen3_dspark_unembedding` loads the production `Qwen3xDSparkGatherUnembed` component.
-  It uses DSpark-owned unembed weights when they exist.
-  Otherwise, it uses the Main unembed weights, as the production executor does.
-  It measures gather and unembed together for `block_size` rows per request.
-- `qwen3_dspark_sampling` loads real DSpark Markov weights.
-  It measures the complete sequential fused Markov-map, sampling, and write-distribution replay.
-  Each proposal step uses one fused W1, W2, base-logit-add, and tile-Top-K map.
-  It then uses the generic sample-and-write-distribution reducer.
-  It accepts `--temperature`, `--top-k`, `--top-p`, and `--seed`.
-  It prints proposal token IDs, exact proposal probability bits, and a stable fingerprint of the complete sparse draft
-  distribution.
-  `qwen3_dspark_forward`, `qwen3_dspark_unembedding`, and `qwen3_dspark_sampling` isolate the three ordered proposal
-  segments:
-
-  ```text
-  DSparkEmbed + DSpark forward + final norm
-    -> GatherUnembed
-    -> Markov correction + sampling
-  ```
-
 - `qwen35_gdn` measures the production chunkwise/replay GDN forward with the 27B or 35B-A3B profile.
   It excludes accepted-state commit and cache publication.
   `--tokens-per-req` selects a ragged request layout. `--prefill-requests` selects the chunkwise prefix.
@@ -434,34 +398,9 @@ cargo bench --bench gqa_bidi_block_sdpa -- \
 PSI_DEC_BUFFER_IO_BENCH_DIR=<storage-directory> \
   cargo bench --bench buffer_io
 
-cargo bench --bench rejection_sampling -- \
-  --mode dspark-markov-top-k-map --rows 1 --top-k 20 --vocab 151936 \
-  --markov-rank 256 --markov-w1-group-size 64 --markov-w1-bits 4 \
-  --markov-w2-group-size 64 --markov-w2-bits 8 \
-  --iters 1 --warmup-iters 0 --runs 1
-
 cargo bench --bench qwen3_gqa -- \
   --model-dir <qwen3-model-dir> --tokens-per-req 16 --contexts 128 \
   --iters 1 --warmup-iters 0 --runs 1 --validate
-
-cargo bench --bench qwen3_dspark -- \
-  --model-dir <qwen3-model-dir> --dspark-model-dir <dspark-model-dir> \
-  --cases dspark --num-requests 1 \
-  --iters 1 --warmup-iters 0 --runs 1
-
-cargo bench --bench qwen3_dspark_forward -- \
-  --model-dir <qwen3-model-dir> --dspark-model-dir <dspark-model-dir> \
-  --num-requests 1 --context 128 \
-  --iters 1 --warmup-iters 0 --runs 1
-
-cargo bench --bench qwen3_dspark_unembedding -- \
-  --model-dir <qwen3-model-dir> --dspark-model-dir <dspark-model-dir> \
-  --num-requests 1 \
-  --iters 1 --warmup-iters 0 --runs 1
-
-cargo bench --bench qwen3_dspark_sampling -- \
-  --dspark-model-dir <dspark-model-dir> --num-requests 1 --top-k 1 \
-  --iters 1 --warmup-iters 0 --runs 1
 
 cargo bench --bench qwen35_gqa -- \
   --model-dir <27b-model-dir> --gqa-model 27b --tokens 1 \
@@ -515,7 +454,6 @@ An absolute difference from an idle historical run does not establish a regressi
 ## Metrics
 
 `setup_us` includes model loading and fixture construction.
-The Qwen3 DSpark executor target uses `cache_miss_*` for its first complete execution.
 `qwen35_vanilla_prefill_decode` uses `replay_cache_cold_*` for the first operation after `clear_replay_cache()`.
 
 Executor trajectory targets report wall time and their production lifecycle boundaries.
@@ -629,7 +567,7 @@ It is separate from precise GPU intervals and isolated component latency.
 The observed Off throughput is about 95–97 tokens/s for 35B and 22–23 tokens/s for 27B.
 The 27B GSM8K case at limit 1024 ended at 279 tokens, so the limit does not establish equal work.
 This summary is an observed serving result. It is not a controlled kernel-speedup claim or a pass/fail threshold.
-No new MTP, DSpark, DFlash2, or cross-engine result is implied.
+No new MTP, DFlash2, or cross-engine result is implied.
 The helper retains its separate 2026-09-19 comparison baseline.
 The [component snapshot](component_performance.md) retains its original measurement identities and values.
 

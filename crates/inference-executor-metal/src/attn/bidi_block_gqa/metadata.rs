@@ -442,18 +442,18 @@ mod tests {
 
     #[test]
     fn test_spec_decode_success() {
-        let dspark_variant = selected_variant(4, 7);
+        let full_history_variant = selected_variant(4, 7);
         for accepted in 0..=7 {
-            assert_fixed_quota_rewrite_matches_cpu(&[10], &[7], &[accepted], 7, u32::MAX, dspark_variant);
+            assert_fixed_quota_rewrite_matches_cpu(&[10], &[7], &[accepted], 7, u32::MAX, full_history_variant);
         }
-        assert_fixed_quota_rewrite_matches_cpu(&[10, 31], &[7, 7], &[0, 5], 7, u32::MAX, dspark_variant);
+        assert_fixed_quota_rewrite_matches_cpu(&[10, 31], &[7, 7], &[0, 5], 7, u32::MAX, full_history_variant);
         assert_fixed_quota_rewrite_matches_cpu(
             &[10, 31, 65, 96],
             &[7, 7, 7, 7],
             &[7, 2, 0, 6],
             7,
             u32::MAX,
-            dspark_variant,
+            full_history_variant,
         );
 
         let dflash2_variant = selected_variant(4, 8);

@@ -22,20 +22,16 @@ MODEL_ROOT="$HOME/Workspace/models"
 TOKENIZER=""
 MODEL_27B=""
 MTP_27B=""
-DSPARK_27B=""
 DFLASH2_27B=""
 MODEL_35B=""
 MTP_35B=""
-DSPARK_35B=""
 DFLASH2_35B=""
 MODEL_27B_REPO="mlx-community/Qwen3.8-27B-4bit"
 MTP_27B_REPO="mlx-community/Qwen3.8-27B-MTP-4bit"
-DSPARK_27B_REPO=""
 MODEL_35B_REPO="mlx-community/Qwen3.6-35B-A3B-4bit"
 MTP_35B_REPO="mlx-community/Qwen3.6-35B-A3B-MTP-4bit"
-DSPARK_35B_REPO=""
 # Block-spec cases use checkpoint defaults unless a case or CLI overrides K.
-CASES="27b_off,35b_off,27b_mtp1,35b_mtp1,27b_mtp2,35b_mtp2,27b_mtp3,35b_mtp3,27b_mtp4,35b_mtp4,27b_dspark,27b_dflash2,35b_dspark,35b_dflash2"
+CASES="27b_off,35b_off,27b_mtp1,35b_mtp1,27b_mtp2,35b_mtp2,27b_mtp3,35b_mtp3,27b_mtp4,35b_mtp4,27b_dflash2,35b_dflash2"
 CASE_COOLDOWN_SECS=8
 LOGGING=info
 SEED=42
@@ -71,12 +67,11 @@ REFERENCE_TEMPERATURE=0.7
 REFERENCE_TOP_K=20
 REFERENCE_TOP_P=0.8
 REFERENCE_RUNS="unknown"
-REFERENCE_CASES="27b_off,27b_mtp1,27b_mtp2,27b_mtp3,27b_mtp4,27b_dspark_k7,27b_dflash2_k7,35b_off,35b_mtp1,35b_mtp2,35b_mtp3,35b_mtp4"
+REFERENCE_CASES="27b_off,27b_mtp1,27b_mtp2,27b_mtp3,27b_mtp4,27b_dflash2_k7,35b_off,35b_mtp1,35b_mtp2,35b_mtp3,35b_mtp4"
 REFERENCE_PROMPT_SET="representative2"
 REFERENCE_PROMPT_SET_SHA256="1821fb9bef6c6a310635c0eb99e8bd0dc305db33fcaedb8ca707b225b6e9b254"
 REFERENCE_MODEL_27B_DIR_NAME="Qwen3.8-27B-4bit"
 REFERENCE_MTP_27B_DIR_NAME="Qwen3.8-27B-MTP-4bit"
-REFERENCE_DSPARK_27B_DIR_NAME="Qwen3.8-27B-DSpark-affine"
 REFERENCE_DFLASH2_27B_DIR_NAME="Qwen3.8-27B-DFlash2-affine"
 REFERENCE_MODEL_35B_DIR_NAME="Qwen3.6-35B-A3B-4bit"
 REFERENCE_MTP_35B_DIR_NAME="Qwen3.6-35B-A3B-MTP-4bit"
@@ -112,7 +107,7 @@ decode throughput, TTFT, inter-chunk latency, and speculative acceptance.
 
 Options:
   --runs N              Runs per prompt and token-count case. Default: 7
-  --block-spec-tokens K  Generate K tokens in each DSpark/DFlash2 proposal.
+  --block-spec-tokens K  Generate K tokens in each DFlash2 proposal.
                         Default: checkpoint geometry. This also overrides each `_kN` case.
   --cases LIST          Comma-separated cases.
                         Default order:
@@ -121,11 +116,11 @@ Options:
                           27b_mtp2,35b_mtp2,
                           27b_mtp3,35b_mtp3,
                           27b_mtp4,35b_mtp4,
-                          27b_dspark,27b_dflash2,
-                          35b_dspark,35b_dflash2
-                        Available modes: off, mtp, dspark, dflash2.
+                          27b_dflash2,
+                          35b_dflash2
+                        Available modes: off, mtp, dflash2.
                         The *_mtp alias runs proposal counts 1, 2, 3, and 4.
-                        Base DSpark/DFlash2 cases use checkpoint geometry.
+                        Base DFlash2 cases use checkpoint geometry.
                         Add _k1/_k2/_k3/_k4/_k8 to request a proposal count.
                         --block-spec-tokens K overrides K for every block-spec case.
                         Group cases: 27b_on and 35b_on select all Spec modes.
@@ -145,20 +140,14 @@ Options:
   --tokenizer DIR       Tokenizer/chat-template override. Default: each case's Main model.
   --model-27b DIR       27B Main directory. Default: MODEL_ROOT/Qwen3.8-27B-4bit
   --mtp-27b DIR         27B MTP directory. Default: MODEL_ROOT/Qwen3.8-27B-MTP-4bit
-  --dspark-27b DIR      27B DSpark directory. Default: MODEL_ROOT/Qwen3.8-27B-DSpark-affine
   --dflash2-27b DIR     27B affine DFlash2 directory. Default: MODEL_ROOT/Qwen3.8-27B-DFlash2-affine
   --model-35b DIR       35B Main directory. Default: MODEL_ROOT/Qwen3.6-35B-A3B-4bit
   --mtp-35b DIR         35B MTP directory. Default: MODEL_ROOT/Qwen3.6-35B-A3B-MTP-4bit
-  --dspark-35b DIR      35B DSpark directory. Default: MODEL_ROOT/Qwen3.6-35B-A3B-DSpark-affine
   --dflash2-35b DIR     35B affine DFlash2 directory. Default: MODEL_ROOT/Qwen3.6-35B-A3B-DFlash2-affine
   --model-27b-repo REPO Hugging Face repo used if the 27B Main model is missing.
   --mtp-27b-repo REPO   Hugging Face repo used if the 27B MTP model is missing.
-  --dspark-27b-repo REPO
-                        Hugging Face repo used if the 27B affine DSpark model is missing.
   --model-35b-repo REPO Hugging Face repo used if the 35B Main model is missing.
   --mtp-35b-repo REPO   Hugging Face repo used if the 35B MTP model is missing.
-  --dspark-35b-repo REPO
-                        Hugging Face repo used if the 35B affine DSpark model is missing.
   --no-build            Skip release build.
   --no-reference        Do not compare summaries with the checked-in reference run.
   --show-runs           Print each machine-readable RUN and SUMMARY row.
@@ -173,14 +162,14 @@ Options:
 Examples:
   scripts/qwen35_e2e_decode_perf.sh \
     --model-root "$HOME/Workspace/models" \
-    --cases 27b_off,35b_off,27b_mtp1,35b_mtp1,27b_dspark_k8,27b_dflash2_k8 \
+    --cases 27b_off,35b_off,27b_mtp1,35b_mtp1,27b_dflash2_k8 \
     --runs 3
 
   scripts/qwen35_e2e_decode_perf.sh \
     --model-35b "$HOME/Workspace/models/Qwen3.6-35B-A3B-4bit" \
     --mtp-35b "$HOME/Workspace/models/Qwen3.6-35B-A3B-MTP-4bit" \
-    --dspark-35b "$HOME/Workspace/models/Qwen3.6-35B-A3B-DSpark-affine" \
-    --cases 35b_mtp1,35b_dspark_k8,35b_mtp2,35b_mtp3 --runs 3
+    --dflash2-35b "$HOME/Workspace/models/Qwen3.6-35B-A3B-DFlash2-affine" \
+    --cases 35b_mtp1,35b_mtp2,35b_mtp3 --runs 3
 EOF
 }
 
@@ -324,14 +313,6 @@ while [[ $# -gt 0 ]]; do
         MTP_27B="$2"
         shift 2
         ;;
-    --dspark-27b)
-        [[ $# -ge 2 ]] || {
-            echo "--dspark-27b requires a value" >&2
-            exit 2
-        }
-        DSPARK_27B="$2"
-        shift 2
-        ;;
     --dflash2-27b)
         [[ $# -ge 2 ]] || {
             echo "--dflash2-27b requires a value" >&2
@@ -354,14 +335,6 @@ while [[ $# -gt 0 ]]; do
             exit 2
         }
         MTP_35B="$2"
-        shift 2
-        ;;
-    --dspark-35b)
-        [[ $# -ge 2 ]] || {
-            echo "--dspark-35b requires a value" >&2
-            exit 2
-        }
-        DSPARK_35B="$2"
         shift 2
         ;;
     --dflash2-35b)
@@ -388,14 +361,6 @@ while [[ $# -gt 0 ]]; do
         MTP_27B_REPO="$2"
         shift 2
         ;;
-    --dspark-27b-repo)
-        [[ $# -ge 2 ]] || {
-            echo "--dspark-27b-repo requires a value" >&2
-            exit 2
-        }
-        DSPARK_27B_REPO="$2"
-        shift 2
-        ;;
     --model-35b-repo)
         [[ $# -ge 2 ]] || {
             echo "--model-35b-repo requires a value" >&2
@@ -410,14 +375,6 @@ while [[ $# -gt 0 ]]; do
             exit 2
         }
         MTP_35B_REPO="$2"
-        shift 2
-        ;;
-    --dspark-35b-repo)
-        [[ $# -ge 2 ]] || {
-            echo "--dspark-35b-repo requires a value" >&2
-            exit 2
-        }
-        DSPARK_35B_REPO="$2"
         shift 2
         ;;
     --no-build)
@@ -547,11 +504,9 @@ fi
 
 [[ -n "$MODEL_27B" ]] || MODEL_27B="$MODEL_ROOT/Qwen3.8-27B-4bit"
 [[ -n "$MTP_27B" ]] || MTP_27B="$MODEL_ROOT/Qwen3.8-27B-MTP-4bit"
-[[ -n "$DSPARK_27B" ]] || DSPARK_27B="$MODEL_ROOT/Qwen3.8-27B-DSpark-affine"
 [[ -n "$DFLASH2_27B" ]] || DFLASH2_27B="$MODEL_ROOT/Qwen3.8-27B-DFlash2-affine"
 [[ -n "$MODEL_35B" ]] || MODEL_35B="$MODEL_ROOT/Qwen3.6-35B-A3B-4bit"
 [[ -n "$MTP_35B" ]] || MTP_35B="$MODEL_ROOT/Qwen3.6-35B-A3B-MTP-4bit"
-[[ -n "$DSPARK_35B" ]] || DSPARK_35B="$MODEL_ROOT/Qwen3.6-35B-A3B-DSpark-affine"
 [[ -n "$DFLASH2_35B" ]] || DFLASH2_35B="$MODEL_ROOT/Qwen3.6-35B-A3B-DFlash2-affine"
 
 IFS=, read -r -a selected_cases <<<"$CASES"
@@ -561,7 +516,7 @@ selected_cases=()
 append_case() {
     local candidate="$1"
     case "$candidate" in
-    *_dspark | *_dflash2 | *_dspark_k* | *_dflash2_k*)
+    *_dflash2 | *_dflash2_k*)
         if [[ -n "$BLOCK_SPEC_TOKENS" ]]; then
             candidate="${candidate%_k*}_k${BLOCK_SPEC_TOKENS}"
         fi
@@ -586,9 +541,6 @@ for case_name in "${requested_cases[@]}"; do
         append_case 27b_mtp3
         append_case 27b_mtp4
         ;;
-    27b_dspark)
-        append_case 27b_dspark
-        ;;
     27b_dflash2)
         append_case 27b_dflash2
         ;;
@@ -597,7 +549,6 @@ for case_name in "${requested_cases[@]}"; do
         append_case 27b_mtp2
         append_case 27b_mtp3
         append_case 27b_mtp4
-        append_case 27b_dspark
         append_case 27b_dflash2
         ;;
     35b_mtp)
@@ -605,9 +556,6 @@ for case_name in "${requested_cases[@]}"; do
         append_case 35b_mtp2
         append_case 35b_mtp3
         append_case 35b_mtp4
-        ;;
-    35b_dspark)
-        append_case 35b_dspark
         ;;
     35b_dflash2)
         append_case 35b_dflash2
@@ -617,7 +565,6 @@ for case_name in "${requested_cases[@]}"; do
         append_case 35b_mtp2
         append_case 35b_mtp3
         append_case 35b_mtp4
-        append_case 35b_dspark
         append_case 35b_dflash2
         ;;
     *) append_case "$case_name" ;;
@@ -626,7 +573,7 @@ done
 
 for case_name in "${selected_cases[@]}"; do
     case "$case_name" in
-    *_dspark_k* | *_dflash2_k*)
+    *_dflash2_k*)
         require_positive_integer "--cases $case_name" "${case_name##*_k}"
         ;;
     esac
@@ -634,11 +581,9 @@ done
 
 need_27b=0
 need_27b_mtp=0
-need_27b_dspark=0
 need_27b_dflash2=0
 need_35b=0
 need_35b_mtp=0
-need_35b_dspark=0
 need_35b_dflash2=0
 for case_name in "${selected_cases[@]}"; do
     case "$case_name" in
@@ -646,10 +591,6 @@ for case_name in "${selected_cases[@]}"; do
     27b_mtp1 | 27b_mtp2 | 27b_mtp3 | 27b_mtp4)
         need_27b=1
         need_27b_mtp=1
-        ;;
-    27b_dspark | 27b_dspark_k*)
-        need_27b=1
-        need_27b_dspark=1
         ;;
     27b_dflash2 | 27b_dflash2_k*)
         need_27b=1
@@ -659,10 +600,6 @@ for case_name in "${selected_cases[@]}"; do
     35b_mtp1 | 35b_mtp2 | 35b_mtp3 | 35b_mtp4)
         need_35b=1
         need_35b_mtp=1
-        ;;
-    35b_dspark | 35b_dspark_k*)
-        need_35b=1
-        need_35b_dspark=1
         ;;
     35b_dflash2 | 35b_dflash2_k*)
         need_35b=1
@@ -693,30 +630,6 @@ require_dir() {
     fi
 }
 
-validate_affine_dspark() {
-    local option="$1"
-    local dir="$2"
-    DSPARK_DIR="$dir" DSPARK_OPTION="$option" python3 - <<'PY'
-import json
-import os
-from pathlib import Path
-
-option = os.environ["DSPARK_OPTION"]
-path = Path(os.environ["DSPARK_DIR"]) / "config.json"
-try:
-    config = json.loads(path.read_text())
-except (OSError, json.JSONDecodeError) as exc:
-    raise SystemExit(f"unable to read {path}: {exc}") from exc
-
-quantization = config.get("quantization_config") or config.get("quantization")
-if not isinstance(quantization, dict):
-    raise SystemExit(f"{option} must name an affine-quantized DSpark checkpoint")
-
-block_size = config.get("block_size")
-if not isinstance(block_size, int) or isinstance(block_size, bool) or block_size < 1:
-    raise SystemExit(f"{path} must have a positive DSpark block_size")
-PY
-}
 
 validate_affine_dflash2() {
     local option="$1"
@@ -849,17 +762,11 @@ ensure_optional_local_model() {
 if ((need_27b_mtp)); then
     ensure_optional_model 27b_mtp --mtp-27b "$MTP_27B_REPO" "$MTP_27B" || need_27b_mtp=0
 fi
-if ((need_27b_dspark)); then
-    ensure_optional_model 27b_dspark --dspark-27b "$DSPARK_27B_REPO" "$DSPARK_27B" || need_27b_dspark=0
-fi
 if ((need_27b_dflash2)); then
     ensure_optional_local_model 27b_dflash2 --dflash2-27b "$DFLASH2_27B" || need_27b_dflash2=0
 fi
 if ((need_35b_mtp)); then
     ensure_optional_model 35b_mtp --mtp-35b "$MTP_35B_REPO" "$MTP_35B" || need_35b_mtp=0
-fi
-if ((need_35b_dspark)); then
-    ensure_optional_model 35b_dspark --dspark-35b "$DSPARK_35B_REPO" "$DSPARK_35B" || need_35b_dspark=0
 fi
 if ((need_35b_dflash2)); then
     ensure_optional_local_model 35b_dflash2 --dflash2-35b "$DFLASH2_35B" || need_35b_dflash2=0
@@ -869,10 +776,8 @@ runnable_cases=()
 for case_name in "${selected_cases[@]}"; do
     case "$case_name" in
     27b_mtp1 | 27b_mtp2 | 27b_mtp3 | 27b_mtp4) ((need_27b_mtp)) || continue ;;
-    27b_dspark | 27b_dspark_k*) ((need_27b_dspark)) || continue ;;
     27b_dflash2 | 27b_dflash2_k*) ((need_27b_dflash2)) || continue ;;
     35b_mtp1 | 35b_mtp2 | 35b_mtp3 | 35b_mtp4) ((need_35b_mtp)) || continue ;;
-    35b_dspark | 35b_dspark_k*) ((need_35b_dspark)) || continue ;;
     35b_dflash2 | 35b_dflash2_k*) ((need_35b_dflash2)) || continue ;;
     esac
     runnable_cases+=("$case_name")
@@ -916,9 +821,6 @@ fi
 if ((need_27b_mtp)); then
     require_dir "--mtp-27b" "$MTP_27B"
 fi
-if ((need_27b_dspark)); then
-    require_dir "--dspark-27b" "$DSPARK_27B"
-fi
 if ((need_27b_dflash2)); then
     require_dir "--dflash2-27b" "$DFLASH2_27B"
     validate_affine_dflash2 "--dflash2-27b" "$DFLASH2_27B"
@@ -929,18 +831,9 @@ fi
 if ((need_35b_mtp)); then
     require_dir "--mtp-35b" "$MTP_35B"
 fi
-if ((need_35b_dspark)); then
-    require_dir "--dspark-35b" "$DSPARK_35B"
-fi
 if ((need_35b_dflash2)); then
     require_dir "--dflash2-35b" "$DFLASH2_35B"
     validate_affine_dflash2 "--dflash2-35b" "$DFLASH2_35B"
-fi
-if ((need_27b_dspark)); then
-    validate_affine_dspark "--dspark-27b" "$DSPARK_27B"
-fi
-if ((need_35b_dspark)); then
-    validate_affine_dspark "--dspark-35b" "$DSPARK_35B"
 fi
 
 current_machine_id() {
@@ -1005,10 +898,6 @@ reference_config_mismatches() {
         [[ "$(basename "$MTP_27B")" == "$REFERENCE_MTP_27B_DIR_NAME" ]] ||
             mismatches="${mismatches:+$mismatches,}mtp_27b"
     fi
-    if ((need_27b_dspark)); then
-        [[ "$(basename "$DSPARK_27B")" == "$REFERENCE_DSPARK_27B_DIR_NAME" ]] ||
-            mismatches="${mismatches:+$mismatches,}dspark_27b"
-    fi
     if ((need_27b_dflash2)); then
         [[ "$(basename "$DFLASH2_27B")" == "$REFERENCE_DFLASH2_27B_DIR_NAME" ]] ||
             mismatches="${mismatches:+$mismatches,}dflash2_27b"
@@ -1048,10 +937,6 @@ reference_row() {
     apple_m3_max_40_gpu_cores:27b_mtp4:1024:gsm8k_typing_average) echo "36.361|3.843|269|273|199" ;;
     apple_m3_max_40_gpu_cores:27b_mtp4:256:chat) echo "19.214|2.000|256|503|128" ;;
     apple_m3_max_40_gpu_cores:27b_mtp4:1024:chat) echo "18.693|2.197|1024|1853|558" ;;
-    apple_m3_max_40_gpu_cores:27b_dspark_k7:256:gsm8k_typing_average) echo "40.670|4.197|256|413|195" ;;
-    apple_m3_max_40_gpu_cores:27b_dspark_k7:1024:gsm8k_typing_average) echo "43.603|4.537|304|458|237" ;;
-    apple_m3_max_40_gpu_cores:27b_dspark_k7:256:chat) echo "16.363|1.707|256|1020|106" ;;
-    apple_m3_max_40_gpu_cores:27b_dspark_k7:1024:chat) echo "15.790|1.721|1024|4145|429" ;;
     apple_m3_max_40_gpu_cores:27b_dflash2_k7:256:gsm8k_typing_average) echo "44.196|4.571|256|385|200" ;;
     apple_m3_max_40_gpu_cores:27b_dflash2_k7:1024:gsm8k_typing_average) echo "47.769|4.963|397|548|317" ;;
     apple_m3_max_40_gpu_cores:27b_dflash2_k7:256:chat) echo "18.280|1.896|256|919|121" ;;
@@ -1096,11 +981,9 @@ print_config_table() {
         CURRENT_PROMPT_SHA="$PROMPT_SET_SHA256" \
         CURRENT_MODEL_27B="$MODEL_27B" \
         CURRENT_MTP_27B="$MTP_27B" \
-        CURRENT_DSPARK_27B="$DSPARK_27B" \
         CURRENT_DFLASH2_27B="$DFLASH2_27B" \
         CURRENT_MODEL_35B="$MODEL_35B" \
         CURRENT_MTP_35B="$MTP_35B" \
-        CURRENT_DSPARK_35B="$DSPARK_35B" \
         CURRENT_DFLASH2_35B="$DFLASH2_35B" \
         CURRENT_REFERENCE="enabled=$REFERENCE; $REFERENCE_DATE; $REFERENCE_COMMIT; $REFERENCE_MACHINE; runs=$REFERENCE_RUNS; scope=user-table; config=script-defaults" \
         CURRENT_REFERENCE_MISMATCHES="${REFERENCE_CONFIG_MISMATCHES:-none}" \
@@ -1120,11 +1003,9 @@ rows = [
     ("Prompt SHA-256", os.environ["CURRENT_PROMPT_SHA"]),
     ("27B Main", os.environ["CURRENT_MODEL_27B"]),
     ("27B MTP", os.environ["CURRENT_MTP_27B"]),
-    ("27B DSpark", os.environ["CURRENT_DSPARK_27B"]),
     ("27B DFlash2", os.environ["CURRENT_DFLASH2_27B"]),
     ("35B Main", os.environ["CURRENT_MODEL_35B"]),
     ("35B MTP", os.environ["CURRENT_MTP_35B"]),
-    ("35B DSpark", os.environ["CURRENT_DSPARK_35B"]),
     ("35B DFlash2", os.environ["CURRENT_DFLASH2_35B"]),
     ("Reference", os.environ["CURRENT_REFERENCE"]),
     ("Ref mismatch", os.environ["CURRENT_REFERENCE_MISMATCHES"]),
@@ -1648,7 +1529,7 @@ import sys
 
 with open(sys.argv[2], encoding="utf-8") as config_file:
     config = json.load(config_file)
-print(config["block_size"] if sys.argv[1] == "dspark" else config["dflash_config"]["block_size"] - 1)
+print(config["dflash_config"]["block_size"] - 1)
 PY
         )"
     fi
@@ -1668,7 +1549,7 @@ PY
 run_named_case() {
     local num_spec_tokens=""
     case "$1" in
-    *_dspark_k* | *_dflash2_k*) num_spec_tokens="${1##*_k}" ;;
+    *_dflash2_k*) num_spec_tokens="${1##*_k}" ;;
     esac
     case "$1" in
     27b_off)
@@ -1682,9 +1563,6 @@ run_named_case() {
         ;;
     27b_mtp1 | 27b_mtp2 | 27b_mtp3 | 27b_mtp4)
         run_mtp_case 27b "${1#27b_mtp}" "256 1024" target/release/qwen3_5_dense "$MODEL_27B" "$MTP_27B"
-        ;;
-    27b_dspark | 27b_dspark_k*)
-        run_block_spec_case 27b dspark "$num_spec_tokens" "256 1024" target/release/qwen3_5_dense "$MODEL_27B" "$DSPARK_27B"
         ;;
     27b_dflash2 | 27b_dflash2_k*)
         run_block_spec_case 27b dflash2 "$num_spec_tokens" "256 1024" target/release/qwen3_5_dense "$MODEL_27B" "$DFLASH2_27B"
@@ -1700,9 +1578,6 @@ run_named_case() {
         ;;
     35b_mtp1 | 35b_mtp2 | 35b_mtp3 | 35b_mtp4)
         run_mtp_case 35b "${1#35b_mtp}" "256 1024" target/release/qwen3_5_sparse "$MODEL_35B" "$MTP_35B"
-        ;;
-    35b_dspark | 35b_dspark_k*)
-        run_block_spec_case 35b dspark "$num_spec_tokens" "256 1024" target/release/qwen3_5_sparse "$MODEL_35B" "$DSPARK_35B"
         ;;
     35b_dflash2 | 35b_dflash2_k*)
         run_block_spec_case 35b dflash2 "$num_spec_tokens" "256 1024" target/release/qwen3_5_sparse "$MODEL_35B" "$DFLASH2_35B"
@@ -1733,7 +1608,7 @@ REFERENCE_CONFIG_MISMATCHES="$(
 )"
 REPORT_FILE="$(mktemp "${TMPDIR:-/tmp}/psi_dec_qwen35_perf.XXXXXX")"
 if ((SHOW_RUNS)); then
-    echo "CONFIG commit=$GIT_COMMIT dirty=$GIT_DIRTY machine=$MACHINE os=$OS_VERSION arch=$ARCH runs=$RUNS build=$BUILD grpc_port=$PORT num_cache_pages=$NUM_CACHE_PAGES cache_block_tokens=$CACHE_BLOCK_TOKENS max_requests=$MAX_REQUESTS max_tokens=$MAX_TOKENS max_tokens_per_request=$MAX_TOKENS_PER_REQUEST mtp_num_spec_tokens=case-specific block_spec_tokens=${BLOCK_SPEC_TOKENS:-checkpoint-or-case} cases=$CASES case_cooldown_secs=$CASE_COOLDOWN_SECS logging=$LOGGING seed=$SEED temperature=$TEMPERATURE top_k=$TOP_K top_p=$TOP_P enable_thinking=1 prompt_set=$PROMPT_SET prompt_count=${#PROMPTS[@]} prompt_ids=$PROMPT_IDS_CSV prompt_set_sha256=$PROMPT_SET_SHA256 tokenizer=${TOKENIZER:-auto-per-model} model_27b=$MODEL_27B mtp_27b=$MTP_27B dspark_27b=$DSPARK_27B dflash2_27b=$DFLASH2_27B model_35b=$MODEL_35B mtp_35b=$MTP_35B dspark_35b=$DSPARK_35B dflash2_35b=$DFLASH2_35B reference_enabled=$REFERENCE reference_machine=$REFERENCE_MACHINE reference_date=$REFERENCE_DATE reference_commit=$REFERENCE_COMMIT reference_source_tree=$REFERENCE_SOURCE_TREE reference_dirty=$REFERENCE_DIRTY reference_os=$REFERENCE_OS_VERSION reference_arch=$REFERENCE_ARCH reference_runs=$REFERENCE_RUNS reference_scope=user-table reference_config_source=script-defaults reference_cases=$REFERENCE_CASES reference_prompt_set=$REFERENCE_PROMPT_SET reference_prompt_set_sha256=$REFERENCE_PROMPT_SET_SHA256 reference_config_mismatches=${REFERENCE_CONFIG_MISMATCHES:-none}"
+    echo "CONFIG commit=$GIT_COMMIT dirty=$GIT_DIRTY machine=$MACHINE os=$OS_VERSION arch=$ARCH runs=$RUNS build=$BUILD grpc_port=$PORT num_cache_pages=$NUM_CACHE_PAGES cache_block_tokens=$CACHE_BLOCK_TOKENS max_requests=$MAX_REQUESTS max_tokens=$MAX_TOKENS max_tokens_per_request=$MAX_TOKENS_PER_REQUEST mtp_num_spec_tokens=case-specific block_spec_tokens=${BLOCK_SPEC_TOKENS:-checkpoint-or-case} cases=$CASES case_cooldown_secs=$CASE_COOLDOWN_SECS logging=$LOGGING seed=$SEED temperature=$TEMPERATURE top_k=$TOP_K top_p=$TOP_P enable_thinking=1 prompt_set=$PROMPT_SET prompt_count=${#PROMPTS[@]} prompt_ids=$PROMPT_IDS_CSV prompt_set_sha256=$PROMPT_SET_SHA256 tokenizer=${TOKENIZER:-auto-per-model} model_27b=$MODEL_27B mtp_27b=$MTP_27B dflash2_27b=$DFLASH2_27B model_35b=$MODEL_35B mtp_35b=$MTP_35B dflash2_35b=$DFLASH2_35B reference_enabled=$REFERENCE reference_machine=$REFERENCE_MACHINE reference_date=$REFERENCE_DATE reference_commit=$REFERENCE_COMMIT reference_source_tree=$REFERENCE_SOURCE_TREE reference_dirty=$REFERENCE_DIRTY reference_os=$REFERENCE_OS_VERSION reference_arch=$REFERENCE_ARCH reference_runs=$REFERENCE_RUNS reference_scope=user-table reference_config_source=script-defaults reference_cases=$REFERENCE_CASES reference_prompt_set=$REFERENCE_PROMPT_SET reference_prompt_set_sha256=$REFERENCE_PROMPT_SET_SHA256 reference_config_mismatches=${REFERENCE_CONFIG_MISMATCHES:-none}"
 fi
 print_config_table
 for case_index in "${!selected_cases[@]}"; do

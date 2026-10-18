@@ -1,5 +1,4 @@
 use std::collections::VecDeque;
-use std::ops::Range;
 use std::path::Path;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -31,11 +30,8 @@ use inference_executor_core::model::qwen::v3::weight_layout::resolve_qwen3_model
 use inference_executor_core::model::qwen::v3_asr::Qwen3ASRModelConfig;
 use inference_executor_core::model::qwen::v3_asr::weight_layout::Qwen3ASRWeightBindings;
 use inference_executor_core::model::qwen::v3_asr::weight_layout::resolve_qwen3_asr_weight_bindings;
-use inference_executor_core::model::qwen::v3_x::dspark::Qwen3xDSparkConfig;
 use inference_executor_core::sampling::RequestSamplingState;
 use inference_executor_core::sampling::SamplerConfig;
-use inference_executor_core::sampling::SparseRejectionSamplingReqParams;
-use inference_executor_core::sampling::TopKSamplingBounds;
 use inference_runtime_core::compute::BatchDevReq;
 use inference_runtime_core::compute::BatchDeviceRequest;
 use inference_runtime_core::compute::BatchDeviceResponse;
@@ -48,11 +44,9 @@ use crate::checkpoint::SafeTensorStore;
 use crate::def::replay_op::MetalReplayRuntime;
 use crate::def::replay_op::MetalReplaySubmission;
 use crate::model::embedding::Embed;
-use crate::model::main_residual_capture::MainResidualCapture;
 use crate::model::main_resource_embed::MainResourceEmbed;
 use crate::model::page_arena::PageArena;
 use crate::model::qwen::apply_main_gpu_timing;
-use crate::model::qwen::split_main_lane_page_ids;
 use crate::model::qwen::v3::main::Qwen3Main;
 use crate::model::qwen::v3::main::Qwen3MainArgs;
 use crate::model::qwen::v3::main::Qwen3MainReplayKey;
@@ -63,9 +57,6 @@ use crate::model::qwen::v3::main::output::Qwen3GatherUnembedReplayKey;
 use crate::model::qwen::v3::main::text_embed::Qwen3MainTextEmbed;
 use crate::model::qwen::v3::main::text_embed::Qwen3MainTextEmbedArgs;
 use crate::model::qwen::v3::main::text_embed::Qwen3MainTextEmbedReplayKey;
-use crate::model::qwen::v3_x::dspark::execution::Qwen3xDSparkDecodeRecording;
-use crate::model::qwen::v3_x::dspark::execution::Qwen3xDSparkExecution;
-use crate::model::qwen::v3_x::dspark::execution::Qwen3xDSparkPrefillRecording;
 use crate::model::state_snapshot::FullStateIO;
 use crate::model::state_snapshot::GQAStateSnapshotFiles;
 use crate::model::state_snapshot::PageArenaStateSnapshotFiles;
@@ -75,18 +66,11 @@ use crate::model::state_snapshot::StateSnapshotReader;
 use crate::model::state_snapshot::StateSnapshotWriter;
 use crate::model::unembedding::Unembed;
 use crate::replay::Replay;
-use crate::sampling::rejection_replay::PreparedRejection;
-use crate::sampling::rejection_replay::RejectionReplayKey;
-use crate::sampling::rejection_replay::RejectionSamplerInput;
-use crate::sampling::rejection_replay::RejectionSampling;
-use crate::sampling::rejection_replay::RejectionSamplingInput;
-use crate::sampling::spec_probs::SpecProbsStore;
 use crate::sampling::top_k_replay::Sampling;
 use crate::sampling::top_k_replay::SamplingInput;
 use crate::sampling::top_k_replay::TopKSamplingReplayKey;
 use crate::sampling::top_k_sampling::TopKSampling;
 use crate::sampling::top_k_sampling::TopKSamplingOutputBuffers;
-use crate::sampling::top_k_sampling::TopKSamplingWriteDistributionOutput;
 
 mod load;
 
@@ -94,11 +78,9 @@ pub use load::Qwen3ASRLoaded;
 pub use load::Qwen3ExecutorConfig;
 use load::Qwen3ModelLayout;
 pub use load::init_qwen_3_model;
-pub use load::init_qwen_3_model_with_dspark;
 pub use load::init_qwen3_asr_model;
 
 include!("batch.rs");
-include!("dspark.rs");
 include!("main.rs");
 include!("recording.rs");
 include!("sampling.rs");
@@ -107,30 +89,10 @@ const PAGE_ARENA_STATE_FILES: PageArenaStateSnapshotFiles =
     PageArenaStateSnapshotFiles::new(StateSnapshotFile::PageArena);
 const MAIN_GQA_STATE_FILES: GQAStateSnapshotFiles =
     GQAStateSnapshotFiles::new(StateSnapshotFile::MainGQARequestPageTable);
-const DSPARK_GQA_STATE_FILES: GQAStateSnapshotFiles =
-    GQAStateSnapshotFiles::new(StateSnapshotFile::DSparkGQARequestPageTable);
 const VANILLA_STATE_SNAPSHOT_FILES: &[StateSnapshotFile] = &[
     PAGE_ARENA_STATE_FILES.pages(),
     MAIN_GQA_STATE_FILES.request_page_table(),
 ];
-const DSPARK_STATE_SNAPSHOT_FILES: &[StateSnapshotFile] = &[
-    PAGE_ARENA_STATE_FILES.pages(),
-    MAIN_GQA_STATE_FILES.request_page_table(),
-    DSPARK_GQA_STATE_FILES.request_page_table(),
-];
-
-enum Qwen3Speculator {
-    Vanilla,
-    DSpark(Box<Qwen3DSparkSpeculator>),
-}
-
-enum Qwen3WeightSource {
-    Vanilla,
-    DSpark {
-        model_dir: PathBuf,
-        config: Box<Qwen3xDSparkConfig>,
-    },
-}
 
 enum Qwen3Checkpoint {
     Text(Qwen3ModelConfig),
@@ -146,145 +108,9 @@ impl Qwen3Checkpoint {
     }
 }
 
-struct Qwen3DSparkSpeculator {
-    execution: Qwen3xDSparkExecution,
-    rejection_sampling: Replay<RejectionSampling>,
-    spec_probs: SpecProbsStore,
-    target_distribution_indices: Buffer,
-}
-
-impl Qwen3Speculator {
-    fn is_dspark(&self) -> bool {
-        matches!(self, Self::DSpark(_))
-    }
-
-    fn num_spec_tokens(&self) -> usize {
-        match self {
-            Self::Vanilla => 0,
-            Self::DSpark(dspark) => dspark.execution.num_spec_tokens(),
-        }
-    }
-
-    fn num_gqa_page_ids_per_main_lane_block(&self) -> usize {
-        match self {
-            Self::Vanilla => 0,
-            Self::DSpark(dspark) => dspark.execution.num_gqa_page_ids_per_block(),
-        }
-    }
-
-    fn write_page_ids(&self, req_slot: u32, block_index: usize, page_ids: &[u32]) {
-        match self {
-            Self::Vanilla => {
-                assert!(
-                    page_ids.is_empty(),
-                    "Qwen3 Vanilla Main cache block must not contain speculator page IDs"
-                )
-            },
-            Self::DSpark(dspark) => dspark.execution.write_page_ids(req_slot, block_index, page_ids),
-        }
-    }
-
-    fn dspark(&self) -> &Qwen3DSparkSpeculator {
-        match self {
-            Self::Vanilla => panic!("Qwen3 Vanilla executor has no DSpark resources"),
-            Self::DSpark(dspark) => dspark,
-        }
-    }
-
-    fn dspark_mut(&mut self) -> &mut Qwen3DSparkSpeculator {
-        match self {
-            Self::Vanilla => panic!("Qwen3 Vanilla executor has no DSpark resources"),
-            Self::DSpark(dspark) => dspark,
-        }
-    }
-
-    fn reset_req_slots(&mut self, request_slots: &[RawRequestSlot]) {
-        if let Self::DSpark(dspark) = self {
-            dspark.execution.reset_req_slots(request_slots);
-            dspark.spec_probs.reset_req_slots(request_slots);
-        }
-    }
-
-    fn clear_replay_cache(&mut self) {
-        if let Self::DSpark(dspark) = self {
-            dspark.execution.clear_replay_cache();
-            dspark.rejection_sampling.clear();
-        }
-    }
-
-    fn write_full_state(&self, writer: &mut StateSnapshotWriter) -> Result<(), ModelExecutorError> {
-        match self {
-            Self::Vanilla => Ok(()),
-            Self::DSpark(dspark) => dspark.execution.write_full_state(writer, DSPARK_GQA_STATE_FILES),
-        }
-    }
-
-    fn write_selected_state(
-        &self,
-        writer: &mut StateSnapshotWriter,
-        request_slot_ranges: &[Range<RawRequestSlot>],
-    ) -> Result<(), ModelExecutorError> {
-        match self {
-            Self::Vanilla => Ok(()),
-            Self::DSpark(dspark) => {
-                dspark
-                    .execution
-                    .write_selected_state(writer, DSPARK_GQA_STATE_FILES, request_slot_ranges)
-            },
-        }
-    }
-
-    fn unload_state(&mut self) {
-        if let Self::DSpark(dspark) = self {
-            dspark.execution.unload_state();
-        }
-    }
-
-    fn allocate_resources(&mut self, device: &inference_backend_metal::metal::Device) {
-        if let Self::DSpark(dspark) = self {
-            dspark.execution.allocate_resources(device);
-        }
-    }
-
-    fn release_resources(&mut self) {
-        if let Self::DSpark(dspark) = self {
-            dspark.execution.release_resources();
-        }
-    }
-
-    fn attach_state(&mut self) {
-        if let Self::DSpark(dspark) = self {
-            dspark.execution.attach_state();
-        }
-    }
-
-    fn read_full_state(&mut self, reader: &mut StateSnapshotReader) -> Result<(), ModelExecutorError> {
-        match self {
-            Self::Vanilla => Ok(()),
-            Self::DSpark(dspark) => dspark.execution.read_full_state(reader, DSPARK_GQA_STATE_FILES),
-        }
-    }
-
-    fn read_selected_state(
-        &mut self,
-        reader: &mut StateSnapshotReader,
-        request_slot_ranges: &[Range<RawRequestSlot>],
-    ) -> Result<(), ModelExecutorError> {
-        match self {
-            Self::Vanilla => Ok(()),
-            Self::DSpark(dspark) => {
-                dspark
-                    .execution
-                    .read_selected_state(reader, DSPARK_GQA_STATE_FILES, request_slot_ranges)
-            },
-        }
-    }
-}
-
 pub struct Qwen3Executor {
     model_name: String,
     model_dir: PathBuf,
-    weight_source: Qwen3WeightSource,
     checkpoint: Qwen3Checkpoint,
     default_stop_sequences: Vec<Vec<Token>>,
     config: Qwen3ExecutorConfig,
@@ -302,25 +128,19 @@ pub struct Qwen3Executor {
     gather_unembed: Replay<Qwen3GatherUnembed>,
     sampling: Replay<Sampling>,
     sampler: Rc<TopKSampling>,
-    sampler_bounds: TopKSamplingBounds,
     sampler_output: TopKSamplingOutputBuffers,
     request_sampling: RequestSamplingState,
     main_gqa_state: Qwen3MainGQAState,
-    speculator: Qwen3Speculator,
     pages: PageArena,
     pending_transactions: Qwen3PendingTransactions,
     gqa_page_table_layout: GQAPageTableLayout,
-    num_gqa_page_ids_per_main_lane_block: usize,
     unloaded_embed: Option<Embed>,
     unloaded_unembed: Option<Unembed>,
 }
 
 impl Qwen3Executor {
     fn state_snapshot_files(&self) -> &'static [StateSnapshotFile] {
-        match &self.speculator {
-            Qwen3Speculator::Vanilla => VANILLA_STATE_SNAPSHOT_FILES,
-            Qwen3Speculator::DSpark(_) => DSPARK_STATE_SNAPSHOT_FILES,
-        }
+        VANILLA_STATE_SNAPSHOT_FILES
     }
 
     pub fn clear_replay_cache(&mut self) {
@@ -331,17 +151,12 @@ impl Qwen3Executor {
         self.main.clear();
         self.gather_unembed.clear();
         self.sampling.clear();
-        self.speculator.clear_replay_cache();
     }
 
     pub fn unload_weights(&mut self) {
         let embed = self.main_text_embed.component_mut().unload_weights();
         let unembed = self.gather_unembed.component_mut().unload_weights();
 
-        self.main.component_mut().unset_residual_capture();
-        if let Qwen3Speculator::DSpark(dspark) = &mut self.speculator {
-            dspark.execution.unload_weights();
-        }
         self.main.component_mut().unload_weights();
 
         let mut unembed = Rc::try_unwrap(unembed)
@@ -390,18 +205,6 @@ impl Qwen3Executor {
             .component_mut()
             .load_weights(&device, &mut store, self.checkpoint.text(), main)?;
 
-        let residual_capture = match (&mut self.speculator, &self.weight_source) {
-            (Qwen3Speculator::Vanilla, Qwen3WeightSource::Vanilla) => None,
-            (Qwen3Speculator::DSpark(dspark), Qwen3WeightSource::DSpark { model_dir, config }) => {
-                dspark
-                    .execution
-                    .load_weights(&device, model_dir, config, &loaded_embed, &loaded_unembed)?;
-                let capture: Rc<dyn MainResidualCapture> = dspark.execution.main_feature_projector();
-                Some(capture)
-            },
-            _ => panic!("qwen3 speculator and weight source must have matching variants"),
-        };
-        self.main.component_mut().set_residual_capture(residual_capture);
         self.main_text_embed.component_mut().load_weights(loaded_embed);
         self.gather_unembed.component_mut().load_weights(loaded_unembed);
         Ok(())
@@ -422,7 +225,6 @@ impl Qwen3Executor {
             ExecutorHibernationPlan::All => {
                 self.main_gqa_state
                     .write_full_state(&mut writer, MAIN_GQA_STATE_FILES)?;
-                self.speculator.write_full_state(&mut writer)?;
                 self.pages.write_full_state(&mut writer, PAGE_ARENA_STATE_FILES)?;
             },
             ExecutorHibernationPlan::Selected {
@@ -431,7 +233,6 @@ impl Qwen3Executor {
             } => {
                 self.main_gqa_state
                     .write_selected_state(&mut writer, MAIN_GQA_STATE_FILES, request_slot_ranges)?;
-                self.speculator.write_selected_state(&mut writer, request_slot_ranges)?;
                 self.pages
                     .write_selected_state(&mut writer, PAGE_ARENA_STATE_FILES, page_id_ranges)?;
             },
@@ -446,7 +247,6 @@ impl Qwen3Executor {
     ) -> Result<(), ModelExecutorError> {
         self.write_state(snapshot_path, plan)?;
 
-        self.speculator.unload_state();
         self.main.component_mut().unload_state();
         self.main_gqa_state.release_resources();
         self.pages.release_resources();
@@ -466,14 +266,12 @@ impl Qwen3Executor {
         )?;
         let device = self.runtime.device().clone();
         self.main_gqa_state.allocate_resources(&device);
-        self.speculator.allocate_resources(&device);
         self.pages.allocate_resources(&device);
 
         let result = (|| {
             match plan {
                 ExecutorHibernationPlan::All => {
                     self.main_gqa_state.read_full_state(&mut reader, MAIN_GQA_STATE_FILES)?;
-                    self.speculator.read_full_state(&mut reader)?;
                     self.pages.read_full_state(&mut reader, PAGE_ARENA_STATE_FILES)?;
                 },
                 ExecutorHibernationPlan::Selected {
@@ -482,7 +280,6 @@ impl Qwen3Executor {
                 } => {
                     self.main_gqa_state
                         .read_selected_state(&mut reader, MAIN_GQA_STATE_FILES, request_slot_ranges)?;
-                    self.speculator.read_selected_state(&mut reader, request_slot_ranges)?;
                     self.pages
                         .read_selected_state(&mut reader, PAGE_ARENA_STATE_FILES, page_id_ranges)?;
                 },
@@ -491,13 +288,11 @@ impl Qwen3Executor {
         })();
         if let Err(error) = result {
             self.pages.release_resources();
-            self.speculator.release_resources();
             self.main_gqa_state.release_resources();
             return Err(error);
         }
 
         self.main.component_mut().load_state(&self.main_gqa_state);
-        self.speculator.attach_state();
         Ok(())
     }
 }
@@ -513,11 +308,6 @@ pub struct Qwen3ModelOpsRecorder {
     gather_unembed_arguments: ReplayArguments,
     sampling_key: Option<TopKSamplingReplayKey>,
     sampling_arguments: ReplayArguments,
-    rejection_key: Option<RejectionReplayKey>,
-    rejection_arguments: ReplayArguments,
-    rejection_prepared: Option<PreparedRejection>,
-    dspark_spec_prefill: Option<Qwen3xDSparkPrefillRecording>,
-    dspark_spec_decode: Option<Qwen3xDSparkDecodeRecording>,
     num_main_sample_rows: usize,
 }
 
@@ -580,13 +370,9 @@ impl ReplayableDecoderModel for Qwen3Executor {
     }
 
     fn model_mode(&self) -> &'static str {
-        match (&self.checkpoint, &self.speculator) {
-            (Qwen3Checkpoint::Text(_), Qwen3Speculator::Vanilla) => "vanilla",
-            (Qwen3Checkpoint::Text(_), Qwen3Speculator::DSpark(_)) => "dspark",
-            (Qwen3Checkpoint::Asr(_), Qwen3Speculator::Vanilla) => "asr",
-            (Qwen3Checkpoint::Asr(_), Qwen3Speculator::DSpark(_)) => {
-                panic!("Qwen3-ASR does not support DSpark")
-            },
+        match &self.checkpoint {
+            Qwen3Checkpoint::Text(_) => "vanilla",
+            Qwen3Checkpoint::Asr(_) => "asr",
         }
     }
 
@@ -601,7 +387,6 @@ impl ReplayableDecoderModel for Qwen3Executor {
     fn reset_req_slots(&mut self, request_slots: &[RawRequestSlot]) {
         self.request_sampling.reset(request_slots);
         self.main_gqa_state.reset_req_slots(request_slots);
-        self.speculator.reset_req_slots(request_slots);
     }
 
     fn clear_replay_cache(&mut self) {
@@ -705,15 +490,10 @@ impl ReplayableDecoderModel for Qwen3Executor {
             resource_embed_arguments,
             main_key,
             main_arguments,
-            dspark_spec_prefill: None,
-            dspark_spec_decode: None,
             gather_unembed_key: None,
             gather_unembed_arguments: ReplayArguments::new(),
             sampling_key: None,
             sampling_arguments: ReplayArguments::new(),
-            rejection_key: None,
-            rejection_arguments: ReplayArguments::new(),
-            rejection_prepared: None,
             num_main_sample_rows: num_main_output_rows(model_batch_request.microbatch()),
         }
     }
@@ -813,23 +593,11 @@ impl ReplayableDecoderModel for Qwen3Executor {
             "qwen3 sampling rows must match the recording"
         );
         if num_main_sample_rows == 0 {
-            if self.speculator.is_dspark() {
-                self.record_spec(recorder, microbatch);
-            }
             return;
         }
-        if self.speculator.is_dspark() {
-            self.record_rejection_sampling(recorder, microbatch);
-            self.record_spec(recorder, microbatch);
-        } else {
-            assert!(
-                !microbatch.has_spec_tokens(),
-                "Qwen3 without DSpark does not accept speculative input tokens"
-            );
-            let (sampling_key, sampling_arguments) = self.record_sampling(microbatch);
-            recorder.sampling_key = Some(sampling_key);
-            recorder.sampling_arguments = sampling_arguments;
-        }
+        let (sampling_key, sampling_arguments) = self.record_sampling(microbatch);
+        recorder.sampling_key = Some(sampling_key);
+        recorder.sampling_arguments = sampling_arguments;
     }
 
     fn submit_main(&mut self, recorder: &Self::ModelOpsRecorder) -> Self::Submission {
@@ -839,66 +607,31 @@ impl ReplayableDecoderModel for Qwen3Executor {
     fn read_main(
         &mut self,
         recorder: &Self::ModelOpsRecorder,
-        model_batch_req: &Self::ModelBatchRequest,
+        _model_batch_req: &Self::ModelBatchRequest,
         replay_elapsed: Duration,
         gpu_timestamp_durations: Option<&[Duration]>,
     ) -> Self::SampledOutput {
-        if recorder.num_main_sample_rows == 0 {
-            let mut timing = if self.speculator.is_dspark() {
-                ModelOutputTiming {
-                    main_spec_replay_elapsed: replay_elapsed,
-                    ..ModelOutputTiming::default()
-                }
-            } else {
+        let (decisions, mut timing) = if recorder.num_main_sample_rows == 0 {
+            (
+                Vec::new(),
                 ModelOutputTiming {
                     main_replay_elapsed: replay_elapsed,
                     ..ModelOutputTiming::default()
-                }
-            };
-            apply_main_gpu_timing(
-                &mut timing,
-                gpu_timestamp_durations,
-                self.speculator.is_dspark(),
-                recorder.rejection_key.is_some(),
-                recorder.dspark_spec_decode.is_some(),
-            );
-            return Qwen3SampledOutput {
-                decisions: Vec::new(),
-                timing,
-            };
-        }
-        let (mut decisions, mut timing) = if self.speculator.is_dspark() {
-            let read_start = Instant::now();
-            let decisions = self.read_rejection_decisions(recorder, model_batch_req.microbatch());
-            let timing = ModelOutputTiming {
-                main_spec_replay_elapsed: replay_elapsed,
-                rejection_read_elapsed: read_start.elapsed(),
-                spec_passes: 1,
-                ..ModelOutputTiming::default()
-            };
-            (decisions, timing)
+                },
+            )
         } else {
             let read_start = Instant::now();
             let decisions = self.read_sample_decisions(recorder.num_main_sample_rows);
-            let timing = ModelOutputTiming {
-                main_sample_replay_elapsed: replay_elapsed,
-                sample_read_elapsed: read_start.elapsed(),
-                ..ModelOutputTiming::default()
-            };
-            (decisions, timing)
+            (
+                decisions,
+                ModelOutputTiming {
+                    main_sample_replay_elapsed: replay_elapsed,
+                    sample_read_elapsed: read_start.elapsed(),
+                    ..ModelOutputTiming::default()
+                },
+            )
         };
-        if self.speculator.is_dspark() {
-            let read_start = Instant::now();
-            decisions = self.read_dspark_proposal(recorder, decisions);
-            timing.spec_read_elapsed = read_start.elapsed();
-        }
-        apply_main_gpu_timing(
-            &mut timing,
-            gpu_timestamp_durations,
-            self.speculator.is_dspark(),
-            recorder.rejection_key.is_some(),
-            recorder.dspark_spec_decode.is_some(),
-        );
+        apply_main_gpu_timing(&mut timing, gpu_timestamp_durations, false, false, false);
         Qwen3SampledOutput { decisions, timing }
     }
 
@@ -912,7 +645,7 @@ impl ReplayableDecoderModel for Qwen3Executor {
         _model_batch_req: &Self::ModelBatchRequest,
         _sampled_output: &Self::SampledOutput,
     ) {
-        panic!("Qwen3 DSpark Prefill must be recorded with Main")
+        panic!("Qwen3 does not support speculative execution")
     }
 
     fn run_spec_decode(
@@ -929,11 +662,11 @@ impl ReplayableDecoderModel for Qwen3Executor {
         _model_batch_req: &Self::ModelBatchRequest,
         _sampled_output: &Self::SampledOutput,
     ) {
-        panic!("Qwen3 DSpark Decode must be recorded with Main")
+        panic!("Qwen3 does not support speculative execution")
     }
 
     fn submit_spec(&mut self, _recorder: &Self::ModelOpsRecorder) -> Self::Submission {
-        panic!("Qwen3 DSpark Spec must be submitted with Main")
+        panic!("Qwen3 does not support speculative execution")
     }
 
     fn read_spec(
@@ -944,7 +677,7 @@ impl ReplayableDecoderModel for Qwen3Executor {
         _replay_elapsed: Duration,
         _gpu_timestamp_durations: Option<&[Duration]>,
     ) -> Self::SampledOutput {
-        panic!("Qwen3 DSpark Spec results must be read with Main")
+        panic!("Qwen3 does not support speculative execution")
     }
 
     fn empty_sampled_output(&self) -> Self::SampledOutput {

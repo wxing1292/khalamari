@@ -108,7 +108,7 @@ entity when its contract does not need it.
 | Executor core | `*ReplayShape` | One recorded work shape and its submission capacity |
 | Executor core | `ReplayBucketPolicy` | Shared capacity algorithm with executor-supplied topology boundaries |
 | Executor core | `*_reference` | CPU oracle with no Metal dependency |
-| Model executor | `Qwen*`, Main, MTP, DSpark, DFlash2 | Model role, stage order, checkpoint bindings, and persistent state |
+| Model executor | `Qwen*`, Main, MTP, DFlash2 | Model role, stage order, checkpoint bindings, and persistent state |
 | Model executor | `Replay<T>`, `ReplayComponent` | One semantic replay-stage owner and its topology cache |
 | Model executor | `FullStateIO`, `SelectedStateIO` | Full or selected state transfer at the state owner |
 | Executor component | `*Input`, `*Output` | Typed record-time boundary with borrowed resources |
@@ -306,8 +306,8 @@ crates/inference-executor-core/src/
 crates/inference-executor-metal/src/
   attn           GQA/GDN adapters, batch metadata, page/state tables, scratch
   mlp            dense-MLP and MoE adapters
-  model/qwen     semantic model/layer components, weights, replay stages, MTP, DSpark, DFlash2
-  sampling       top-k/top-p, DSpark Markov, DFlash2 selection, and sparse rejection replay owners
+  model/qwen     semantic model/layer components, weights, replay stages, MTP, DFlash2
+  sampling       top-k/top-p, DFlash2 selection, and sparse rejection replay owners
 
 crates/inference-backend-metal/src/
   metal          reusable Metal device/buffer/kernel/stream/replay runtime
@@ -318,10 +318,9 @@ crates/inference-backend-metal/src/
 
 For exact files and current paths, use the component documents:
 
-- [`executor_qwen.md`](executor_qwen.md): Qwen semantic model loading, request state, replay stages, MTP, DSpark, and
+- [`executor_qwen.md`](executor_qwen.md): Qwen semantic model loading, request state, replay stages, MTP and
   DFlash2.
 - [`mtp_design.md`](mtp_design.md): MTP input composition, sequential proposals, cache lanes, and sampling.
-- [`dspark_design.md`](dspark_design.md): DSpark block attention, Markov sampling, confidence, and persistent context.
 - [`dflash2_design.md`](dflash2_design.md): DFlash2 sliding attention, dynamic convolution, and proposal selection.
 - [`executor_gqa.md`](executor_gqa.md): GQA projection, KV pages, attention map and reduce, and outputs.
 - [`executor_gdn.md`](executor_gdn.md): GDN projection, short convolution, recurrence, and state pages.
@@ -348,7 +347,7 @@ token IDs
   -> final norm
   -> unembedding
   -> ordinary sampling or Main verification distributions
-  -> optional MTP, DSpark, or DFlash2 proposal and rejection flow
+  -> optional MTP or DFlash2 proposal and rejection flow
 ```
 
 Normalized model configuration selects each layer variant. Exact typed binding subtrees identify the weights.
@@ -515,8 +514,6 @@ Qwen keeps separate replay caches for these semantically separate stages:
 - GDN state restore
 - Ordinary sampling
 - MTP proposal
-- DSpark context append
-- DSpark proposal
 - DFlash2 history append
 - DFlash2 proposal
 - Spec sampling
@@ -527,7 +524,7 @@ create a cache boundary.
 
 Normal forward, output, and sampling commands can share one ordered command buffer when they share one dependency chain.
 
-Qwen3 and Qwen3.5 DSpark, and Qwen3.5 DFlash2, record Main, rejection sampling, Spec Decode prepare, Spec
+Qwen3.5 DFlash2 record Main, rejection sampling, Spec Decode prepare, Spec
 Prefill, Spec Decode, and proposal sampling in one ordered GPU submission. Qwen3.5 MTP retains its established
 Spec lifecycle boundary. GDN chunkwise forward writes final and cache-boundary states. GDN replay Decode retains
 per-forward deltas and reconstructs the accepted state after sampling. Reconstruction and page publication share one
@@ -552,7 +549,7 @@ The first Spec form is one combined invocation.
 Qwen3.5 MTP uses this form and keeps its existing `embed_spec`, `forward_spec`, `unembed_spec`, and `sample_spec` order.
 
 The second Spec form is the generic interface vocabulary for independent Prefill and Decode invocations.
-Qwen3 and Qwen3.5 DSpark, and Qwen3.5 DFlash2, do not select this later fixed-block hook lifecycle.
+Qwen3.5 DFlash2 do not select this later fixed-block hook lifecycle.
 They record the fixed-block sequence as part of Main recording:
 
 ```text
@@ -587,7 +584,7 @@ results. It does not free globally owned pages or commit scheduler state indepen
 `inference-executor-core` owns `ReplayableDecoderModel`, `ReplayableEncoderModel`, executor timing, submission, and page
 interpretation contracts.
 `ReplayableDecoderModel` also defines synchronous model residency operations.
-`model_name()` reports model identity. `model_mode()` reports the executor-owned `vanilla`, `mtp`, `dspark`, or
+`model_name()` reports model identity. `model_mode()` reports the executor-owned `vanilla`, `mtp`, or
 `dflash2` composition mode for service telemetry.
 All recoverable model operations return `ModelExecutorError`.
 Current Qwen model executors support this order:
@@ -681,9 +678,8 @@ force the same lifecycle on components that have different ownership contracts.
   compare only the active logical output with CPU references.
 - The Qwen3.5 MTPEmbed component test uses nonzero weights. It compares previous-hidden gather, token embedding, and
   the complete norm-concat-projection output with CPU references.
-- The Unembed test protects numerical replay parity. Qwen3, Qwen3.5, and DSpark GatherUnembed tests compose gather and
-  affine-unembed CPU references across all active counts for one recorded capacity. The DSpark test also protects the
-  request-major to step-major row conversion.
+- The Unembed test protects numerical replay parity. Qwen3 and Qwen3.5 GatherUnembed tests compose gather and
+  affine-unembed CPU references across all active counts for one recorded capacity.
 
 Do not add a component test that only inspects replay keys, arguments, capacity identities, or record wiring. A replay
 contract test must execute the production owner, prove cache reuse across active counts, and compare the active logical

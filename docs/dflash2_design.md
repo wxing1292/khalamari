@@ -9,7 +9,7 @@ Use [Proposal block and attention](#proposal-block-and-attention) for row counts
 
 ## Scope and ownership
 
-DFlash2 and DSpark are independent Spec model roles.
+DFlash2 owns an independent Spec model role.
 
 | Owner | Responsibility |
 | --- | --- |
@@ -55,7 +55,6 @@ Only MASK rows produce proposals. For `N = 3`, the row-to-token relation is:
 | Embedding, attention, and dynamic convolution | `N + 1` |
 | Output gathering, selection, and draft distributions | `N` |
 
-[DSpark](dspark_design.md#proposal-block-and-attention) instead uses `N` query rows, including an anchor row that produces its first proposal.
 The DFlash2 query block must be smaller than `sliding_window`.
 Each layer reduces SplitKV history partials with bidirectional local-block SDPA partials.
 

@@ -754,7 +754,7 @@ Earlier input rows update MTP context and provide hidden inputs to the next modu
 
 | Area                      | Current contract                                                                                                                        |
 | ------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
-| Mode                      | Qwen3.5 MTP, DSpark, and DFlash2 are mutually exclusive                                                                                 |
+| Mode                      | Qwen3.5 MTP and DFlash2 are mutually exclusive                                                                                 |
 | Checkpoint                | Exactly one physical GQA body layer, with dense MLP or MoE                                                                              |
 | Shared weights            | Main token embedding and unembedding. No dedicated MTP embedding.                                                                       |
 | Validation                | Main-compatible hidden/attention/expert geometry, shared scratch geometry, exact tensor manifest, and quantized MTPEmbed projection     |
@@ -768,7 +768,7 @@ Earlier input rows update MTP context and provide hidden inputs to the next modu
 | Body replay key           | Token capacity, GQA capacity/topology, MLP topology                                                                                     |
 | Submission parameters     | Active counts and logical GQA layer index                                                                                               |
 | Sequential readback       | Wait/read after each non-final step before preparing the next step                                                                      |
-| External lifecycle        | One `submit_spec -> wait -> read_spec` transaction, not the fixed-block DSpark/DFlash2 lifecycle                                        |
+| External lifecycle        | One `submit_spec -> wait -> read_spec` transaction, not the fixed-block DFlash2 lifecycle                                        |
 | Draft distribution row    | `req_slot * K + step_index`, containing the exact sampled distribution                                                                  |
 | Confidence                | No confidence head. Each returned speculative confidence is `1.0`.                                                                      |
 

@@ -4,20 +4,12 @@ use std::path::PathBuf;
 
 mod checkpoint;
 mod dflash2;
-mod dspark;
 
 use checkpoint::Result;
 use checkpoint::error;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum Model {
-    DSpark,
-    DFlash2,
-}
-
 #[derive(Debug)]
 struct Args {
-    model: Model,
     input_dir: PathBuf,
     output_dir: PathBuf,
     group_size: usize,
@@ -35,39 +27,25 @@ fn main() -> std::result::Result<(), Box<dyn Error>> {
         return Ok(());
     }
     let args = Args::parse(arguments)?;
-    match args.model {
-        Model::DSpark => {
-            dspark::convert(
-                &args.input_dir,
-                &args.output_dir,
-                args.group_size,
-                args.bits,
-                args.model_bits,
-            )?
-        },
-        Model::DFlash2 => {
-            dflash2::convert(
-                &args.input_dir,
-                &args.output_dir,
-                args.group_size,
-                args.bits,
-                args.model_bits,
-            )?
-        },
-    }
+    dflash2::convert(
+        &args.input_dir,
+        &args.output_dir,
+        args.group_size,
+        args.bits,
+        args.model_bits,
+    )?;
     Ok(())
 }
 
 impl Args {
     fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Self> {
         let mut args = args.into_iter();
-        let model = match args
+        match args
             .next()
             .ok_or_else(|| error(format!("missing model subcommand\n{}", usage())))?
             .to_str()
         {
-            Some("dspark") => Model::DSpark,
-            Some("dflash2") => Model::DFlash2,
+            Some("dflash2") => {},
             Some(name) => return Err(error(format!("unknown model subcommand {name:?}\n{}", usage()))),
             None => return Err(error("model subcommand is not valid UTF-8")),
         };
@@ -75,10 +53,7 @@ impl Args {
         let mut output_dir = None;
         let mut group_size = 64;
         let mut bits = 4;
-        let mut model_bits = match model {
-            Model::DSpark => 8,
-            Model::DFlash2 => 6,
-        };
+        let mut model_bits = 6;
         while let Some(argument) = args.next() {
             let name = argument
                 .to_str()
@@ -91,13 +66,11 @@ impl Args {
                 "--output-dir" => output_dir = Some(PathBuf::from(value)),
                 "--group-size" => group_size = parse_usize(name, &value)?,
                 "--bits" => bits = parse_usize(name, &value)?,
-                "--markov-w2-bits" if model == Model::DSpark => model_bits = parse_usize(name, &value)?,
-                "--high-bits" if model == Model::DFlash2 => model_bits = parse_usize(name, &value)?,
-                _ => return Err(error(format!("unknown argument {name:?} for {model:?}\n{}", usage()))),
+                "--high-bits" => model_bits = parse_usize(name, &value)?,
+                _ => return Err(error(format!("unknown argument {name:?}\n{}", usage()))),
             }
         }
         Ok(Self {
-            model,
             input_dir: input_dir.ok_or_else(|| error(format!("missing --input-dir\n{}", usage())))?,
             output_dir: output_dir.ok_or_else(|| error(format!("missing --output-dir\n{}", usage())))?,
             group_size,
@@ -116,9 +89,8 @@ fn parse_usize(name: &str, value: &std::ffi::OsStr) -> Result<usize> {
 }
 
 fn usage() -> &'static str {
-    "usage:\n  qwen3x_spec_quantize dspark --input-dir DIR --output-dir DIR [--group-size 64] [--bits 4] \
-     [--markov-w2-bits 8]\n  qwen3x_spec_quantize dflash2 --input-dir DIR --output-dir DIR [--group-size 64] [--bits \
-     4] [--high-bits 6]"
+    "usage:\n  qwen3x_spec_quantize dflash2 --input-dir DIR --output-dir DIR [--group-size 64] [--bits 4] [--high-bits \
+     6]"
 }
 
 #[cfg(test)]
@@ -132,8 +104,6 @@ mod tests {
     use half::bf16;
     use inference_executor_core::model::qwen::v3_x::dflash2::Qwen3xDFlash2Config;
     use inference_executor_core::model::qwen::v3_x::dflash2::init_qwen3x_dflash2_config;
-    use inference_executor_core::model::qwen::v3_x::dspark::Qwen3xDSparkConfig;
-    use inference_executor_core::model::qwen::v3_x::dspark::init_qwen3x_dspark_config;
     use safetensors::Dtype;
     use safetensors::SafeTensors;
     use safetensors::tensor::View;
@@ -163,45 +133,6 @@ mod tests {
         fn data_len(&self) -> usize {
             self.data.len()
         }
-    }
-
-    #[test]
-    fn test_dspark_checkpoint_uses_shared_bf16_affine_contract() {
-        let root = test_root("dspark");
-        let input_dir = root.join("input");
-        let output_dir = root.join("output");
-        std::fs::create_dir_all(&input_dir).unwrap();
-        write_input(&input_dir, dspark_config(), |input_dir| {
-            let config = init_qwen3x_dspark_config(input_dir).unwrap();
-            dspark_tensors(&config)
-        });
-
-        dspark::convert(&input_dir, &output_dir, 32, 4, 8).unwrap();
-
-        let bytes = std::fs::read(output_dir.join("model.safetensors")).unwrap();
-        let checkpoint = SafeTensors::deserialize(&bytes).unwrap();
-        assert_index_matches(&output_dir, &checkpoint);
-        assert_eq!(checkpoint.tensor("fc.weight").unwrap().dtype(), Dtype::U32);
-        assert_eq!(checkpoint.tensor("fc.scales").unwrap().dtype(), Dtype::BF16);
-        assert_eq!(checkpoint.tensor("fc.biases").unwrap().dtype(), Dtype::BF16);
-        assert_eq!(checkpoint.tensor("fc.weight").unwrap().shape(), [64, 16]);
-        assert_eq!(checkpoint.tensor("fc.scales").unwrap().shape(), [64, 4]);
-        assert_eq!(
-            checkpoint.tensor("markov_head.markov_w2.weight").unwrap().shape(),
-            [128, 16]
-        );
-        assert_eq!(
-            checkpoint.tensor("confidence_head.proj.weight").unwrap().dtype(),
-            Dtype::BF16
-        );
-        assert_eq!(
-            checkpoint.tensor("confidence_head.proj.bias").unwrap().dtype(),
-            Dtype::BF16
-        );
-        let output_config = read_output_config(&output_dir);
-        assert_eq!(output_config["quantization"]["bits"], 4);
-        assert_eq!(output_config["quantization"]["markov_head.markov_w2"]["bits"], 8);
-        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -307,79 +238,6 @@ mod tests {
 
     fn read_output_config(output_dir: &Path) -> serde_json::Value {
         serde_json::from_slice(&std::fs::read(output_dir.join("config.json")).unwrap()).unwrap()
-    }
-
-    fn dspark_config() -> serde_json::Value {
-        serde_json::json!({
-            "architectures": ["Qwen3DSparkModel"],
-            "model_type": "qwen3",
-            "block_size": 5,
-            "mask_token_id": 127,
-            "target_layer_ids": [0, 1],
-            "dtype": "bfloat16",
-            "attention_bias": false,
-            "attention_dropout": 0.0,
-            "hidden_act": "silu",
-            "hidden_size": 64,
-            "intermediate_size": 128,
-            "num_hidden_layers": 2,
-            "num_attention_heads": 4,
-            "num_key_value_heads": 2,
-            "num_target_layers": 3,
-            "head_dim": 16,
-            "rms_norm_eps": 1e-6,
-            "rope_theta": 10000000.0,
-            "max_position_embeddings": 8192,
-            "vocab_size": 128,
-            "markov_rank": 64,
-            "markov_head_type": "vanilla",
-            "layer_types": ["full_attention", "full_attention"],
-            "enable_confidence_head": true,
-            "confidence_head_with_markov": true,
-            "use_cache": true,
-            "use_sliding_window": false,
-            "sliding_window": null,
-            "rope_parameters": {
-                "rope_theta": 10000000.0,
-                "rope_type": "default"
-            }
-        })
-    }
-
-    fn dspark_tensors(config: &Qwen3xDSparkConfig) -> BTreeMap<String, OwnedTensor> {
-        let mut tensors = BTreeMap::new();
-        insert_matrix(&mut tensors, "fc.weight", config.hidden_size, config.hidden_size * 2);
-        insert_vector(&mut tensors, "hidden_norm.weight", config.hidden_size);
-        insert_vector(&mut tensors, "norm.weight", config.hidden_size);
-        insert_matrix(
-            &mut tensors,
-            "markov_head.markov_w1.weight",
-            config.vocab_size,
-            config.markov_rank,
-        );
-        insert_matrix(
-            &mut tensors,
-            "markov_head.markov_w2.weight",
-            config.vocab_size,
-            config.markov_rank,
-        );
-        insert_matrix(
-            &mut tensors,
-            "confidence_head.proj.weight",
-            1,
-            config.hidden_size + config.markov_rank,
-        );
-        insert_vector(&mut tensors, "confidence_head.proj.bias", 1);
-        insert_layers(
-            &mut tensors,
-            config.num_hidden_layers,
-            config.hidden_size,
-            config.intermediate_size,
-            config.num_attention_heads,
-            config.num_key_value_heads,
-            config.head_dim,
-        );
-        tensors
     }
 
     fn dflash2_config() -> serde_json::Value {

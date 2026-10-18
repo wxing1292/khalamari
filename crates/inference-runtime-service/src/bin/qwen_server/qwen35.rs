@@ -5,12 +5,10 @@ use inference_executor_core::model::ReplayableDecoderModel;
 use inference_executor_core::model::qwen::v3_5::Qwen35ModelConfig;
 use inference_executor_core::model::qwen::v3_5::init_qwen35_model_config;
 use inference_executor_core::model::qwen::v3_x::dflash2::init_qwen3x_dflash2_config;
-use inference_executor_core::model::qwen::v3_x::dspark::init_qwen3x_dspark_config;
 use inference_executor_metal::model::qwen::v3_5::executor::Qwen35Executor;
 use inference_executor_metal::model::qwen::v3_5::executor::Qwen35ExecutorConfig;
 use inference_executor_metal::model::qwen::v3_5::executor::init_qwen_3_5_model;
 use inference_executor_metal::model::qwen::v3_5::executor::init_qwen_3_5_model_with_dflash2;
-use inference_executor_metal::model::qwen::v3_5::executor::init_qwen_3_5_model_with_dspark;
 use inference_executor_metal::model::qwen::v3_5::executor::init_qwen_3_5_model_with_mtp;
 use inference_runtime_core::Result;
 use inference_runtime_core::config::CacheLaneRuntimeConfig;
@@ -198,16 +196,6 @@ fn build_model(
                 model_dir,
                 num_spec_tokens,
             } => init_qwen_3_5_model_with_mtp(hf_model_dir, model_dir, *num_spec_tokens, executor_config),
-            Qwen35ModelMode::DSpark {
-                model_dir,
-                num_spec_tokens,
-            } => {
-                let num_spec_tokens = match num_spec_tokens {
-                    Some(count) => *count,
-                    None => init_qwen3x_dspark_config(model_dir)?.num_spec_tokens(),
-                };
-                init_qwen_3_5_model_with_dspark(hf_model_dir, model_dir, num_spec_tokens, executor_config)
-            },
             Qwen35ModelMode::DFlash2 {
                 model_dir,
                 num_spec_tokens,
@@ -258,7 +246,7 @@ fn build_runtime_config(
         });
     }
     let block_spec_num_spec_tokens = match service_config.model_mode() {
-        Qwen35ModelMode::DSpark { .. } | Qwen35ModelMode::DFlash2 { .. } => model.num_spec_tokens(),
+        Qwen35ModelMode::DFlash2 { .. } => model.num_spec_tokens(),
         Qwen35ModelMode::Vanilla | Qwen35ModelMode::MTP { .. } => 0,
     };
     let runtime_config = RuntimeConfig {

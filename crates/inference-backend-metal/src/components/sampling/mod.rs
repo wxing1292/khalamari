@@ -25,14 +25,6 @@
 //!            |
 //!            +--> accepted draft tokens
 //!            +--> sampled bonus token
-//!
-//! base logits + indexed Markov input token
-//!            |
-//!            v
-//! dspark_markov::MapCompute
-//!            |
-//!            v
-//!      top_k::ReduceCompute
 //! ```
 
 const SAMPLING_SOURCE: &str = include_str!("../metal/sampling.metal");
@@ -58,7 +50,6 @@ fn checked_bytes(name: &str, num_elements: usize, item_size: usize) -> usize {
         .unwrap_or_else(|| panic!("{name} byte length must fit usize"))
 }
 
-pub mod dspark_markov;
 pub mod dflash2_selector;
 pub mod rejection;
 pub mod spec_decode_input;

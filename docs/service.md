@@ -180,17 +180,17 @@ The service provides Qwen3, Qwen3-ASR, and Qwen3.5 binaries.
 The Qwen3.5 binary names also apply to compatible Qwen3.6 and Qwen3.8 MLX checkpoints.
 The text-generation binaries can use optional speculative models.
 
-DSpark and DFlash2 support is experimental.
+DFlash2 support is experimental.
 Their checkpoint contracts, CLI, cache sizing, and proposal policies may change.
 
 The following table maps model families to binaries and checkpoints:
 
 | Model                  | Binary           | Main checkpoint                      | Optional Spec checkpoint                  |
 | ---------------------- | ---------------- | ------------------------------------ | ----------------------------------------- |
-| Qwen3 dense 14B        | `qwen3`          | `mlx-community/Qwen3-14B-4bit`       | optional official Qwen3 DSpark checkpoint |
+| Qwen3 dense 14B        | `qwen3`          | `mlx-community/Qwen3-14B-4bit`       | none |
 | Qwen3-ASR 1.7B         | `qwen3_asr`      | `mlx-community/Qwen3-ASR-1.7B-8bit`  | none                                      |
-| Qwen3.8 dense 27B      | `qwen3_5_dense`  | `mlx-community/Qwen3.8-27B-4bit`     | matching MTP, Qwen3x DSpark, or Qwen3x DFlash2 |
-| Qwen3.6 sparse 35B-A3B | `qwen3_5_sparse` | `mlx-community/Qwen3.6-35B-A3B-4bit` | matching MTP, Qwen3x DSpark, or Qwen3x DFlash2 |
+| Qwen3.8 dense 27B      | `qwen3_5_dense`  | `mlx-community/Qwen3.8-27B-4bit`     | matching MTP or Qwen3x DFlash2 |
+| Qwen3.6 sparse 35B-A3B | `qwen3_5_sparse` | `mlx-community/Qwen3.6-35B-A3B-4bit` | matching MTP or Qwen3x DFlash2 |
 
 Download with the Hugging Face CLI:
 
@@ -200,41 +200,20 @@ hf download mlx-community/Qwen3-14B-4bit --local-dir models/Qwen3-14B-4bit
 hf download mlx-community/Qwen3-ASR-1.7B-8bit --local-dir models/Qwen3-ASR-1.7B-8bit
 hf download mlx-community/Qwen3.8-27B-4bit --local-dir models/Qwen3.8-27B-4bit
 hf download mlx-community/Qwen3.8-27B-MTP-4bit --local-dir models/Qwen3.8-27B-MTP-4bit
-hf download RadixArk/Qwen3.8-27B-DSpark --local-dir models/Qwen3.8-27B-DSpark
 hf download z-lab/Qwen3.8-27B-DFlash2 --local-dir models/Qwen3.8-27B-DFlash2
 ```
 
 Use the corresponding 35B-A3B names for the sparse model. MTP checkpoints contain Spec weights. They must match the
 Main model family.
 
-The DSpark and DFlash2 repositories contain BF16 source checkpoints. Convert these checkpoints before service startup.
-Both converter subcommands use the same affine format:
+The DFlash2 repository contains a BF16 source checkpoint. Convert it before service startup.
+The converter uses this affine format:
 
 - Matrix payloads use packed `U32` storage.
 - Affine scales and biases use BF16 storage.
 - Quantization calculations use F32.
 - Packed codes use the final stored BF16 scale and bias values.
 - Unquantized tensors preserve their source BF16 dtype.
-
-### Qwen3x DSpark conversion
-
-Convert an official BF16 Qwen3x DSpark checkpoint to the affine executor format:
-
-```sh
-cargo run --bin qwen3x_spec_quantize -- dspark \
-  --input-dir /path/to/Qwen3-DSpark \
-  --output-dir /path/to/Qwen3-DSpark-affine \
-  --group-size 64 --bits 4 --markov-w2-bits 8
-```
-
-The output directory must not exist before you run the converter.
-The converter writes `model.safetensors` and `model.safetensors.index.json`.
-It preserves the confidence projection and bias as BF16.
-The input must be the official BF16 DSpark checkpoint.
-The flat DSpark query projection width can differ from `hidden_size`.
-The converter and loader derive the query width from `num_attention_heads * head_dim`.
-An affine checkpoint that was generated before confidence support does not contain these tensors.
-Regenerate that checkpoint into a new output directory.
 
 ### Qwen3x DFlash2 conversion
 
@@ -289,29 +268,7 @@ It defaults to 8,192 shared cache pages, two running requests, 128 flattened bat
 request transaction.
 It uses one compute lane and does not use a speculative checkpoint.
 
-Qwen3 startup with DSpark:
-
-```sh
-cargo run --release --bin qwen3 -- \
-  --grpc-listen-addr 127.0.0.1:50061 \
-  --http-listen-addr 127.0.0.1:8000 \
-  --hf-model-dir "$PWD/models/Qwen3-14B-4bit" \
-  --hf-spec-model-dir "$PWD/models/Qwen3-DSpark-affine" \
-  --spec-type dspark
-```
-
 The Qwen3 executor gets stop tokens from the checkpoint configuration when `generation_config.json` is absent.
-
-Qwen3.5/Qwen3.6 dense startup with DSpark:
-
-```sh
-cargo run --release --bin qwen3_5_dense -- \
-  --grpc-listen-addr 127.0.0.1:50061 \
-  --http-listen-addr 127.0.0.1:8000 \
-  --hf-model-dir "$PWD/models/Qwen3.6-27B-4bit" \
-  --hf-spec-model-dir "$PWD/models/Qwen3.6-27B-DSpark-affine" \
-  --spec-type dspark
-```
 
 Qwen3.8 dense startup with DFlash2:
 
@@ -324,8 +281,8 @@ cargo run --release --bin qwen3_5_dense -- \
   --spec-type dflash2
 ```
 
-The Qwen3 service accepts only `--spec-type dspark`.
-The Qwen3.5 services accept `mtp`, `dspark`, and `dflash2`.
+The Qwen3 service does not accept speculative-model options.
+The Qwen3.5 services accept `mtp` and `dflash2`.
 
 Qwen3.5/Qwen3.6/Qwen3.8 startup with MTP enabled:
 
@@ -352,24 +309,23 @@ cargo run --release --bin qwen3_5_sparse -- \
   --spec-type mtp
 ```
 
-The normal MTP, DSpark, and DFlash2 commands use the same service and scheduler arguments.
+The normal MTP and DFlash2 commands use the same service and scheduler arguments.
 Select the Spec checkpoint with these paired arguments:
 
 ```text
 --hf-spec-model-dir DIR
---spec-type {mtp,dspark,dflash2}
+--spec-type {mtp,dflash2}
 ```
 
 An MTP checkpoint enables one speculative MTP step by default.
-`--num-spec-tokens K` sets the generated proposal count for MTP, DSpark, or DFlash2.
+`--num-spec-tokens K` sets the generated proposal count for MTP or DFlash2.
 It takes a positive `usize` value and remains fixed for the server lifetime.
 The executor reuses the checkpoint's one physical MTP layer for K dependent logical steps.
 Omit `--num-spec-tokens` to use one MTP step.
 `--max-tokens-per-request` must not exceed `--max-tokens`.
 For MTP with K speculative tokens, `--max-tokens-per-request` must be at least K.
 An MTP decode request must contain at least K initial input tokens.
-Without an override, DSpark generates checkpoint `block_size` proposals and DFlash2 generates `block_size - 1` proposals.
-With `--num-spec-tokens K`, DSpark executes one anchor and `K - 1` MASK rows. All K rows predict proposals.
+Without an override, DFlash2 generates `block_size - 1` proposals.
 DFlash2 executes one anchor and K MASK rows. Only the MASK rows predict proposals.
 The override changes draft computation, scratch, replay, and sampling. It does not change weights or checkpoint files.
 K must be smaller than `max_position_embeddings`. DFlash2 also requires `K + 1 < sliding_window`.
@@ -382,7 +338,7 @@ It has no dependency on runtime core, model executors, or Metal.
 The service consumes the same CLI schemas and validation.
 `qwen3_5_dense` and `qwen3_5_sparse` validate the normal CLI without instantiating a model runtime.
 For MTP with K speculative tokens, the launcher calculates `L = K + 1`.
-For Vanilla, DSpark, and DFlash2, it uses `L = 1`.
+For Vanilla and DFlash2, it uses `L = 1`.
 
 Each launcher generates a small package under `target/specialized/<binary>_lanes_L`.
 Its entry point calls the matching service function with const `L`.
@@ -432,7 +388,7 @@ The Qwen3-14B geometry stores 16 tokens in one physical page.
 Its 16-token logical cache block uses 40 pages across 40 layers. Thus, the default holds 8,192 complete blocks. These
 blocks contain 131,072 resident tokens in aggregate.
 
-When DSpark or DFlash2 is enabled, the executor adds persistent Spec history pages to the same logical block.
+When DFlash2 is enabled, the executor adds persistent Spec history pages to the same logical block.
 The page count depends on the selected Spec layer and KV geometry.
 
 Qwen3.5 keeps 2,048-token logical blocks to amortize its GDN snapshots. It defaults to 320K shared pages.
@@ -444,7 +400,7 @@ At startup, each service derives the page count for one block from the initializ
 The service classifies a model-executor initialization failure as an internal startup error.
 
 The service also derives the runtime `context_window` from the Main model's `max_position_embeddings`. Vanilla and MTP
-use the Main value. DSpark and DFlash2 subtract the runtime proposal count because the block-Spec model
+use the Main value. DFlash2 subtracts the runtime proposal count because the block-Spec model
 applies RoPE to the Main sampled anchor and the complete proposal block. Startup configuration logs include the
 effective `context_window`.
 
@@ -455,7 +411,7 @@ pressure.
 
 `Qwen3Config` and `Qwen35Config` resolve the running-request and per-batch capacities.
 CLI checkpoint arguments remain optional parser inputs.
-Configuration validation converts them to one `Vanilla`, `MTP`, `DSpark`, or `DFlash2` model mode.
+Qwen3.5 configuration validation converts them to one `Vanilla`, `MTP`, or `DFlash2` model mode.
 The validated configuration does not store independent speculative-model options.
 `--max-requests` defines both the running request-slot capacity and the per-batch request capacity.
 The model service passes this value to the executor, `RuntimeConfig`, and `SchedulerConfig`.
@@ -467,7 +423,7 @@ GDN retains the current state and destinations for the accepted final state and 
 Decode writes transient per-forward deltas. It does not reserve a full state for every speculative prefix.
 Buffers, scratch allocations, replay resources, and resident model resources remain reusable.
 
-Qwen3.5 derives the same request-local GDN slot count for Vanilla, MTP, DSpark, and DFlash2:
+Qwen3.5 derives the same request-local GDN slot count for Vanilla, MTP and DFlash2:
 
 ```text
 block_boundary_states = ceil(max_tokens_per_request / num_tokens_per_block)
@@ -922,12 +878,7 @@ The current implementation submits each dependent pass separately and reads its 
 prepares the next pass.
 All passes reuse the same recorded replay programs, weights, scratch, and bound workspaces.
 
-A DSpark-enabled batch records DSpark Prefill after Main in the same ordered GPU submission.
-DSpark Prefill creates persistent DSpark history K/V from the Main capture.
-A decode-ready batch then records GPU Spec Decode prepare and DSpark Spec Decode before that submission.
-DSpark Spec Decode contains DSparkEmbed, DSpark, DSparkGatherUnembed, and DSparkSampling.
-
-A DFlash2-enabled batch uses the same integrated Main submission through its separate owner.
+A DFlash2-enabled batch records Main, rejection sampling, and Spec work in one ordered GPU submission.
 DFlash2 Prefill creates persistent DFlash2 history K/V from the Main capture.
 A decode-ready batch records GPU Spec Decode prepare and DFlash2 Spec Decode after Prefill and before submission.
 DFlash2 Spec Decode contains DFlash2Embed, the DFlash2 body, and DFlash2Output.
@@ -936,13 +887,13 @@ grouped convolution.
 DFlash2Output builds and samples the candidate lattice and writes sparse draft distributions.
 
 `--logging debug` emits one DEBUG `phase="executor.batch.perf"` event after each non-empty executor batch. The event
-uses the same schema for Vanilla, MTP, DSpark, and DFlash2. It also uses the same schema for prefill and decode batches:
+uses the same schema for Vanilla, MTP and DFlash2. It also uses the same schema for prefill and decode batches:
 
 ```text
 component="executor"
 phase="executor.batch.perf"
 model="qwen3.5"
-model_mode="vanilla|mtp|dspark|dflash2"
+model_mode="vanilla|mtp|dflash2"
 batch_seq=42
 num_reqs=4
 num_input_tokens=12
@@ -974,13 +925,13 @@ batches before they calculate `acceptance_rate_by_index`.
 
 `main_cpu_ms` covers
 `MainTextEmbed -> MainResourceEmbed? -> Main -> GatherUnembed -> Sampling/RejectionSampling -> submit/wait -> read`.
-For Qwen3 and Qwen3.5 DSpark, and for Qwen3.5 DFlash2, it also covers GPU Spec Decode prepare, Spec Prefill, Spec
+For Qwen3.5 DFlash2, it also covers GPU Spec Decode prepare, Spec Prefill, Spec
 Decode, proposal sampling, and proposal read in the same ordered submission.
-`spec_cpu_ms` covers a separate Spec lifecycle. Qwen3.5 MTP uses this boundary. DSpark and DFlash2 do not, so their
+`spec_cpu_ms` covers a separate Spec lifecycle. Qwen3.5 MTP uses this boundary. DFlash2 do not, so their
 `spec_cpu_ms` is zero.
-DSpark or DFlash2 prefill-only batches can have nonzero `main_cpu_ms` and zero `spec_passes`.
+DFlash2 prefill-only batches can have nonzero `main_cpu_ms` and zero `spec_passes`.
 `executor_cpu_ms` is `main_cpu_ms + spec_cpu_ms`. Use `executor_cpu_ms` to compare the complete CPU-observed
-Main-to-Spec lifecycle across the old split DSpark or DFlash2 lifecycle and the integrated lifecycle. Do not compare
+Main-to-Spec lifecycle across the old split DFlash2 lifecycle and the integrated lifecycle. Do not compare
 old `main_cpu_ms` directly with integrated `main_cpu_ms` because the integrated value includes fixed-block Spec work.
 `spec_passes` counts Spec Decode forwards. The `*_cpu_ms` fields are CPU-observed wall latencies. They include GPU
 wait time and do not measure CPU active execution. The `*_gpu_ms` fields are GPU-observed Metal timestamp durations.
@@ -994,12 +945,12 @@ The GPU timing fields have these meanings:
   exists.
 - `rejection_gpu_ms` covers RejectionSampling only.
 - `spec_prepare_gpu_ms` covers Spec Decode prepare.
-- `spec_prefill_gpu_ms` covers DSpark or DFlash2 Spec Prefill.
+- `spec_prefill_gpu_ms` covers DFlash2 Spec Prefill.
 - `spec_decode_gpu_ms` covers Spec Decode and proposal sampling.
-- `spec_gpu_ms` is `spec_prepare_gpu_ms + spec_prefill_gpu_ms + spec_decode_gpu_ms` for DSpark and DFlash2.
+- `spec_gpu_ms` is `spec_prepare_gpu_ms + spec_prefill_gpu_ms + spec_decode_gpu_ms` for DFlash2.
   For MTP, it sums all logical MTP submission durations. It excludes host recording, readback, and gaps between submissions.
 
-The Spec prepare, Prefill, and Decode fields apply to the integrated DSpark and DFlash2 submission.
+The Spec prepare, Prefill, and Decode fields apply to the integrated DFlash2 submission.
 They are `unavailable` for MTP. The MTP total is `unavailable` if any logical submission lacks valid GPU timestamps.
 An absent stage in an enabled integrated submission reports `0.0000`. All GPU fields report `unavailable` when the
 Metal timestamps are unavailable or Metal does not return a valid ordered timestamp sequence. This fallback does not change
@@ -1058,16 +1009,13 @@ submit_main -> read_main
 
 embed_spec -> forward_spec -> unembed_spec -> sample_spec    MTP
 
-Main -> RejectionSampling -> Spec Decode prepare -> Spec Prefill    DSpark or DFlash2
+Main -> RejectionSampling -> Spec Decode prepare -> Spec Prefill    DFlash2
   -> Spec Decode -> proposal sampling
 submit_main -> read_main
 ```
 
 A pass is one proposal forward that runs.
-For Qwen3.5, each logical MTP step, DSpark Decode block, or DFlash2 Decode block is one pass.
-For Qwen3, each DSpark block forward is one pass.
-Qwen3 runs DSpark Prefill for a prefill-only batch.
-It does not run DSpark Decode because no sampled anchor exists.
+For Qwen3.5, each logical MTP step or DFlash2 Decode block is one pass.
 
 The runtime emits non-empty periodical scheduler stats every 30 seconds. It resets these stats after each output.
 Runtime shutdown always emits separate lifetime scheduler stats. It does not reset the lifetime stats.
@@ -1102,7 +1050,7 @@ Runtime core transports and aggregates executor-owned labels and durations.
   It sums the existing `main_gpu_ms` and `rejection_gpu_ms` boundaries when rejection sampling runs.
 - `mtp` sums the GPU durations of all logical MTP submissions in the batch.
   Each submission includes hidden-state transfer, embed, all module layers, gather/unembed, and sampling.
-- `dspark` or `dflash2` uses the existing `spec_gpu_ms` total for Spec prepare, Prefill, Decode, and proposal sampling.
+- `dflash2` uses the existing `spec_gpu_ms` total for Spec prepare, Prefill, Decode, and proposal sampling.
 
 The runtime collects these durations by default.
 Unavailable GPU durations do not enter the histogram. A row with no measurements has count `0` and latency `-`.
@@ -1167,45 +1115,37 @@ Investigate cold-start stalls separately from later decode stalls.
 
 ## End-to-end performance helper
 
-The Qwen3 helper runs Main-only and DSpark decode measurements:
+The Qwen3 helper runs Main-only decode measurements:
 
 ```sh
 scripts/qwen3_e2e_decode_perf.sh \
   --model <qwen3-model-dir> \
-  --dspark <qwen3-affine-dspark-model-dir> \
   --runs 7
 ```
 
 The helper uses the model directory for tokenization by default.
 Use `--tokenizer` to select a different directory.
 Use `--tokens` to select the comma-separated output-token counts.
-The default Qwen3 matrix runs `14b_off` and `14b_dspark`.
-The `14b_dspark` case uses the checkpoint `block_size` as its proposal count.
-If the DSpark checkpoint is absent and no download repository is configured, the helper prints a warning and skips
-that case. A missing Main checkpoint remains an error.
+The default Qwen3 matrix runs `14b_off`.
 
-The Qwen3.5/3.6/3.8 helper runs controlled 27B/35B Main-only, MTP, DSpark, and DFlash2 comparisons:
+The Qwen3.5/3.6/3.8 helper runs controlled 27B/35B Main-only, MTP and DFlash2 comparisons:
 
 ```sh
 scripts/qwen35_e2e_decode_perf.sh \
   --tokenizer <tokenizer-model-dir> \
   --model-27b <27b-model-dir> \
   --mtp-27b <27b-mtp-model-dir> \
-  --dspark-27b <27b-affine-dspark-model-dir> \
   --dflash2-27b <27b-affine-dflash2-model-dir> \
   --model-35b <35b-model-dir> \
   --mtp-35b <35b-mtp-model-dir> \
-  --dspark-35b <35b-affine-dspark-model-dir> \
   --dflash2-35b <35b-affine-dflash2-model-dir> \
   --runs 7
 ```
 
 Use `27b_mtp1` through `27b_mtp4` and `35b_mtp1` through `35b_mtp4` to select an MTP proposal count.
 The `*_mtp` aliases run MTP proposal counts 1, 2, 3, and 4.
-Use `*_dspark_k1`, `*_dspark_k2`, `*_dspark_k3`, `*_dspark_k4`, or `*_dspark_k8` for DSpark.
-Use the matching `*_dflash2_kN` names for DFlash2.
-The base `*_dspark` and `*_dflash2` cases use checkpoint defaults.
-The current DSpark checkpoint has `block_size=7`: seven drafts.
+Use `*_dflash2_k1`, `*_dflash2_k2`, `*_dflash2_k3`, `*_dflash2_k4`, or `*_dflash2_k8` for DFlash2.
+The base `*_dflash2` cases use checkpoint defaults.
 The current DFlash2 checkpoint has `dflash_config.block_size=8`: one anchor and seven drafts.
 An explicit K=8 requests eight drafts. It is not the DFlash2 checkpoint's default eight-row query block.
 Pass `--block-spec-tokens K` to override K for every block-spec case.
@@ -1214,7 +1154,7 @@ Pass explicit `_k1`, `_k2`, `_k3`, `_k4`, or `_k8` case names to compare other b
 
 1. Main-only `27b_off` and `35b_off`
 2. MTP counts 1, 2, 3, and 4 for each model
-3. Checkpoint-default DSpark and DFlash2 for each model
+3. Checkpoint-default DFlash2 for each model
 
 The 27B cases use output limits 256 and 1024. The 35B cases use output limits 256 and 1024.
 
@@ -1229,7 +1169,7 @@ configuration output contains the prompt-set name, prompt IDs, prompt count, and
 For each case, prompt, and output limit, the helper hashes the generated output bytes before the performance footer.
 It stops with `DETERMINISM_FAILED` if repeated runs with the fixed sampling configuration and seed have different hashes.
 Use `--prompt <text>` to replace the set with one custom prompt.
-If an MTP, DSpark, or DFlash2 checkpoint is absent and no download repository is configured, the helper prints a
+If an MTP or DFlash2 checkpoint is absent and no download repository is configured, the helper prints a
 warning and skips that case. A missing Main checkpoint remains an error.
 Before it starts a DFlash2 case, the helper validates the affine config and safetensors headers.
 It rejects a checkpoint that contains a BF16 matrix.
@@ -1238,7 +1178,7 @@ Its process guard matches Qwen and Decode release-worker paths, the runtime serv
 The guard does not match the perf helper filename in a `caffeinate` launcher command.
 It applies the configured cooldown between runnable cases. The default cooldown is 8 seconds.
 Each Spec summary label includes its actual proposal count, including checkpoint defaults.
-Examples are `27b_mtp4`, `27b_dspark_k7`, and `27b_dflash2_k8`.
+Examples are `27b_mtp4` and `27b_dflash2_k8`.
 A global override replaces explicit case counts before deduplication.
 
 Both helpers record these facts:
@@ -1262,8 +1202,8 @@ Dirty state is unknown. The helper retains the existing machine and configuratio
 The table provides throughput, output counts, tokens per chunk, and accepted/proposed counts.
 It does not provide raw CONFIG/SUMMARY rows, run count, variance, output hashes, TTFT, or inter-chunk latency.
 The script does not invent these fields. Its configuration checks use the producing script's defaults.
-The reference contains 48 rows at output limits of 256 and 1024 tokens.
-It covers Main-only and MTP1 through MTP4 for both models, plus 27B DSpark K7 and DFlash2 K7.
+The reference contains 44 rows at output limits of 256 and 1024 tokens.
+It covers Main-only and MTP1 through MTP4 for both models, plus 27B DFlash2 K7.
 
 A matching configuration and matching reported work counts produce `reference_status=summary-only`.
 The `observed_decode_delta_pct` field is a descriptive ratio, not a controlled performance verdict.

@@ -28,7 +28,7 @@ pub struct QwenSpecArgs {
     #[arg(
         long,
         help = "Speculative tokens generated per proposal; defaults to 1 for MTP or the checkpoint block geometry for \
-                DSpark/DFlash2"
+                DFlash2"
     )]
     pub num_spec_tokens: Option<NonZeroUsize>,
 }
@@ -43,9 +43,6 @@ pub struct Qwen3Args {
 
     #[arg(long, value_name = "DIR")]
     pub hf_model_dir: PathBuf,
-
-    #[command(flatten)]
-    pub spec: QwenSpecArgs,
 
     #[arg(long, value_enum)]
     pub profile: Option<QwenProfileMode>,
@@ -275,8 +272,6 @@ pub enum QwenProfileMode {
 pub enum QwenSpecType {
     #[value(name = "mtp")]
     MTP,
-    #[value(name = "dspark")]
-    DSpark,
     #[value(name = "dflash2")]
     DFlash2,
 }
@@ -318,8 +313,6 @@ mod tests {
         assert_eq!(args.max_tokens.get(), 128);
         assert_eq!(args.max_tokens_per_request.get(), 64);
         assert_eq!(args.num_cache_pages.get(), 320 * 1024);
-        assert_eq!(args.spec.hf_spec_model_dir, None);
-        assert_eq!(args.spec.spec_type, None);
         assert_eq!(args.executor_hibernation_timeout_secs.get(), 300);
         assert_eq!(args.executor_hibernation_mode, QwenHibernationMode::Selected);
     }

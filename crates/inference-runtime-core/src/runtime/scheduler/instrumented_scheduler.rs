@@ -418,8 +418,8 @@ mod tests {
         for stats in [&scheduler.periodical, &scheduler.lifetime] {
             assert_eq!(stats.execution["main"].len(), 1);
             assert_eq!(stats.execution["main"].min(), 1250);
-            assert_eq!(stats.execution["dspark"].len(), 1);
-            assert_eq!(stats.execution["dspark"].min(), 0);
+            assert_eq!(stats.execution["dflash2"].len(), 1);
+            assert_eq!(stats.execution["dflash2"].min(), 0);
             assert!(stats.execution["mtp"].is_empty());
             let table = stats.execution_table().to_string();
             assert!(table.contains("1.250ms"));
@@ -459,7 +459,7 @@ mod tests {
         batch_dev_resp.expect_seq().return_const(seq);
         batch_dev_resp.expect_execution_timings().return_const(vec![
             ("main".into(), Some(std::time::Duration::from_micros(1250))),
-            ("dspark".into(), Some(std::time::Duration::ZERO)),
+            ("dflash2".into(), Some(std::time::Duration::ZERO)),
             ("mtp".into(), None),
         ]);
         batch_dev_resp

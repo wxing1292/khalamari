@@ -1,7 +1,7 @@
 //! Qwen3.5-family outer executor.
 //!
 //! The outer executor owns one closed model composition. Main always runs first. Vanilla returns the Main decision.
-//! MTP uses its existing combined Spec invocation. DSpark and DFlash2 use independent Spec Prefill and Spec Decode
+//! MTP uses its existing combined Spec invocation. DFlash2 use independent Spec Prefill and Spec Decode
 //! recordings. The Spec checkpoint is never part of the Main owner.
 //!
 //! ```text
@@ -31,7 +31,7 @@
 //!             +------------------+------------------+
 //!             |                  |                  |
 //!             v                  v                  v
-//!          Vanilla              MTP        DSpark or DFlash2
+//!          Vanilla              MTP        DFlash2
 //!           return       combined Spec       Spec Prefill
 //!                         invocation          Spec Decode
 //! ```
@@ -72,7 +72,6 @@ use inference_executor_core::model::qwen::v3_5::weight_layout::Qwen35ModelWeight
 use inference_executor_core::model::qwen::v3_5::weight_layout::resolve_qwen35_model_weight_bindings;
 use inference_executor_core::model::qwen::v3_5::weight_layout::resolve_qwen35_mtp_weight_bindings;
 use inference_executor_core::model::qwen::v3_x::dflash2::Qwen3xDFlash2Config;
-use inference_executor_core::model::qwen::v3_x::dspark::Qwen3xDSparkConfig;
 use inference_executor_core::sampling::RequestSamplingState;
 use inference_executor_core::sampling::SamplerConfig;
 use inference_executor_core::sampling::SparseRejectionSamplingReqParams;
@@ -123,9 +122,6 @@ use crate::model::qwen::v3_5::mtp::hidden_state_transfer::append_mtp_hidden_stat
 use crate::model::qwen::v3_x::dflash2::execution::Qwen3xDFlash2DecodeRecording;
 use crate::model::qwen::v3_x::dflash2::execution::Qwen3xDFlash2Execution;
 use crate::model::qwen::v3_x::dflash2::execution::Qwen3xDFlash2PrefillRecording;
-use crate::model::qwen::v3_x::dspark::execution::Qwen3xDSparkDecodeRecording;
-use crate::model::qwen::v3_x::dspark::execution::Qwen3xDSparkExecution;
-use crate::model::qwen::v3_x::dspark::execution::Qwen3xDSparkPrefillRecording;
 use crate::model::qwen::v3_x::state::Qwen3xGDNState;
 use crate::model::qwen::v3_x::state::Qwen3xGQAState;
 use crate::model::state_snapshot::FullStateIO;
@@ -160,11 +156,9 @@ pub use load::Qwen35ExecutorConfig;
 use load::Qwen35ModelLayout;
 pub use load::init_qwen_3_5_model;
 pub use load::init_qwen_3_5_model_with_dflash2;
-pub use load::init_qwen_3_5_model_with_dspark;
 pub use load::init_qwen_3_5_model_with_mtp;
 
 include!("batch.rs");
-include!("dspark.rs");
 include!("dflash2.rs");
 include!("main.rs");
 include!("mtp.rs");
@@ -182,8 +176,6 @@ const MAIN_GDN_STATE_FILES: GDNStateSnapshotFiles = GDNStateSnapshotFiles::new(
 );
 const MTP_GQA_STATE_FILES: GQAStateSnapshotFiles =
     GQAStateSnapshotFiles::new(StateSnapshotFile::MTPGQARequestPageTable);
-const DSPARK_GQA_STATE_FILES: GQAStateSnapshotFiles =
-    GQAStateSnapshotFiles::new(StateSnapshotFile::DSparkGQARequestPageTable);
 const DFLASH2_GQA_STATE_FILES: GQAStateSnapshotFiles =
     GQAStateSnapshotFiles::new(StateSnapshotFile::DFlash2GQARequestPageTable);
 const VANILLA_STATE_SNAPSHOT_FILES: &[StateSnapshotFile] = &[
@@ -201,14 +193,6 @@ const MTP_STATE_SNAPSHOT_FILES: &[StateSnapshotFile] = &[
     MAIN_GDN_STATE_FILES.conv_state(),
     MTP_GQA_STATE_FILES.request_page_table(),
 ];
-const DSPARK_STATE_SNAPSHOT_FILES: &[StateSnapshotFile] = &[
-    PAGE_ARENA_STATE_FILES.pages(),
-    MAIN_GQA_STATE_FILES.request_page_table(),
-    MAIN_GDN_STATE_FILES.request_state_table(),
-    MAIN_GDN_STATE_FILES.recurrent_state(),
-    MAIN_GDN_STATE_FILES.conv_state(),
-    DSPARK_GQA_STATE_FILES.request_page_table(),
-];
 const DFLASH2_STATE_SNAPSHOT_FILES: &[StateSnapshotFile] = &[
     PAGE_ARENA_STATE_FILES.pages(),
     MAIN_GQA_STATE_FILES.request_page_table(),
@@ -222,7 +206,6 @@ const DFLASH2_STATE_SNAPSHOT_FILES: &[StateSnapshotFile] = &[
 enum Qwen35Speculator {
     Vanilla,
     MTP(Box<Qwen35MTPSpeculator>),
-    DSpark(Box<Qwen35DSparkSpeculator>),
     DFlash2(Box<Qwen35DFlash2Speculator>),
 }
 
@@ -232,10 +215,6 @@ enum Qwen35WeightSource {
     MTP {
         model_dir: PathBuf,
         config: Box<Qwen35ModelConfig>,
-    },
-    DSpark {
-        model_dir: PathBuf,
-        config: Box<Qwen3xDSparkConfig>,
     },
     DFlash2 {
         model_dir: PathBuf,
@@ -324,11 +303,6 @@ impl Qwen35MTPExecution {
     }
 }
 
-struct Qwen35DSparkSpeculator {
-    common: Qwen35SpeculativeResources,
-    execution: Qwen3xDSparkExecution,
-}
-
 struct Qwen35DFlash2Speculator {
     common: Qwen35SpeculativeResources,
     execution: Qwen3xDFlash2Execution,
@@ -343,10 +317,6 @@ impl Qwen35Speculator {
         matches!(self, Self::MTP(_))
     }
 
-    fn is_dspark(&self) -> bool {
-        matches!(self, Self::DSpark(_))
-    }
-
     fn is_dflash2(&self) -> bool {
         matches!(self, Self::DFlash2(_))
     }
@@ -355,7 +325,6 @@ impl Qwen35Speculator {
         match self {
             Self::Vanilla => 0,
             Self::MTP(mtp) => mtp.num_spec_tokens,
-            Self::DSpark(dspark) => dspark.execution.num_spec_tokens(),
             Self::DFlash2(dflash2) => dflash2.execution.num_spec_tokens(),
         }
     }
@@ -363,7 +332,6 @@ impl Qwen35Speculator {
     fn num_gqa_page_ids_per_main_lane_block(&self) -> usize {
         match self {
             Self::Vanilla | Self::MTP(_) => 0,
-            Self::DSpark(dspark) => dspark.execution.num_gqa_page_ids_per_block(),
             Self::DFlash2(dflash2) => dflash2.execution.num_gqa_page_ids_per_block(),
         }
     }
@@ -376,7 +344,6 @@ impl Qwen35Speculator {
                     "qwen3.5 Main cache block must not contain page IDs for a speculator without persistent KV"
                 )
             },
-            Self::DSpark(dspark) => dspark.execution.write_page_ids(req_slot, block_index, page_ids),
             Self::DFlash2(dflash2) => dflash2.execution.write_page_ids(req_slot, block_index, page_ids),
         }
     }
@@ -384,42 +351,28 @@ impl Qwen35Speculator {
     fn mtp(&self) -> &Qwen35MTPSpeculator {
         match self {
             Self::MTP(mtp) => mtp,
-            Self::Vanilla | Self::DSpark(_) | Self::DFlash2(_) => panic!("qwen3.5 executor has no MTP resources"),
+            Self::Vanilla | Self::DFlash2(_) => panic!("qwen3.5 executor has no MTP resources"),
         }
     }
 
     fn mtp_mut(&mut self) -> &mut Qwen35MTPSpeculator {
         match self {
             Self::MTP(mtp) => mtp,
-            Self::Vanilla | Self::DSpark(_) | Self::DFlash2(_) => panic!("qwen3.5 executor has no MTP resources"),
-        }
-    }
-
-    fn dspark(&self) -> &Qwen35DSparkSpeculator {
-        match self {
-            Self::DSpark(dspark) => dspark,
-            Self::Vanilla | Self::MTP(_) | Self::DFlash2(_) => panic!("qwen3.5 executor has no DSpark resources"),
-        }
-    }
-
-    fn dspark_mut(&mut self) -> &mut Qwen35DSparkSpeculator {
-        match self {
-            Self::DSpark(dspark) => dspark,
-            Self::Vanilla | Self::MTP(_) | Self::DFlash2(_) => panic!("qwen3.5 executor has no DSpark resources"),
+            Self::Vanilla | Self::DFlash2(_) => panic!("qwen3.5 executor has no MTP resources"),
         }
     }
 
     fn dflash2(&self) -> &Qwen35DFlash2Speculator {
         match self {
             Self::DFlash2(dflash2) => dflash2,
-            Self::Vanilla | Self::MTP(_) | Self::DSpark(_) => panic!("qwen3.5 executor has no DFlash2 resources"),
+            Self::Vanilla | Self::MTP(_) => panic!("qwen3.5 executor has no DFlash2 resources"),
         }
     }
 
     fn dflash2_mut(&mut self) -> &mut Qwen35DFlash2Speculator {
         match self {
             Self::DFlash2(dflash2) => dflash2,
-            Self::Vanilla | Self::MTP(_) | Self::DSpark(_) => panic!("qwen3.5 executor has no DFlash2 resources"),
+            Self::Vanilla | Self::MTP(_) => panic!("qwen3.5 executor has no DFlash2 resources"),
         }
     }
 
@@ -427,7 +380,6 @@ impl Qwen35Speculator {
         match self {
             Self::Vanilla => panic!("qwen3.5 Vanilla executor has no speculative resources"),
             Self::MTP(mtp) => &mtp.common,
-            Self::DSpark(dspark) => &dspark.common,
             Self::DFlash2(dflash2) => &dflash2.common,
         }
     }
@@ -436,7 +388,6 @@ impl Qwen35Speculator {
         match self {
             Self::Vanilla => panic!("qwen3.5 Vanilla executor has no speculative resources"),
             Self::MTP(mtp) => &mut mtp.common,
-            Self::DSpark(dspark) => &mut dspark.common,
             Self::DFlash2(dflash2) => &mut dflash2.common,
         }
     }
@@ -448,10 +399,6 @@ impl Qwen35Speculator {
                 mtp.gqa_state.reset_req_slots(request_slots);
                 mtp.hidden_state_cache.reset_req_slots(request_slots);
                 mtp.common.spec_probs.reset_req_slots(request_slots);
-            },
-            Self::DSpark(dspark) => {
-                dspark.execution.reset_req_slots(request_slots);
-                dspark.common.spec_probs.reset_req_slots(request_slots);
             },
             Self::DFlash2(dflash2) => {
                 dflash2.execution.reset_req_slots(request_slots);
@@ -472,10 +419,6 @@ impl Qwen35Speculator {
                 mtp.sampling.clear();
                 mtp.common.rejection_sampling.clear();
             },
-            Self::DSpark(dspark) => {
-                dspark.execution.clear_replay_cache();
-                dspark.common.rejection_sampling.clear();
-            },
             Self::DFlash2(dflash2) => {
                 dflash2.execution.clear_replay_cache();
                 dflash2.common.rejection_sampling.clear();
@@ -490,7 +433,6 @@ impl Qwen35Speculator {
                 mtp.body.component_mut().unload_weights();
                 drop(mtp.embed.component_mut().unload_weights());
             },
-            Self::DSpark(dspark) => dspark.execution.unload_weights(),
             Self::DFlash2(dflash2) => dflash2.execution.unload_weights(),
         }
     }
@@ -522,13 +464,6 @@ impl Qwen35Speculator {
                     .load_weights(device, &mut store, config, body, final_norm_weight)?;
                 Ok(None)
             },
-            (Self::DSpark(dspark), Qwen35WeightSource::DSpark { model_dir, config }) => {
-                dspark
-                    .execution
-                    .load_weights(device, model_dir, config, main_text_embed, main_unembed)?;
-                let capture: Rc<dyn MainResidualCapture> = dspark.execution.main_feature_projector();
-                Ok(Some(capture))
-            },
             (Self::DFlash2(dflash2), Qwen35WeightSource::DFlash2 { model_dir, config }) => {
                 dflash2
                     .execution
@@ -544,7 +479,6 @@ impl Qwen35Speculator {
         match self {
             Self::Vanilla => Ok(()),
             Self::MTP(mtp) => mtp.gqa_state.write_full_state(writer, MTP_GQA_STATE_FILES),
-            Self::DSpark(dspark) => dspark.execution.write_full_state(writer, DSPARK_GQA_STATE_FILES),
             Self::DFlash2(dflash2) => dflash2.execution.write_full_state(writer, DFLASH2_GQA_STATE_FILES),
         }
     }
@@ -559,11 +493,6 @@ impl Qwen35Speculator {
             Self::MTP(mtp) => {
                 mtp.gqa_state
                     .write_selected_state(writer, MTP_GQA_STATE_FILES, request_slot_ranges)
-            },
-            Self::DSpark(dspark) => {
-                dspark
-                    .execution
-                    .write_selected_state(writer, DSPARK_GQA_STATE_FILES, request_slot_ranges)
             },
             Self::DFlash2(dflash2) => {
                 dflash2
@@ -580,7 +509,6 @@ impl Qwen35Speculator {
                 mtp.body.component_mut().unload_state();
                 mtp.gqa_state.release_resources();
             },
-            Self::DSpark(dspark) => dspark.execution.unload_state(),
             Self::DFlash2(dflash2) => dflash2.execution.unload_state(),
         }
     }
@@ -591,7 +519,6 @@ impl Qwen35Speculator {
             Self::MTP(mtp) => {
                 mtp.gqa_state.allocate_resources(device);
             },
-            Self::DSpark(dspark) => dspark.execution.allocate_resources(device),
             Self::DFlash2(dflash2) => dflash2.execution.allocate_resources(device),
         }
     }
@@ -600,7 +527,6 @@ impl Qwen35Speculator {
         match self {
             Self::Vanilla => {},
             Self::MTP(mtp) => mtp.gqa_state.release_resources(),
-            Self::DSpark(dspark) => dspark.execution.release_resources(),
             Self::DFlash2(dflash2) => dflash2.execution.release_resources(),
         }
     }
@@ -609,7 +535,6 @@ impl Qwen35Speculator {
         match self {
             Self::Vanilla => {},
             Self::MTP(mtp) => mtp.body.component_mut().load_state(&mtp.gqa_state),
-            Self::DSpark(dspark) => dspark.execution.attach_state(),
             Self::DFlash2(dflash2) => dflash2.execution.attach_state(),
         }
     }
@@ -618,7 +543,6 @@ impl Qwen35Speculator {
         match self {
             Self::Vanilla => Ok(()),
             Self::MTP(mtp) => mtp.gqa_state.read_full_state(reader, MTP_GQA_STATE_FILES),
-            Self::DSpark(dspark) => dspark.execution.read_full_state(reader, DSPARK_GQA_STATE_FILES),
             Self::DFlash2(dflash2) => dflash2.execution.read_full_state(reader, DFLASH2_GQA_STATE_FILES),
         }
     }
@@ -633,11 +557,6 @@ impl Qwen35Speculator {
             Self::MTP(mtp) => {
                 mtp.gqa_state
                     .read_selected_state(reader, MTP_GQA_STATE_FILES, request_slot_ranges)
-            },
-            Self::DSpark(dspark) => {
-                dspark
-                    .execution
-                    .read_selected_state(reader, DSPARK_GQA_STATE_FILES, request_slot_ranges)
             },
             Self::DFlash2(dflash2) => {
                 dflash2
@@ -711,34 +630,6 @@ impl Qwen35Executor {
 
         let token_ids = &self.token_ids;
         match &mut self.speculator {
-            Qwen35Speculator::DSpark(dspark) => {
-                assert!(recorder.dspark_spec_prefill.is_none() && recorder.dspark_spec_decode.is_none());
-                recorder.dspark_spec_prefill =
-                    Some(dspark.execution.record_spec_prefill(&runtime, spec_prefill, pages));
-                if recorder.rejection_prepared.is_none() {
-                    return;
-                }
-                let rejection_sampling = dspark.common.rejection_sampling.component().rejector().output();
-                let (decode_prepare, markov_replay_shape) = dspark.execution.record_decode_prepare(
-                    &runtime,
-                    token_ids,
-                    rejection_sampling,
-                    &req_slots,
-                    &anchor_indices,
-                    &num_spec_tokens_by_request,
-                    &sampler_configs,
-                    &dspark.common.spec_probs,
-                );
-                recorder.dspark_spec_decode = Some(dspark.execution.record_spec_decode(
-                    &runtime,
-                    token_ids,
-                    decode_prepare,
-                    markov_replay_shape,
-                    req_slots,
-                    pages,
-                    &dspark.common.spec_probs,
-                ));
-            },
             Qwen35Speculator::DFlash2(dflash2) => {
                 assert!(recorder.dflash2_spec_prefill.is_none() && recorder.dflash2_spec_decode.is_none());
                 recorder.dflash2_spec_prefill =
@@ -767,7 +658,7 @@ impl Qwen35Executor {
                 ));
             },
             Qwen35Speculator::Vanilla | Qwen35Speculator::MTP(_) => {
-                panic!("qwen3.5 combined Spec recording requires DSpark or DFlash2")
+                panic!("qwen3.5 combined Spec recording requires DFlash2")
             },
         }
     }
@@ -776,7 +667,6 @@ impl Qwen35Executor {
         match &self.speculator {
             Qwen35Speculator::Vanilla => VANILLA_STATE_SNAPSHOT_FILES,
             Qwen35Speculator::MTP(_) => MTP_STATE_SNAPSHOT_FILES,
-            Qwen35Speculator::DSpark(_) => DSPARK_STATE_SNAPSHOT_FILES,
             Qwen35Speculator::DFlash2(_) => DFLASH2_STATE_SNAPSHOT_FILES,
         }
     }
@@ -986,8 +876,6 @@ pub struct Qwen35ModelOpsRecorder {
     mtp_sample_req_slots: Vec<u32>,
     mtp_sample_decision_indices: Vec<usize>,
     mtp_build_elapsed: Duration,
-    dspark_spec_prefill: Option<Qwen3xDSparkPrefillRecording>,
-    dspark_spec_decode: Option<Qwen3xDSparkDecodeRecording>,
     dflash2_spec_prefill: Option<Qwen3xDFlash2PrefillRecording>,
     dflash2_spec_decode: Option<Qwen3xDFlash2DecodeRecording>,
 }
@@ -1086,7 +974,6 @@ impl ReplayableDecoderModel for Qwen35Executor {
         match &self.speculator {
             Qwen35Speculator::Vanilla => "vanilla",
             Qwen35Speculator::MTP(_) => "mtp",
-            Qwen35Speculator::DSpark(_) => "dspark",
             Qwen35Speculator::DFlash2(_) => "dflash2",
         }
     }
@@ -1156,7 +1043,7 @@ impl ReplayableDecoderModel for Qwen35Executor {
             .collect();
         let num_spec_tokens = match &self.speculator {
             Qwen35Speculator::MTP(mtp) => mtp.num_spec_tokens,
-            Qwen35Speculator::Vanilla | Qwen35Speculator::DSpark(_) | Qwen35Speculator::DFlash2(_) => 0,
+            Qwen35Speculator::Vanilla | Qwen35Speculator::DFlash2(_) => 0,
         };
         let model_batch_request =
             Qwen35ModelBatchRequest::from_core_batch(core_batch_req, num_spec_tokens, sampler_configs);
@@ -1330,8 +1217,6 @@ impl ReplayableDecoderModel for Qwen35Executor {
             main_arguments,
             main_text_embed_cache_hit: false,
             main_cache_hit: false,
-            dspark_spec_prefill: None,
-            dspark_spec_decode: None,
             dflash2_spec_prefill: None,
             dflash2_spec_decode: None,
             main_gather_unembed_key: None,
@@ -1476,14 +1361,14 @@ impl ReplayableDecoderModel for Qwen35Executor {
             "qwen3.5 sampling rows must match the recording"
         );
         if num_main_sample_rows == 0 {
-            if self.speculator.is_dspark() || self.speculator.is_dflash2() {
+            if self.speculator.is_dflash2() {
                 self.record_spec(recorder, microbatch);
             }
             return;
         }
         if self.speculator.is_enabled() {
             self.record_rejection_sampling(recorder, microbatch);
-            if self.speculator.is_dspark() || self.speculator.is_dflash2() {
+            if self.speculator.is_dflash2() {
                 self.record_spec(recorder, microbatch);
             }
         } else {
@@ -1505,7 +1390,7 @@ impl ReplayableDecoderModel for Qwen35Executor {
         gpu_timestamp_durations: Option<&[Duration]>,
     ) -> Self::SampledOutput {
         if recorder.num_main_sample_rows == 0 {
-            let mut timing = if self.speculator.is_dspark() || self.speculator.is_dflash2() {
+            let mut timing = if self.speculator.is_dflash2() {
                 ModelOutputTiming {
                     main_spec_replay_elapsed: replay_elapsed,
                     ..ModelOutputTiming::default()
@@ -1519,9 +1404,9 @@ impl ReplayableDecoderModel for Qwen35Executor {
             apply_main_gpu_timing(
                 &mut timing,
                 gpu_timestamp_durations,
-                self.speculator.is_dspark() || self.speculator.is_dflash2(),
+                self.speculator.is_dflash2(),
                 recorder.rejection_key.is_some(),
-                recorder.dspark_spec_decode.is_some() || recorder.dflash2_spec_decode.is_some(),
+                recorder.dflash2_spec_decode.is_some(),
             );
             return Qwen35SampledOutput {
                 decisions: Vec::new(),
@@ -1533,24 +1418,20 @@ impl ReplayableDecoderModel for Qwen35Executor {
         } else {
             self.read_sampling(recorder.num_main_sample_rows, replay_elapsed)
         };
-        if self.speculator.is_dspark() || self.speculator.is_dflash2() {
+        if self.speculator.is_dflash2() {
             timing.main_spec_replay_elapsed = timing.main_sample_replay_elapsed;
             timing.main_sample_replay_elapsed = Duration::ZERO;
             timing.spec_passes = 1;
             let read_start = Instant::now();
-            decisions = if self.speculator.is_dspark() {
-                self.read_dspark_proposal(recorder, decisions)
-            } else {
-                self.read_dflash2_proposal(recorder, decisions)
-            };
+            decisions = self.read_dflash2_proposal(recorder, decisions);
             timing.spec_read_elapsed = read_start.elapsed();
         }
         apply_main_gpu_timing(
             &mut timing,
             gpu_timestamp_durations,
-            self.speculator.is_dspark() || self.speculator.is_dflash2(),
+            self.speculator.is_dflash2(),
             recorder.rejection_key.is_some(),
-            recorder.dspark_spec_decode.is_some() || recorder.dflash2_spec_decode.is_some(),
+            recorder.dflash2_spec_decode.is_some(),
         );
         Qwen35SampledOutput { decisions, timing }
     }
@@ -1628,7 +1509,7 @@ impl ReplayableDecoderModel for Qwen35Executor {
         _model_batch_req: &Self::ModelBatchRequest,
         _sampled_output: &Self::SampledOutput,
     ) {
-        panic!("qwen3.5 DSpark/DFlash2 Spec Prefill is recorded with Main")
+        panic!("qwen3.5 DFlash2 Spec Prefill is recorded with Main")
     }
 
     fn run_spec_decode(
@@ -1645,14 +1526,11 @@ impl ReplayableDecoderModel for Qwen35Executor {
         _model_batch_req: &Self::ModelBatchRequest,
         _sampled_output: &Self::SampledOutput,
     ) {
-        panic!("qwen3.5 DSpark/DFlash2 Spec Decode is recorded with Main")
+        panic!("qwen3.5 DFlash2 Spec Decode is recorded with Main")
     }
 
     fn submit_spec(&mut self, recorder: &Self::ModelOpsRecorder) -> Self::Submission {
-        assert!(
-            self.speculator.is_mtp(),
-            "qwen3.5 DSpark/DFlash2 Spec is submitted with Main"
-        );
+        assert!(self.speculator.is_mtp(), "qwen3.5 DFlash2 Spec is submitted with Main");
         self.submit_mtp_recording(recorder)
     }
 
@@ -1664,10 +1542,7 @@ impl ReplayableDecoderModel for Qwen35Executor {
         replay_elapsed: Duration,
         gpu_timestamp_durations: Option<&[Duration]>,
     ) -> Self::SampledOutput {
-        assert!(
-            self.speculator.is_mtp(),
-            "qwen3.5 DSpark/DFlash2 Spec is read with Main"
-        );
+        assert!(self.speculator.is_mtp(), "qwen3.5 DFlash2 Spec is read with Main");
         let timing = self.read_mtp_proposal(
             recorder,
             &mut sampled_output.decisions,

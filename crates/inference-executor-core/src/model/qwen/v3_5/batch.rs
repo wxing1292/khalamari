@@ -782,8 +782,8 @@ mod tests {
     }
 
     #[test]
-    fn test_dspark_and_mtp_use_the_same_speculative_suffix() {
-        let dspark_requests = vec![device_request(
+    fn test_dflash2_and_mtp_use_the_same_speculative_suffix() {
+        let dflash2_requests = vec![device_request(
             10,
             0,
             QueryTokens::Decode {
@@ -806,13 +806,13 @@ mod tests {
             4,
         )];
 
-        let dspark =
-            Qwen35Microbatch::from_requests_with_spec_tokens(&dspark_requests, 0, vec![SamplerConfig::default()]);
+        let dflash2 =
+            Qwen35Microbatch::from_requests_with_spec_tokens(&dflash2_requests, 0, vec![SamplerConfig::default()]);
         let mtp = Qwen35Microbatch::from_requests_with_spec_tokens(&mtp_requests, 2, vec![SamplerConfig::default()]);
 
-        assert_eq!(dspark.num_spec_tokens(0), 2);
+        assert_eq!(dflash2.num_spec_tokens(0), 2);
         assert_eq!(mtp.num_spec_tokens(0), 2);
-        assert_eq!(verified_state_versions(&dspark), verified_state_versions(&mtp));
+        assert_eq!(verified_state_versions(&dflash2), verified_state_versions(&mtp));
     }
 
     #[test]

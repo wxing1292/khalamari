@@ -11,7 +11,6 @@ crates/inference-executor-core/src/sampling/
   config.rs          sampler validation and optional request seed
   domain.rs          independent Main, Spec, accept, and resample RNG domains
   reference.rs       CPU top-k/top-p and rejection correctness oracle
-  dspark.rs          CPU reference for sequential Markov correction, confidence, and sampling
   rejection_sampling.rs
                      backend-neutral sparse rejection bounds, shape, request, and microbatch-view contracts
   request_state.rs   executor-owned request-slot seed lifecycle
@@ -26,28 +25,17 @@ crates/inference-backend-metal/src/components/
   sampling/rejection.rs       sparse rejection component
   sampling/spec_decode_input.rs
                               rejection-output to fixed-block Decode-input transform
-  sampling/dspark_markov.rs   fused DSpark Markov, confidence, and Top-K Map component
   metal/sampling.metal
   metal/spec_decode_input.metal
   metal/dflash2_selector.metal
-  metal/dspark_markov_sampling.metal
 
 crates/inference-executor-metal/src/sampling/
   sampling_params.rs      SamplingParamsStore request-slot parameter owner
   top_k_sampling.rs       TopKSampling row inputs, scratch, and TopKSamplingOutputBuffers
   top_k_replay.rs         Sampling and DraftSampling replay components
   rejection_replay.rs     sparse rejection replay owner, batch preparation, and bindings
-  dspark_markov.rs        sequential DSpark Markov, confidence, and sampling composition
   spec_probs.rs           SpecProbsStore sparse draft/target probability workspace
 
-crates/inference-executor-metal/src/model/qwen/v3_x/dspark/
-  sampling.rs             Qwen3x Markov checkpoint weights and generic backend adapter
-
-crates/inference-executor-metal/src/model/qwen/v3_x/dflash2/
-  output.rs               raw Top-K, selector checkpoint weights, path walk, and sparse draft storage
-
-crates/inference-executor-metal/src/model/qwen/v3_x/
-  spec_decode_input.rs    static and GPU-written fixed-block Decode-input owner
 ```
 
 Runtime core transports sampler configuration and sampled decisions.
@@ -63,11 +51,11 @@ Each request slot has one stable sampling-parameter row:
 sampling_params[req_slot] = {temperature, top_p, seed, top_k}
 ```
 
-`SamplingParamsStore` owns this buffer. One `Rc<SamplingParamsStore>` is shared by Vanilla, MTP, DSpark, and DFlash2
+`SamplingParamsStore` owns this buffer. One `Rc<SamplingParamsStore>` is shared by Vanilla, MTP and DFlash2
 inside one executor. The executor updates active request-slot rows when it prepares a batch.
 The request-slot buffer capacity and each invocation's sampling-row capacity are independent. Qwen Main uses the
 compact output-row capacity defined in [`executor_qwen.md`](executor_qwen.md#replay-ownership).
-DSpark uses the request-row capacity. Each consumer validates its static capacity when it is initialized.
+Each consumer validates its static capacity when it is initialized.
 Backend sampling components validate static shapes, buffer ranges, and dispatch products when they create invocations.
 Their `record` methods use these validated values.
 `add_replay_arguments` must receive the same shape used to record the replay.
@@ -76,8 +64,7 @@ The replay parameter table enforces the recorded domain at submission.
 
 Each sampling invocation separately provides the compact sampling-row to `req_slot` mapping, the logical output-token
 position for each row, and one `SamplingDomain`. Main can contain multiple sampling rows for one request. Those rows
-reuse the same request-slot parameters and keep distinct positions. DSpark and DFlash2 reuse the same request-level
-parameters but retain their different proposal algorithms.
+reuse the same request-slot parameters and keep distinct positions. DFlash2 reuses the same request-level parameters for proposal sampling.
 The current default decode policy uses temperature 0.7, top-p 0.8, and top-k 20.
 Greedy decoding uses the same contract with top-k 1 and temperature 0.
 
@@ -138,7 +125,7 @@ The current input contract does not include repetition, frequency, or presence p
 
 ## Sparse distributions and rejection
 
-Qwen MTP and DSpark proposals use the same post-temperature/top-k/top-p distribution family as Main verification.
+Qwen MTP proposals use the same post-temperature/top-k/top-p distribution family as Main verification.
 The production path stores sparse token and probability rows.
 It does not scatter them into dense full-vocabulary buffers.
 
@@ -172,7 +159,7 @@ compile-time constants require 256 threads. The recorded grid contains one threa
 slot. Replay arguments limit execution to the active request count.
 
 `SparseRejectionSamplingOutput` is the borrowed GPU-output boundary for accepted counts and sampled anchor token IDs.
-Qwen3 and Qwen3.5 DSpark, and Qwen3.5 DFlash2, pass this view directly to `SpecDecodeInput`.
+Qwen3.5 DFlash2 pass this view directly to `SpecDecodeInput`.
 They do not read rejection output before they record Spec Decode.
 
 Spec Prefill borrows `num_tokens`, request slots, and flat token indices directly from the current Main GQA metadata.
@@ -181,7 +168,7 @@ That metadata already contains the complete active Main-row prefix and remains v
 
 `SpecDecodeInput` owns anchor indices and GPU-written first Spec sample positions for one Spec Decode lifecycle.
 It borrows the existing BiDiBlockGQA metadata buffers.
-It does not allocate a second GQA metadata owner or repack DSpark and DFlash2 sampling layouts.
+It does not allocate a second GQA metadata owner or repack DFlash2 sampling layouts.
 `record_decode_prepare` and `record_spec_decode` bind the same physical buffers.
 Active row order is semantic. Request row `r` must stay aligned across rejection outputs, anchor indices, token buffers,
 BiDiBlockGQA metadata, and sampling destinations. `num_total_requests` is the cached replay bucket and grid capacity.
@@ -210,7 +197,7 @@ the fixed TaskTemplate capacity with widened host arithmetic. This validation pr
 iteration-partition, and Task-quota intermediates fit `uint`. The Metal kernel then uses direct `uint` arithmetic.
 
 The transform records one Spec Decode prepare command. It writes the first Spec sample position as
-`accepted_anchor_index + 1`. DSpark step `i` adds `i` when it samples sequentially. DFlash2 adds its step index inside
+`accepted_anchor_index + 1`. DFlash2 adds its step index inside
 the path walk. No separate sampling-position update command is necessary.
 
 `SpecProbsStore` owns `draft_token_ids`, `draft_probs`, `target_token_ids`, and `target_probs`.
@@ -232,7 +219,7 @@ The request-slot by speculative-position product is only the draft-distribution 
 ## Replay ownership
 
 Sampling and rejection use `u32` capacity replay keys.
-`Sampling`, `DraftSampling`, `RejectionSampler`, and `DSparkMarkovSampling` each own their applicable
+`Sampling`, `DraftSampling`, and `RejectionSampler` each own their applicable
 `ReplayBucketPolicy` values. Their prepare APIs convert active counts into recorded capacities. Qwen model callers do
 not select replay buckets.
 Submission-scoped `ReplayArguments` contain exact active thread counts.
@@ -253,7 +240,6 @@ The Qwen executor owns these distinct graph and cache stages:
 
 - `Replay<Sampling>` handles ordinary Main output.
 - `Replay<DraftSampling>` handles MTP draft sampling and sparse draft-distribution storage.
-- `Replay<Qwen3xDSparkSampling>` handles DSpark Markov correction, confidence, sampling, and sparse draft storage.
 - `Replay<Qwen3xDFlash2Output>` handles DFlash2 raw Top-K, candidate selection, sampling, and sparse draft storage.
 - `Replay<RejectionSampling>` handles target write-distribution generation and sparse rejection.
 
@@ -263,64 +249,23 @@ Main and MTP share one `Rc<TopKSampling>` implementation.
 `RejectionSampler::prepare_replay_shape(...)` selects request, draft-distribution, and target-distribution capacities.
 It validates public prepared counts before it maps them to the `u32` replay domain.
 `RejectionSampling` validates the target-sampling and rejection shapes before the replay-cache lookup.
-`DSparkMarkovSampling` owns the compact request-slot mapping, partial candidates, and per-step outputs.
-It borrows the shared `SamplingParamsStore` through `Rc`.
-It accepts borrowed weights at record time.
-`Qwen3xDSparkMarkov` owns Qwen checkpoint buffers and delegates execution to this backend owner.
-It loads one bounded `TensorMap` for W1, W2, and the required Markov-conditioned confidence head.
-It removes all tensors and requires the map to be empty before initialization completes.
-It reuses the generic sample-and-write-distribution reducer.
 The stages retain separate replay keys and programs.
 
 Qwen3.5 Main and MTP body replays use separate total-token domains.
-Qwen3, DSpark, and DFlash2 currently set `num_total_tokens == num_active_tokens` in their fixed-capacity stages.
+Qwen3 and DFlash2 currently set `num_total_tokens == num_active_tokens` in their fixed-capacity stages.
 All body components use the same active/total API.
 Sampling and rejection keep their own replay domains, keys, active counts, and bucket policies.
 MTP draft sampling is a distinct replay after MTP GatherUnembed.
 For K MTP steps, each pass writes one request-local draft-distribution row at `step_index`.
 The step index is runtime metadata and does not enter the sampling replay key.
-DSpark Markov sampling is a distinct replay after `Qwen3xDSparkGatherUnembed`.
 Sparse Main distributions and rejection form one Main-stage replay.
-
-One DSpark Markov step records two commands:
-
-```text
-dspark_markov::MapCompute
-  input_token_ids[i]
-    i = 0: sampled_token / anchor_token
-    i > 0: spec_tokens[i - 1]
-  -> affine W1 row
-  -> affine W2 projection
-  -> add one base-logit row
-  -> 64-token vocabulary-partition Top-K
-  -> confidence projection and sigmoid
-  -> spec_confidence[i]
-
-top_k::ReduceCompute::invoke_sample_and_write_distribution_with_layout
-  -> global Top-K merge
-  -> top-p sampling
-  -> spec_token[i], spec_prob[i], and sparse draft distribution
-```
-
-The sampled token from one reducer is the Markov input for the next map.
-The replay places a barrier at this dependency.
-A seven-token block records 14 commands in one submission.
-It does not materialize full-vocabulary Markov bias or corrected-logit buffers.
 
 `SampledTokens::Decode` carries `spec_tokens`, `spec_probs`, and `spec_confidences`.
 These vectors always have the same length.
-MTP uses `1.0` for each speculative confidence because MTP has no confidence head.
-Qwen3x DSpark requires and evaluates its confidence head.
-The Qwen3 and Qwen3.5 response adapters preserve DSpark confidence values across the executor/runtime boundary.
+MTP and DFlash2 use `1.0` for each speculative confidence.
 Runtime core uses cumulative confidence to allocate verification prefixes when the batch budget cannot contain every proposal row.
 The [token budget allocator](token_budget_allocator.md) owns this policy.
 Proposal generation remains fixed-width. The runtime does not apply an absolute confidence threshold.
-
-The current fused map preserves the earlier BF16 storage boundaries.
-It dequantizes W1 to F32 and stores the latent row as BF16.
-It accumulates W2 in F32.
-It rounds the correction and corrected logit to BF16 before the vocabulary-partition Top-K operation.
-Sampling probabilities use F32.
 
 ### Top-K execution hierarchy
 
@@ -341,8 +286,7 @@ top_k::ReduceCompute
 ```
 
 The standard Map compile-time constants have `thread_block.max_vocab_tokens = 256` and
-`thread_block.required_threads = 256`. The DSpark fused Map constants have `thread_block.max_vocab_tokens = 64` and
-`thread_block.required_threads = 128`. Both producers return an explicit `top_k::PartialCandidateLayout`. The Reduce
+`thread_block.required_threads = 256`.  The Map returns an explicit `top_k::PartialCandidateLayout`. The Reduce
 invocation consumes that layout. The executor does not pass an untyped `vocab_tile_size` between the components.
 
 `top_k::Shape::top_k` defines the number of candidates in each partial row. The layout does not duplicate this
@@ -350,7 +294,7 @@ dynamic shape value.
 
 The Reduce constants require 256 threads. The Map and Reduce replay arguments retain their current capacity and
 active-thread semantics. The backend exposes component-scoped APIs through `sampling::top_k`,
-`sampling::dflash2_selector`, `sampling::dspark_markov`, and `sampling::rejection`. It does not expose compatibility aliases from
+`sampling::dflash2_selector` and `sampling::rejection`. It does not expose compatibility aliases from
 `components` or `sampling`.
 
 ### DFlash2 candidate selection
@@ -381,117 +325,9 @@ It applies temperature to the fixed candidate set.
 It does not apply top-p because the DFlash2 reference selector does not apply top-p after candidate construction.
 Each sparse distribution contains the exact probabilities that the walk uses.
 
-### DSpark Markov numerical contract
-
-Decision: Retain the current BF16 materialization boundaries.
-
-The Qwen3 implementations in
-[vLLM at `bb3b61f2fd2333ab165ebaba13f133db4210b9f2`](https://github.com/vllm-project/vllm/blob/bb3b61f2fd2333ab165ebaba13f133db4210b9f2/vllm/v1/worker/gpu/spec_decode/dspark/speculator.py)
-and
-[SGLang at `85618cc798ce9b5fdbfdd5c535576515d498acc2`](https://github.com/sgl-project/sglang/blob/85618cc798ce9b5fdbfdd5c535576515d498acc2/python/sglang/srt/models/dspark.py)
-add the Markov correction in the model-logit dtype.
-They do not explicitly promote the Qwen3 corrected-logit tensor to F32.
-[SGLang sampling](https://github.com/sgl-project/sglang/blob/85618cc798ce9b5fdbfdd5c535576515d498acc2/python/sglang/kernels/ops/speculative/dspark/dspark_draft_model.py)
-promotes the corrected logits when it computes sampling probabilities.
-
-The Metal map uses F32 where reduction requires it:
-
-```text
-BF16 W1 latent in shared memory
-  -> F32 W2 partials and SIMDgroup reduction in thread-local values
-  -> BF16 correction
-  -> BF16 corrected logit
-  -> F32 tile Top-K and sampling probabilities
-```
-
-For the official rank-256 checkpoint, the map uses 1024 bytes of static shared memory.
-The BF16 latent uses 512 bytes.
-The 64 F32 tile logits and 64 I32 token IDs use the other 512 bytes.
-An F32 corrected-logit candidate does not require more shared memory.
-It keeps the correction and corrected logit in thread-local scalar values.
-The Metal compiler can keep these values in registers or spill them.
-Changing the W1 latent to F32 would increase the static shared-memory requirement to 1536 bytes, but that is a
-different numerical contract.
-
-The F32 corrected-logit candidate used this sequence:
-
-```text
-BF16 W1 latent
-  -> F32 W2 accumulation
-  -> F32 base-logit add
-  -> F32 tile Top-K and sampling probabilities
-```
-
-The A/B investigation used base commit `2804bdece3c03235e9b2b18f9655a933ed7a3220` on macOS 27.0 and an Apple M3 Max
-with a 40-core GPU and 48 GB of memory.
-The candidate changed only the corrected-logit rounding contract and its CPU reference.
-The worktree also contained only the benchmark output controls from this change.
-Focused CPU/GPU parity passed for both contracts.
-
-The real-weight Markov benchmark used
-`dspark_qwen3_14b_block7-affine`, one request, `temperature=0.7`, `top_k=20`, `top_p=0.8`, and `seed=42`.
-It used the production Markov weights and deterministic zero base logits to isolate Markov correction and sampling.
-
-```text
-cargo bench --bench qwen3_dspark_sampling -- \
-  --dspark-model-dir /Users/wenquanxing/Workspace/models/dspark_qwen3_14b_block7-affine \
-  --num-requests 1 --temperature 0.7 --top-k 20 --top-p 0.8 --seed 42 \
-  --warmup-iters 10 --iters 50 --runs 5
-```
-
-The current BF16 path measured 4.158 ms for the complete seven-step replay.
-The F32 candidate measured 4.162 ms.
-The candidate did not produce a measurable performance gain.
-Both contracts sampled `[5310, 5390, 979, 14550, 448, 5091, 369]` in this isolated case.
-The BF16 write-distribution fingerprint was `31642210e096a9d7`.
-The F32 fingerprint was `9dacaff10a8cc01d`.
-The proposal probability bits also differed.
-
-The fused confidence check used base commit `a36024dc` with only the confidence change present in the worktree.
-It used the same machine, Markov weights, sampler settings, and benchmark command.
-The converted checkpoint also contained the official BF16 confidence projection and bias.
-The complete seven-step replay measured 4.061 ms.
-The sampled tokens and BF16 write-distribution fingerprint matched the 4.158 ms path.
-The confidence output contained seven finite, nonconstant values.
-
-The deterministic service comparison used Qwen3-14B-4bit, the same DSpark checkpoint, `temperature=0`, `top_k=1`,
-`top_p=1`, and `seed=42`.
-
-```text
-target/release/qwen3 \
-  --grpc-listen-addr 127.0.0.1:50151 \
-  --http-listen-addr 127.0.0.1:8011 \
-  --hf-model-dir /Users/wenquanxing/Workspace/models/Qwen3-14B-4bit \
-  --hf-spec-model-dir /Users/wenquanxing/Workspace/models/dspark_qwen3_14b_block7-affine \
-  --spec-type dspark \
-  --num-cache-pages 4096 --max-requests 4 --max-tokens 128 \
-  --max-tokens-per-request 64 --logging info
-
-target/release/decode \
-  --server-url http://127.0.0.1:50151 \
-  --hf-model-dir /Users/wenquanxing/Workspace/models/Qwen3-14B-4bit \
-  --prompt-str 'Explain in concise technical terms why the sky appears blue during the day.' \
-  --disable-thinking --max-sampled-tokens 256 \
-  --temperature 0 --top-k 1 --top-p 1 --seed 42 --show-stats
-```
-
-Three runs for each contract produced the same final 98-token text.
-The current BF16 contract used 34 verification batches, generated 238 proposals, and accepted 65 proposals.
-Its acceptance rate was 27.31%.
-Its three decode rates were 42.095, 42.253, and 42.852 tok/s.
-The F32 candidate used 33 verification batches, generated 231 proposals, and accepted 66 proposals.
-Its acceptance rate was 28.57%.
-Its three decode rates were 43.021, 43.320, and 43.169 tok/s.
-The throughput values are not a corrected-logit kernel comparison because the contracts used different verification
-trajectories.
-
-The changed distributions and replay trajectory make F32 a model numerical-contract change.
-One deterministic prompt does not justify that change.
-The production path must keep the BF16 contract unless broader checkpoint evidence establishes a different contract.
-
 ## Correctness and benchmarks
 
-CPU references define sampling, rejection, and sequential DSpark Markov math.
+CPU references define sampling, rejection, math.
 Each Top-K API records one replay with a total row capacity of `4`.
 The Merge, Sample, WriteDistribution, and SampleAndWriteDistribution tests replay
 `1, 4, 3, 2` active rows and compare each active logical output with a CPU reference.
@@ -502,15 +338,8 @@ All Top-K tests use a nonzero logits row offset.
 One sparse rejection replay uses the same active-request sequence. It compares active accepted counts, sampled tokens,
 sampled probabilities, and accepted-token prefixes with the CPU rejection reference. The fixture covers rejection,
 all-accept, zero-draft, and non-contiguous draft-distribution mapping.
-The DSpark Markov parity test uses the production `Replay<T>` cache with exact request-stride keys and padded sampling
-capacities. It runs the same non-monotonic active sequence with non-contiguous request slots. It compares proposal
-tokens, probabilities, confidences, and sparse distributions with the sequential CPU reference.
 These tests do not use inactive output tails as an oracle.
 GPU tests run serially under the repository Metal reservation/lock rules.
-The `qwen3_dspark_sampling` benchmark prints proposal token IDs, exact proposal probability bits, and a stable
-fingerprint of the complete sparse draft distribution.
-Use `--temperature`, `--top-k`, `--top-p`, and `--seed` to reproduce a sampling contract.
-
 Synthetic backend modes:
 
 ```text
@@ -518,15 +347,9 @@ cargo bench --bench rejection_sampling -- \
   --mode top-k-sample --rows 1 --num-reqs 1 --spec-tokens 1 \
   --iters 1 --warmup-iters 0 --runs 1
 
-cargo bench --bench rejection_sampling -- \
-  --mode dspark-markov-top-k-map --rows 1 --top-k 20 --vocab 151936 \
-  --markov-rank 256 --markov-w1-group-size 64 --markov-w1-bits 4 \
-  --markov-w2-group-size 64 --markov-w2-bits 8 \
-  --iters 1 --warmup-iters 0 --runs 1
 ```
 
 Supported modes are `top-k-sample`, `top-k-write-distribution`, `top-k-sample-and-write-distribution`,
-`rejection-sparse`, and `dspark-markov-top-k-map`.
-The model-executor targets are `qwen35_main_sampling` and `qwen3_dspark_sampling`.
-Qwen3.5 DSpark reuses the Qwen3x Markov component benchmark and adds end-to-end service validation.
+and `rejection-sparse`.
+The model-executor target is `qwen35_main_sampling`.
 [`executor_benchmarks.md`](executor_benchmarks.md) defines shared measurement and provenance rules.

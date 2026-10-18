@@ -55,9 +55,12 @@ pub enum StateSnapshotFile {
     MainGDNRecurrentState,
     MainGDNConvState,
     MTPGQARequestPageTable,
-    DSparkGQARequestPageTable,
+    // Keep the existing on-disk tags when a model role is removed.
+    #[wincode(tag = 7)]
     DFlash2GQARequestPageTable,
+    #[wincode(tag = 8)]
     Qwen4xAuxState,
+    #[wincode(tag = 9)]
     Qwen4xRequestState,
 }
 
@@ -70,7 +73,6 @@ impl StateSnapshotFile {
             Self::MainGDNRecurrentState => "main-gdn-recurrent-state",
             Self::MainGDNConvState => "main-gdn-conv-state",
             Self::MTPGQARequestPageTable => "mtp-gqa-request-page-table",
-            Self::DSparkGQARequestPageTable => "dspark-gqa-request-page-table",
             Self::DFlash2GQARequestPageTable => "dflash2-gqa-request-page-table",
             Self::Qwen4xAuxState => "qwen4x-aux-state",
             Self::Qwen4xRequestState => "qwen4x-request-state",
@@ -85,7 +87,6 @@ impl StateSnapshotFile {
             | Self::MainGDNRecurrentState
             | Self::MainGDNConvState
             | Self::MTPGQARequestPageTable
-            | Self::DSparkGQARequestPageTable
             | Self::DFlash2GQARequestPageTable
             | Self::Qwen4xAuxState => StateSnapshotFileKind::Buffer,
         }
