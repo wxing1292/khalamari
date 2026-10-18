@@ -222,12 +222,15 @@ After sending `Start`, runtime core disables the idle timer until it receives `S
 Submitting a batch also disables the idle timer.
 Runtime core starts a new timeout interval after the last in-flight batch response commits.
 The `Started` acknowledgement starts a timeout interval only when no batch remains in flight.
+Before it blocks in `select`, runtime core attempts the next flush and then decides whether to start that interval.
+A new batch keeps the timer disabled without creating a temporary timer channel.
+Other events preserve the existing idle deadline.
 Weight loading, state loading, and batch execution do not count as idle time.
 
 ```text
-event       submit A, B    commit A       commit B       timeout
-in flight        2             1              0             0
-idle timer  disabled      disabled       starts        Stop(plan)
+event       submit A, B    commit A       commit B -> flush C    commit C -> no work    timeout
+in flight        2             1                   1                       0               0
+idle timer  disabled      disabled            disabled                  starts        Stop(plan)
 ```
 
 Future wiring may expose the tracked residency through a status API.

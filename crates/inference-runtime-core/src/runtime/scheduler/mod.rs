@@ -12,6 +12,7 @@ use crate::runtime::tasks::AsyncTaskResp;
 
 mod compute_slot;
 pub use compute_slot::ComputeSlot;
+pub use compute_slot::ComputeSlotSeq;
 
 mod dedup_vec_deque;
 
@@ -49,6 +50,11 @@ where
     fn enqueue(&mut self, user_req: UserReq);
     fn handle_async_task_resp(&mut self, resp: Box<dyn AsyncTaskResp>);
     fn can_flush(&self) -> bool;
+
+    /// Returns the next sequence without consuming it. Readiness describes compute-slot availability.
+    fn next_compute_slot_seq(&self) -> ComputeSlotSeq;
+    /// Counts compute slots occupied by batches pending commit or cancellation.
+    fn num_in_flight_compute_slots(&self) -> usize;
 
     fn prepare(&mut self) -> BatchDeviceReq;
     fn cancel(&mut self, batch_dev_req: BatchDeviceReq);

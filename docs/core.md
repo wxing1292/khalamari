@@ -69,7 +69,7 @@ then use that block as a non-terminal prefix.
 ┌────────────────────────────────────────────────────────────────────────────┐
 │ Sessions::create                                                           │
 │ validate input -> allocate RequestSlot -> create running InternalRequest   │
-│ -> submit through the request channel                                     │
+│ -> submit through the request channel                                      │
 └───────────────────────────────────┬────────────────────────────────────────┘
                                     │ event-loop enqueue
                                     v
@@ -393,7 +393,7 @@ request's `TrieDecoderBlocks`:
                     │ unpinned leaf candidates              │
                     v                                       │
 ┌──────────────────────────────────────┐                    │
-│ EvictionPolicy (default: S3FIFO)      │                    │
+│ EvictionPolicy (default: S3FIFO)     │                    │
 │ select and reserve candidates        │                    │
 │ accept/reject after trie decision    │                    │
 └───────────────────┬──────────────────┘                    │
@@ -520,8 +520,11 @@ It can append a batch after `Start` without a separate transition state.
 The ordered channel guarantees that the executor handles `Start` before that batch.
 The runtime consumes `Started` and `Stopped` as acknowledgements and then attempts the next flush.
 The runtime disables the idle timer while Start awaits `Started` or any batch remains in flight.
-The last batch-response commit starts a new timeout interval.
-`Started` starts a timeout interval only when no batch remains in flight.
+`Scheduler::num_in_flight_compute_slots()` reports the number of occupied compute slots.
+After a batch-response commit or `Started`, the runtime attempts the next flush before it blocks in `select`.
+It starts a new timeout interval only when no batch remains in flight after that flush.
+Continuous decode does not create an idle timer between batches.
+Other events preserve the existing idle deadline.
 
 Each protocol channel reserves one entry in addition to the compute-slot capacity.
 This entry preserves capacity for lifecycle commands alongside submitted batches.
@@ -626,6 +629,30 @@ When a batch arrives, the executor drains the reset set before it prepares the b
 before its prior reset notification.
 
 ## Scheduler contracts and invariants
+
+### Compute-slot queries
+
+`Scheduler::next_compute_slot_seq()` returns `ComputeSlotSeq::Ready` when a compute slot is available.
+It returns `ComputeSlotSeq::Pending` when all compute slots are occupied.
+Both variants carry the next `seq_id` from one scheduler-wide counter.
+Queries do not consume a sequence. Each `prepare` consumes one sequence, including an empty batch.
+`cancel` releases the slot without reversing the sequence counter.
+Slot availability does not imply runnable token work. `can_flush` checks both conditions.
+
+`Scheduler::num_in_flight_compute_slots()` returns the number of prepared batches pending `commit` or `cancel`.
+`SimpleScheduler` derives this count from its occupied compute slots.
+`InstrumentedScheduler` forwards both queries to the wrapped scheduler.
+
+```text
+operation       slot A    slot B    slot C    next_compute_slot_seq()       in flight
+initial           -         -         -      Ready   { seq_id: 1 }              0
+prepare           1         -         -      Ready   { seq_id: 2 }              1
+prepare           1         2         -      Ready   { seq_id: 3 }              2
+prepare           1         2         3      Pending { seq_id: 4 }              3
+commit 1          -         2         3      Ready   { seq_id: 4 }              2
+prepare           4         2         3      Pending { seq_id: 5 }              3
+cancel 4          -         2         3      Ready   { seq_id: 5 }              2
+```
 
 ### Main inputs and multi-lane cache tokens
 

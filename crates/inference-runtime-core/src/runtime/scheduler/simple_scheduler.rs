@@ -12,6 +12,7 @@ use crate::runtime::RawRequestID;
 use crate::runtime::scheduler::BatchBudget;
 use crate::runtime::scheduler::Batcher;
 use crate::runtime::scheduler::ComputeSlot;
+use crate::runtime::scheduler::ComputeSlotSeq;
 use crate::runtime::scheduler::ScheduleQueue;
 use crate::runtime::scheduler::Scheduler;
 use crate::runtime::scheduler::UserRequest;
@@ -79,18 +80,6 @@ where
     pub fn new_queue_size(&self) -> usize {
         self.schedule_queue.new_queue_size()
     }
-
-    pub fn last_compute_slot_seq(&self) -> RawComputeSlotSeq {
-        self.next_compute_slot_seq - 1
-    }
-
-    pub fn next_compute_slot_seq(&self) -> Option<RawComputeSlotSeq> {
-        if self.free_compute_slots.is_empty() {
-            None
-        } else {
-            Some(self.next_compute_slot_seq)
-        }
-    }
 }
 
 impl<UserReq, DeviceReq, DeviceResp, BatchDeviceReq, BatchDeviceResp, B>
@@ -116,6 +105,19 @@ where
     fn can_flush(&self) -> bool {
         let token_budget = self.max_token_budget.min(self.max_token_per_req);
         !self.free_compute_slots.is_empty() && self.schedule_queue.token_estimate(token_budget) > 0
+    }
+
+    fn next_compute_slot_seq(&self) -> ComputeSlotSeq {
+        let seq_id = self.next_compute_slot_seq;
+        if self.free_compute_slots.is_empty() {
+            ComputeSlotSeq::Pending { seq_id }
+        } else {
+            ComputeSlotSeq::Ready { seq_id }
+        }
+    }
+
+    fn num_in_flight_compute_slots(&self) -> usize {
+        self.used_compute_slots.len()
     }
 
     fn prepare(&mut self) -> BatchDeviceReq {
@@ -309,12 +311,12 @@ mod tests {
             max_token_per_req,
             1,
         );
-        assert_eq!(scheduler.last_compute_slot_seq(), 0);
-        assert_eq!(scheduler.next_compute_slot_seq(), Some(1));
 
         {
             let scheduler: &mut dyn Scheduler<TestUserReq, MockDevReq, MockDevResp, TestBatchDevReq, TestBatchDeviceResp> =
                 &mut scheduler;
+            assert_eq!(scheduler.next_compute_slot_seq(), ComputeSlotSeq::Ready { seq_id: 1 });
+            assert_eq!(scheduler.num_in_flight_compute_slots(), 0);
             assert!(!scheduler.can_flush());
             let mut user_req = TestUserReq::new();
             user_req
@@ -326,13 +328,15 @@ mod tests {
 
             let batch_dev_req = scheduler.prepare();
             assert_eq!(batch_dev_req.seq(), 1);
+            assert_eq!(scheduler.next_compute_slot_seq(), ComputeSlotSeq::Pending { seq_id: 2 });
+            assert_eq!(scheduler.num_in_flight_compute_slots(), 1);
             assert!(!scheduler.can_flush());
 
             scheduler.cancel(batch_dev_req);
+            assert_eq!(scheduler.next_compute_slot_seq(), ComputeSlotSeq::Ready { seq_id: 2 });
+            assert_eq!(scheduler.num_in_flight_compute_slots(), 0);
             assert!(scheduler.can_flush());
         }
-        assert_eq!(scheduler.last_compute_slot_seq(), 1);
-        assert_eq!(scheduler.next_compute_slot_seq(), Some(2));
     }
 
     #[test]
@@ -365,14 +369,15 @@ mod tests {
             assert_eq!(first.seq(), 1);
             assert_eq!(second.seq(), 2);
             assert_eq!(third.seq(), 3);
+            assert_eq!(scheduler.next_compute_slot_seq(), ComputeSlotSeq::Pending { seq_id: 4 });
+            assert_eq!(scheduler.num_in_flight_compute_slots(), 3);
             (first, second, third)
         };
-        assert_eq!(scheduler.next_compute_slot_seq(), None);
 
         {
             let scheduler: &mut dyn Scheduler<TestUserReq, MockDevReq, MockDevResp, TestBatchDevReq, TestBatchDeviceResp> =
                 &mut scheduler;
-            for batch in [first, second, third] {
+            for (batch_index, batch) in [first, second, third].into_iter().enumerate() {
                 let responses = batch
                     .dev_reqs
                     .iter()
@@ -383,9 +388,10 @@ mod tests {
                     })
                     .collect();
                 scheduler.commit(TestBatchDeviceResp::from_parts(batch.seq(), responses));
+                assert_eq!(scheduler.next_compute_slot_seq(), ComputeSlotSeq::Ready { seq_id: 4 });
+                assert_eq!(scheduler.num_in_flight_compute_slots(), 2 - batch_index);
             }
         }
-        assert_eq!(scheduler.next_compute_slot_seq(), Some(4));
     }
 
     #[test]
@@ -418,18 +424,24 @@ mod tests {
             assert_eq!(first.seq(), 1);
             assert_eq!(second.seq(), 2);
             assert_eq!(third.seq(), 3);
+            assert_eq!(scheduler.next_compute_slot_seq(), ComputeSlotSeq::Pending { seq_id: 4 });
+            assert_eq!(scheduler.num_in_flight_compute_slots(), 3);
             (first, second, third)
         };
-        assert_eq!(scheduler.next_compute_slot_seq(), None);
 
         {
             let scheduler: &mut dyn Scheduler<TestUserReq, MockDevReq, MockDevResp, TestBatchDevReq, TestBatchDeviceResp> =
                 &mut scheduler;
             scheduler.cancel(third);
+            assert_eq!(scheduler.next_compute_slot_seq(), ComputeSlotSeq::Ready { seq_id: 4 });
+            assert_eq!(scheduler.num_in_flight_compute_slots(), 2);
             scheduler.cancel(second);
+            assert_eq!(scheduler.next_compute_slot_seq(), ComputeSlotSeq::Ready { seq_id: 4 });
+            assert_eq!(scheduler.num_in_flight_compute_slots(), 1);
             scheduler.cancel(first);
+            assert_eq!(scheduler.next_compute_slot_seq(), ComputeSlotSeq::Ready { seq_id: 4 });
+            assert_eq!(scheduler.num_in_flight_compute_slots(), 0);
         }
-        assert_eq!(scheduler.next_compute_slot_seq(), Some(4));
     }
 
     #[test]

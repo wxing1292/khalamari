@@ -48,8 +48,7 @@ pub struct EventLoop<UsrReq, DeviceReq, DeviceResp, BatchDeviceReq, BatchDeviceR
 
     executor_hibernation_mode: ExecutorHibernationMode,
     executor_hibernation_timeout: Duration,
-    executor_hibernation_timer: Receiver<Instant>,
-    num_in_flight_batches: usize,
+    executor_hibernation_timer: Option<Receiver<Instant>>,
 
     shutdown: Shutdown,
 
@@ -106,8 +105,7 @@ where
 
             executor_hibernation_mode,
             executor_hibernation_timeout,
-            executor_hibernation_timer: after(executor_hibernation_timeout),
-            num_in_flight_batches: 0,
+            executor_hibernation_timer: None,
 
             shutdown,
 
@@ -123,13 +121,25 @@ where
         let shutdown_rx = self.shutdown.sync_rx().clone();
         let mut result = Ok(());
         'event_loop: while !self.shutdown.is_shutdown() {
+            if let Err(error) = self.do_flush() {
+                result = Err(error);
+                break 'event_loop;
+            }
+            let executor_hibernation_timer = self.executor_hibernation_timer.get_or_insert_with(|| {
+                if self.scheduler.num_in_flight_compute_slots() == 0 {
+                    after(self.executor_hibernation_timeout)
+                } else {
+                    never()
+                }
+            });
+
             let mut select = Select::new();
             let op_recv_new_req = select.recv(&self.new_req_rx);
             let op_recv_async_task_resp = select.recv(&self.async_task_resp_rx);
             let op_recv_model_executor_resp = select.recv(&self.model_executor_resp_rx);
             let op_scheduler_stats_timer = select.recv(&self.scheduler_stats_timer);
             let op_executor_hibernation_timer = match &self.model_executor_state {
-                ModelExecutorState::Started => Some(select.recv(&self.executor_hibernation_timer)),
+                ModelExecutorState::Started => Some(select.recv(executor_hibernation_timer)),
                 ModelExecutorState::Stopped(_) => None,
             };
             let op_shutdown = select.recv(&shutdown_rx);
@@ -165,15 +175,10 @@ where
                                     break 'event_loop;
                                 };
                             }
-                            self.num_in_flight_batches -= 1;
-                            if self.num_in_flight_batches == 0 {
-                                self.executor_hibernation_timer = after(self.executor_hibernation_timeout);
-                            }
+                            self.executor_hibernation_timer = None;
                         },
                         ReplayableModelExecutorResponse::Started => {
-                            if self.num_in_flight_batches == 0 {
-                                self.executor_hibernation_timer = after(self.executor_hibernation_timeout);
-                            }
+                            self.executor_hibernation_timer = None;
                         },
                         ReplayableModelExecutorResponse::Stopped => {},
                     }
@@ -187,7 +192,7 @@ where
                 },
                 _ if Some(op_index) == op_executor_hibernation_timer => {
                     let _ = op
-                        .recv(&self.executor_hibernation_timer)
+                        .recv(executor_hibernation_timer)
                         .expect("selected executor hibernation timer must fire");
                     if let Err(error) = self.stop_model_executor() {
                         result = Err(error);
@@ -199,10 +204,6 @@ where
                     break 'event_loop;
                 },
                 _ => unreachable!(),
-            }
-            if let Err(error) = self.do_flush() {
-                result = Err(error);
-                break 'event_loop;
             }
         }
 
@@ -222,8 +223,7 @@ where
                         .try_send(ReplayableModelExecutorRequest::Batch(batch_dev_req))
                     {
                         Ok(()) => {
-                            self.num_in_flight_batches += 1;
-                            self.executor_hibernation_timer = never();
+                            self.executor_hibernation_timer = None;
                         },
                         Err(error) => {
                             let ReplayableModelExecutorRequest::Batch(batch_dev_req) = error.into_inner() else {
@@ -256,13 +256,13 @@ where
                 log_err_internal!("model executor request channel full / closed while starting, stopping: {error}")
             })?;
         self.model_executor_state = ModelExecutorState::Started;
-        self.executor_hibernation_timer = never();
+        self.executor_hibernation_timer = Some(never());
         Ok(())
     }
 
     fn stop_model_executor(&mut self) -> Result<()> {
         debug_assert_eq!(self.model_executor_state, ModelExecutorState::Started);
-        debug_assert_eq!(self.num_in_flight_batches, 0);
+        debug_assert_eq!(self.scheduler.num_in_flight_compute_slots(), 0);
 
         let plan = match self.executor_hibernation_mode {
             ExecutorHibernationMode::All => ExecutorHibernationPlan::All,

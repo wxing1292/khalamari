@@ -15,6 +15,7 @@ use crate::compute::DevResp;
 use crate::compute::SpecStats;
 use crate::runtime::CompletionReason;
 use crate::runtime::RawComputeSlotSeq;
+use crate::runtime::scheduler::ComputeSlotSeq;
 use crate::runtime::scheduler::Scheduler;
 use crate::runtime::scheduler::UserRequest;
 use crate::runtime::tasks::AsyncTaskResp;
@@ -247,6 +248,14 @@ where
 
     fn can_flush(&self) -> bool {
         self.scheduler.can_flush()
+    }
+
+    fn next_compute_slot_seq(&self) -> ComputeSlotSeq {
+        self.scheduler.next_compute_slot_seq()
+    }
+
+    fn num_in_flight_compute_slots(&self) -> usize {
+        self.scheduler.num_in_flight_compute_slots()
     }
 
     fn prepare(&mut self) -> BatchDeviceReq {

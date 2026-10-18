@@ -2,6 +2,12 @@ use crate::runtime::RawComputeSlotID;
 use crate::runtime::RawComputeSlotSeq;
 use crate::runtime::RawRequestID;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ComputeSlotSeq {
+    Ready { seq_id: RawComputeSlotSeq },
+    Pending { seq_id: RawComputeSlotSeq },
+}
+
 pub struct ComputeSlot {
     id: RawComputeSlotID,
     seq: Option<RawComputeSlotSeq>,
