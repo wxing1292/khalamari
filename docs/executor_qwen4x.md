@@ -130,11 +130,20 @@ Prefix restore loads the latest synchronized boundary before the next forward.
 Full and selected hibernation save page contents, page tables, auxiliary state, and request metadata.
 Reload restores resources before the model records another replay.
 
+The Main owner uses `load_state` and `unload_state` for its GDN resource handles.
+`Qwen4xState` uses `allocate_resources` and `release_resources` for its auxiliary buffers, like the GQA and GDN state owners.
+
 ## Replay and reusable storage
 
 The executor uses the existing embed, gather/unembed, sampler, and GDN transaction owners.
+Main supplies one active-token replay parameter to GR, MoE, PLE, and GDN.
+GDN adds its private request counts. QSA supplies its own metadata counts.
 Main owns one GR workspace, one shared MoE workspace, and one shared QSA workspace.
 Each PLE layer owns preparation outputs because those outputs must survive until that layer runs.
+
+`Qwen4xMainArgs` supplies the Main replay bindings. `replay_arguments` supplies the active counts.
+GR read emits a write gate when its loaded weights contain a write projection.
+The final mixer has no write projection and emits only the final hidden state.
 
 A replay key contains padded capacities, component topologies, and static buffer layouts.
 Submission arguments contain active token and task counts.
@@ -144,6 +153,9 @@ It routes short queries to dense GQA and long queries to indexed sparse GQA.
 Different requests can use different paths in one batch.
 
 QSA metadata buffers retain stable identities across record-time shapes.
+`Qwen4xExecutorConfig.max_tokens` bounds the flattened query-token count in one batch.
+Initialization allocates shared scratch for every supported shape within this limit.
+Dense Map-task capacity stays fixed at initialization. Token replay buckets do not reduce it.
 Shared scratch covers the peak SplitKV partial count across supported shapes.
 The largest token shape can select S=1 while a smaller shape requires more partial storage.
 

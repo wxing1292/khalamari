@@ -334,7 +334,7 @@ impl Qwen35Executor {
             .mtp()
             .body
             .component()
-            .num_total_tokens(num_active_tokens);
+            .capacity(num_active_tokens);
         let num_mtp_sample_rows = module_batch.sampler_configs.len();
         self.write_token_ids(module_batch.microbatch.flat_token_ids());
         let mtp_gqa_shape = self.speculator.mtp().gqa_state.prepare_metadata(
@@ -389,7 +389,7 @@ impl Qwen35Executor {
         let runtime = MetalReplayRuntime::new(self.runtime.stream());
         let (recorded_transfer_key, mtp_hidden_state_transfer_cache_hit) =
             mtp.hidden_state_transfers[0].record(&runtime, &hidden_state_transfer_input);
-        assert_eq!(
+        debug_assert_eq!(
             recorded_transfer_key, mtp_hidden_state_transfer_key,
             "qwen3.5 MTP hidden-state transfer replay input must match its key"
         );
@@ -401,7 +401,7 @@ impl Qwen35Executor {
             hidden_output: &mtp_hidden_input,
         };
         let (recorded_key, mtp_embed_cache_hit) = mtp.embed.record(&runtime, &input);
-        assert_eq!(
+        debug_assert_eq!(
             recorded_key, mtp_embed_key,
             "qwen3.5 MTPEmbed replay input must match its key"
         );
@@ -460,7 +460,7 @@ impl Qwen35Executor {
     }
 
     fn record_mtp(&mut self, recorder: &mut Qwen35ModelOpsRecorder, mtp_hidden_input: Rc<Buffer>) -> Rc<Buffer> {
-        assert!(
+        debug_assert!(
             Rc::ptr_eq(&mtp_hidden_input, &self.speculator.mtp().hidden_input),
             "qwen3.5 MTP must consume the MTPEmbed hidden workspace"
         );
@@ -487,7 +487,7 @@ impl Qwen35Executor {
         };
         let runtime = MetalReplayRuntime::new(self.runtime.stream());
         let (recorded_key, mtp_cache_hit) = mtp.body.record(&runtime, &input);
-        assert_eq!(&recorded_key, mtp_key, "qwen3.5 MTP replay input must match its key");
+        debug_assert_eq!(&recorded_key, mtp_key, "qwen3.5 MTP replay input must match its key");
         if !mtp_cache_hit {
             recorder.mtp_build_elapsed += mtp_build_start.elapsed();
         }
@@ -507,7 +507,7 @@ impl Qwen35Executor {
     }
 
     fn record_mtp_gather_unembed(&mut self, recorder: &mut Qwen35ModelOpsRecorder, mtp_hidden_output: &Rc<Buffer>) {
-        assert!(
+        debug_assert!(
             Rc::ptr_eq(mtp_hidden_output, &self.hidden_output),
             "qwen3.5 MTP GatherUnembed must consume the MTP hidden workspace"
         );
@@ -619,7 +619,7 @@ impl Qwen35Executor {
             .mtp()
             .body
             .component()
-            .num_total_tokens(num_active_tokens);
+            .capacity(num_active_tokens);
         self.write_token_ids(module_batch.microbatch.flat_token_ids());
         self.speculator
             .mtp()
@@ -683,7 +683,7 @@ impl Qwen35Executor {
         };
         let (recorded_hidden_state_transfer_key, hidden_state_transfer_cache_hit) =
             mtp.hidden_state_transfers[module_index].record(&runtime, &hidden_state_transfer_input);
-        assert_eq!(
+        debug_assert_eq!(
             recorded_hidden_state_transfer_key, hidden_state_transfer_key,
             "qwen3.5 MTP hidden-state transfer replay input must match its key"
         );
@@ -695,7 +695,7 @@ impl Qwen35Executor {
             hidden_output: &hidden_input,
         };
         let (recorded_embed_key, embed_cache_hit) = mtp.embed.record(&runtime, &embed_input);
-        assert_eq!(
+        debug_assert_eq!(
             recorded_embed_key, embed_key,
             "qwen3.5 MTPEmbed replay input must match its key"
         );
@@ -708,7 +708,7 @@ impl Qwen35Executor {
             pages: self.pages.buffer(),
         };
         let (recorded_body_key, body_cache_hit) = mtp.body.record(&runtime, &body_input);
-        assert_eq!(
+        debug_assert_eq!(
             recorded_body_key, body_key,
             "qwen3.5 MTP replay input must match its key"
         );

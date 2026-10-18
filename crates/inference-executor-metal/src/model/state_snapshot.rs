@@ -65,7 +65,7 @@ pub enum StateSnapshotFile {
 }
 
 impl StateSnapshotFile {
-    pub fn file_name(self) -> &'static str {
+    fn file_name(self) -> &'static str {
         match self {
             Self::PageArena => "page-arena",
             Self::MainGQARequestPageTable => "main-gqa-request-page-table",
@@ -178,7 +178,7 @@ pub struct StateSnapshotWriter<'a> {
     temp_path: PathBuf,
     buffer_io: &'a BufferIO,
     plan: StateSnapshotPlan,
-    expected_files: Box<[StateSnapshotFile]>,
+    expected_files: BTreeSet<StateSnapshotFile>,
     files: Vec<(StateSnapshotManifestEntry, StateSnapshotWriteFile)>,
     published: bool,
 }
@@ -198,7 +198,7 @@ impl<'a> StateSnapshotWriter<'a> {
         buffer_io: &'a BufferIO,
     ) -> Result<Self, ModelExecutorError> {
         plan.assert_valid();
-        validate_expected_file_set(expected_files)?;
+        let expected_files = validate_expected_file_set(expected_files)?;
         let parent = destination.parent().ok_or_else(|| {
             ModelExecutorError::custom(format!("model state snapshot path has no parent: {destination:?}"))
         })?;
@@ -235,7 +235,7 @@ impl<'a> StateSnapshotWriter<'a> {
             temp_path,
             buffer_io,
             plan: StateSnapshotPlan::from_model_plan(plan),
-            expected_files: expected_files.into(),
+            expected_files,
             files: Vec::new(),
             published: false,
         })
@@ -470,7 +470,7 @@ impl<'a> StateSnapshotReader<'a> {
         buffer_io: &'a BufferIO,
     ) -> Result<Self, ModelExecutorError> {
         plan.assert_valid();
-        validate_expected_file_set(expected_files)?;
+        let expected_files = validate_expected_file_set(expected_files)?;
         let directory_metadata = std::fs::symlink_metadata(path).map_err(|error| {
             ModelExecutorError::custom(format!("unable to inspect model state snapshot {path:?}: {error}"))
         })?;
@@ -518,7 +518,7 @@ impl<'a> StateSnapshotReader<'a> {
                 "model state snapshot hibernation plan does not match the requested plan",
             ));
         }
-        validate_expected_files(&manifest.files, expected_files)?;
+        validate_expected_files(&manifest.files, &expected_files)?;
         validate_snapshot_directory(path, &manifest.files)?;
 
         let consumed = vec![false; manifest.files.len()];
@@ -846,16 +846,15 @@ fn validate_snapshot_directory(path: &Path, files: &[StateSnapshotManifestEntry]
 
 fn validate_expected_files(
     actual_files: &[StateSnapshotManifestEntry],
-    expected_files: &[StateSnapshotFile],
+    expected_files: &BTreeSet<StateSnapshotFile>,
 ) -> Result<(), ModelExecutorError> {
-    let expected = validate_expected_file_set(expected_files)?;
     let actual = actual_files.iter().map(|entry| entry.file).collect::<BTreeSet<_>>();
-    if let Some(file) = expected.difference(&actual).next() {
+    if let Some(file) = expected_files.difference(&actual).next() {
         return Err(ModelExecutorError::custom(format!(
             "model state snapshot file is missing: file={file:?}"
         )));
     }
-    if let Some(file) = actual.difference(&expected).next() {
+    if let Some(file) = actual.difference(expected_files).next() {
         return Err(ModelExecutorError::custom(format!(
             "model state snapshot contains an unexpected file: file={file:?}"
         )));

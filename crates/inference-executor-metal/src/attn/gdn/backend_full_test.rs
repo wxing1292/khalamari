@@ -15,6 +15,7 @@ use inference_executor_core::attn::gdn::reference::gdn_recurrent_reference;
 use inference_executor_core::attn::gdn::reference::gdn_short_conv_reference;
 use inference_executor_core::mlp::dense::reference::QuantizedAffineReferenceShape;
 use inference_executor_core::mlp::dense::reference::quantized_affine_reference;
+use inference_executor_core::replay::ReplayBucketPolicy;
 
 use super::GDN;
 use super::GDN_NUM_ACTIVE_TOKENS;
@@ -67,7 +68,7 @@ fn assert_replay_matches_cpu_reference(output_gate: GDNOutputGate) {
     let component = GDN::new(&device, core.clone(), config);
     let scratch = component.new_scratch(NUM_TOTAL_TOKENS as usize);
     let metadata = GDNMetadataBuffers::new(&device, NUM_TOTAL_REQUESTS as usize, NUM_TOTAL_TOKENS as usize);
-    let policy = component.replay_bucket_policy(NUM_TOTAL_REQUESTS, NUM_TOTAL_TOKENS);
+    let policy = ReplayBucketPolicy::new(NUM_TOTAL_REQUESTS);
     let hidden_values = generated_bf16_values(NUM_TOTAL_TOKENS as usize * HIDDEN_DIM, 0x792A_5F13, 0.5);
     let hidden = bf16_buffer(&device, &hidden_values);
     let next_hidden = Buffer::new_zeroed_elements(&device, NUM_TOTAL_TOKENS as usize * HIDDEN_DIM, Dtype::Bfloat16);

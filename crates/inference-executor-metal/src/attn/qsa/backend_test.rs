@@ -235,7 +235,7 @@ fn test_replay_bucketing() {
                 .read_typed::<u16>(0, cache.indexer_states.len_bytes() / 2);
             let before_main_pages = cache.main_pages.read_typed::<u8>(0, cache.main_pages.len_bytes());
             let mut arguments = ReplayArguments::new();
-            active.add_replay_arguments(&mut arguments);
+            active.add_replay_arguments(indexer_shape, sdpa_config.top_k, &mut arguments);
             runtime
                 .submit_replay_with_arguments(replay.replay(&key), &arguments)
                 .wait();

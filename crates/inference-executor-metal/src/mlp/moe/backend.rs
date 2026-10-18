@@ -12,7 +12,6 @@ use inference_backend_metal::operators::softmax;
 use inference_executor_core::backend::recorder::Recorder;
 use inference_executor_core::mlp::dense::DenseMLPCore;
 use inference_executor_core::mlp::moe::GatedMoECore;
-use inference_executor_core::mlp::moe::GatedMoEReplayShape;
 
 use crate::def::layer::ReplayLayer;
 use crate::def::replay_op::ReplayOp;
@@ -225,9 +224,8 @@ impl Registry {
 struct Selector;
 
 impl Selector {
-    fn select(registry: &Registry, shape: GatedMoEReplayShape) -> (VariantKey, &Variant) {
-        shape.validate();
-        let key = if shape.num_tokens <= TOKEN_MAJOR_MAX_TOKENS {
+    fn select(registry: &Registry, num_total_tokens: u32) -> (VariantKey, &Variant) {
+        let key = if num_total_tokens <= TOKEN_MAJOR_MAX_TOKENS {
             VariantKey::TokenMajor
         } else {
             VariantKey::ExpertMajor
@@ -238,10 +236,6 @@ impl Selector {
 
 impl GatedMoE {
     fn validate_input(&self, input: &GatedMoEInput<'_>) {
-        GatedMoEReplayShape {
-            num_tokens: input.num_total_tokens,
-        }
-        .validate();
         if let ReplayU32::Fixed(num_active_tokens) = input.num_active_tokens {
             assert_eq!(num_active_tokens, input.num_total_tokens);
         }
@@ -313,11 +307,7 @@ impl GatedMoE {
 
     /// Returns the complete command topology for one full-MoE replay capacity.
     pub fn replay_topology(&self, num_total_tokens: u32) -> GatedMoEReplayTopology {
-        let shape = GatedMoEReplayShape {
-            num_tokens: num_total_tokens,
-        };
-        shape.validate();
-        let (variant_key, _) = Selector::select(&self.registry, shape);
+        let (variant_key, _) = Selector::select(&self.registry, num_total_tokens);
         GatedMoEReplayTopology {
             variant_key,
             router_affine: self.router.topology(num_total_tokens),
@@ -369,7 +359,9 @@ impl GatedMoE {
             0,
         )));
         recorder.record_with_barrier_before(ReplayOp::opaque(self.router_softmax.invoke(
-            self.router_softmax_shape(num_total_tokens),
+            softmax::Shape {
+                num_total_rows: num_total_tokens,
+            },
             num_active_tokens,
             softmax::Buffers {
                 input: scratch.router_logits,
@@ -377,7 +369,7 @@ impl GatedMoE {
             },
         )));
         recorder.record_with_barrier_before(ReplayOp::opaque(self.routing.invoke(
-            self.routing_shape(num_total_tokens),
+            routing::Shape { num_total_tokens },
             num_active_tokens,
             routing::Buffers {
                 router_probs: scratch.router_probs,
@@ -395,9 +387,6 @@ impl GatedMoE {
     ) {
         let num_total_tokens = input.num_total_tokens;
         let num_active_tokens = input.num_active_tokens;
-        let shape = GatedMoEReplayShape {
-            num_tokens: num_total_tokens,
-        };
         let hidden_state = input.hidden_state;
         let next_hidden_state = input.next_hidden_state;
         let scratch = input.scratch;
@@ -414,7 +403,10 @@ impl GatedMoE {
             },
         );
         recorder.record_with_barrier_before(ReplayOp::opaque(self.topk_experts.invoke_token_major(
-            self.token_major_shape(shape),
+            sparse_mlp::TokenMajorShape {
+                num_total_routes: self.num_total_routes(num_total_tokens),
+                num_total_tokens,
+            },
             self.num_experts_per_token(),
             num_active_tokens,
             sparse_mlp::TokenMajorBuffers {
@@ -432,7 +424,7 @@ impl GatedMoE {
         match shared_experts {
             None => {
                 recorder.record_with_barrier_before(ReplayOp::opaque(combine.invoke_without_shared_experts(
-                    self.combine_shape(shape),
+                    combine::Shape { num_total_tokens },
                     num_active_tokens,
                     combine::WithoutSharedExpertsBuffers {
                         routed_hidden: scratch.topk_experts.routed_hidden,
@@ -451,7 +443,7 @@ impl GatedMoE {
                     shared_experts.weights,
                 );
                 recorder.record_with_barrier_before(ReplayOp::opaque(combine.invoke_with_shared_experts(
-                    self.combine_shape(shape),
+                    combine::Shape { num_total_tokens },
                     num_active_tokens,
                     combine::WithSharedExpertsBuffers {
                         routed_hidden: scratch.topk_experts.routed_hidden,
@@ -473,15 +465,12 @@ impl GatedMoE {
     ) {
         let num_total_tokens = input.num_total_tokens;
         let num_active_tokens = input.num_active_tokens;
-        let shape = GatedMoEReplayShape {
-            num_tokens: num_total_tokens,
-        };
         let hidden_state = input.hidden_state;
         let next_hidden_state = input.next_hidden_state;
         let scratch = input.scratch;
         let weights = input.weights;
         let shared_experts = input.shared_experts;
-        let expert_major_shape = self.expert_major_shape(shape);
+        let expert_major_shape = expert_major::Shape { num_total_tokens };
         self.record_routing(
             recorder,
             GatedMoERoutingInput {
@@ -531,7 +520,7 @@ impl GatedMoE {
         )));
         recorder.record_with_barrier_before(ReplayOp::opaque(self.topk_experts.invoke_expert_major(
             sparse_mlp::ExpertMajorShape {
-                num_total_routes: self.num_routes(shape),
+                num_total_routes: self.num_total_routes(num_total_tokens),
                 num_total_tokens,
                 num_experts_per_token: self.num_experts_per_token(),
             },
@@ -594,11 +583,8 @@ impl GatedMoE {
             .shared_experts
             .as_ref()
             .expect("gated MoE shared replay requires a configured shared expert");
-        let shape = GatedMoEReplayShape {
-            num_tokens: num_total_tokens,
-        };
         recorder.record(ReplayOp::opaque(shared_experts.mlp.invoke(
-            self.shared_experts_dense_shape(shape),
+            dense_mlp::Shape { num_total_tokens },
             num_active_tokens,
             dense_mlp::Buffers {
                 hidden_state: input,
@@ -625,56 +611,13 @@ impl GatedMoE {
         )));
     }
 
-    fn shared_experts_dense_shape(&self, shape: GatedMoEReplayShape) -> dense_mlp::Shape {
-        assert!(
-            self.core.has_shared_experts(),
-            "gated MoE shared shape requires a configured shared expert"
-        );
-        dense_mlp::Shape {
-            num_total_tokens: shape.num_tokens,
-        }
-    }
-
-    fn routing_shape(&self, num_tokens: u32) -> routing::Shape {
-        routing::Shape {
-            num_total_tokens: num_tokens,
-        }
-    }
-
-    fn router_softmax_shape(&self, num_total_tokens: u32) -> softmax::Shape {
-        softmax::Shape {
-            num_total_rows: num_total_tokens,
-        }
-    }
-
-    fn token_major_shape(&self, shape: GatedMoEReplayShape) -> sparse_mlp::TokenMajorShape {
-        sparse_mlp::TokenMajorShape {
-            num_total_routes: self.num_routes(shape),
-            num_total_tokens: shape.num_tokens,
-        }
-    }
-
-    fn expert_major_shape(&self, shape: GatedMoEReplayShape) -> expert_major::Shape {
-        expert_major::Shape {
-            num_total_tokens: shape.num_tokens,
-        }
-    }
-
-    fn combine_shape(&self, shape: GatedMoEReplayShape) -> combine::Shape {
-        combine::Shape {
-            num_total_tokens: shape.num_tokens,
-        }
-    }
-
-    fn num_routes(&self, shape: GatedMoEReplayShape) -> u32 {
-        shape
-            .num_tokens
+    fn num_total_routes(&self, num_total_tokens: u32) -> u32 {
+        num_total_tokens
             .checked_mul(self.num_experts_per_token())
             .expect("MoE route count must fit u32")
     }
 
     fn num_experts_per_token(&self) -> u32 {
-        debug_assert!(u32::try_from(self.core.num_experts_per_token).is_ok());
         self.core.num_experts_per_token as u32
     }
 }
@@ -688,11 +631,8 @@ impl ReplayLayer for GatedMoE {
         R: Recorder<'a, Operator = ReplayOp<'a>>,
     {
         self.validate_input(&input);
-        let shape = GatedMoEReplayShape {
-            num_tokens: input.num_total_tokens,
-        };
         let next_hidden_state = input.next_hidden_state;
-        let (_, variant) = Selector::select(&self.registry, shape);
+        let (_, variant) = Selector::select(&self.registry, input.num_total_tokens);
         match variant {
             Variant::TokenMajor { combine } => self.record_token_major(combine, recorder, input),
             Variant::ExpertMajor { expert_major } => self.record_expert_major(expert_major, recorder, input),

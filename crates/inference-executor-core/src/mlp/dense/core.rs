@@ -38,14 +38,3 @@ impl DenseMLPCore {
         }
     }
 }
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct DenseMLPReplayShape {
-    pub num_tokens: u32,
-}
-
-impl DenseMLPReplayShape {
-    pub fn validate(self) {
-        assert!(self.num_tokens > 0);
-    }
-}

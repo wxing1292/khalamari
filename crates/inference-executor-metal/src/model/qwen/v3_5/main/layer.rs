@@ -87,17 +87,6 @@ pub struct Qwen35MainLayerInput<'a> {
     pub residual_capture_dest: Option<residual_add::CaptureTarget<'a>>,
 }
 
-#[allow(clippy::upper_case_acronyms)]
-enum Qwen35MainAttentionInput<'a> {
-    GQA {
-        metadata: &'a GQAMetadataBuffers,
-        pages: &'a Buffer,
-    },
-    GDN {
-        metadata: &'a GDNMetadataBuffers,
-    },
-}
-
 impl Qwen35MainLayer {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -219,15 +208,6 @@ impl Qwen35MainLayer {
             "qwen3.5 Main active tokens must not exceed the replay capacity"
         );
         let hidden_dim = self.scratch.hidden_dim();
-        let attention_input = match &self.attention {
-            Qwen35MainAttention::GQA(_) => {
-                Qwen35MainAttentionInput::GQA {
-                    metadata: input.gqa,
-                    pages: input.pages,
-                }
-            },
-            Qwen35MainAttention::GDN(_) => Qwen35MainAttentionInput::GDN { metadata: input.gdn },
-        };
         let check = |recorder: &mut R, stage: &str, buffer: &'a Buffer| {
             if let Some(check) = &self.finite_check {
                 recorder.record(ReplayOp::opaque(check.invoke(
@@ -249,21 +229,30 @@ impl Qwen35MainLayer {
             &self.scratch.normalized_hidden,
         );
         check(recorder, "input_norm.output", &self.scratch.normalized_hidden);
-        self.attention.record(
-            recorder,
-            &self.scratch.normalized_hidden,
-            &self.scratch.branch_output,
-            attention_input,
-            num_active_tokens,
-        );
-        check(
-            recorder,
-            match &self.attention {
-                Qwen35MainAttention::GQA(_) => "GQA.output",
-                Qwen35MainAttention::GDN(_) => "GDN.output",
+        let attention_output_stage = match &self.attention {
+            Qwen35MainAttention::GQA(component) => {
+                component.record(
+                    recorder,
+                    &self.scratch.normalized_hidden,
+                    &self.scratch.branch_output,
+                    input.pages,
+                    input.gqa,
+                    num_active_tokens,
+                );
+                "GQA.output"
             },
-            &self.scratch.branch_output,
-        );
+            Qwen35MainAttention::GDN(component) => {
+                component.record(
+                    recorder,
+                    &self.scratch.normalized_hidden,
+                    &self.scratch.branch_output,
+                    input.gdn,
+                    num_active_tokens,
+                );
+                "GDN.output"
+            },
+        };
+        check(recorder, attention_output_stage, &self.scratch.branch_output);
         self.residual_add.record(
             recorder,
             num_total_tokens,
@@ -416,27 +405,6 @@ impl Qwen35MainAttention {
         match self {
             Self::GQA(component) => component.load_state(gqa_state),
             Self::GDN(component) => component.load_state(gdn_state),
-        }
-    }
-
-    fn record<'a, R>(
-        &'a self,
-        recorder: &mut R,
-        input: &'a Buffer,
-        output: &'a Buffer,
-        metadata: Qwen35MainAttentionInput<'a>,
-        num_active_tokens: ReplayU32,
-    ) where
-        R: Recorder<'a, Operator = ReplayOp<'a>>,
-    {
-        match (self, metadata) {
-            (Self::GQA(component), Qwen35MainAttentionInput::GQA { metadata, pages }) => {
-                component.record(recorder, input, output, pages, metadata, num_active_tokens)
-            },
-            (Self::GDN(component), Qwen35MainAttentionInput::GDN { metadata }) => {
-                component.record(recorder, input, output, metadata, num_active_tokens)
-            },
-            _ => panic!("qwen3.5 attention component and metadata must have the same kind"),
         }
     }
 }

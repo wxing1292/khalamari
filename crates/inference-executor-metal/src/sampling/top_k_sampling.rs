@@ -383,8 +383,8 @@ impl TopKSampling {
         self.params.bounds().max_sampling_inputs
     }
 
+    /// Adds active counts for the same shape used to record the replay.
     pub fn add_replay_arguments(&self, shape: TopKSamplingShape, arguments: &mut ReplayArguments) {
-        self.validate(shape);
         let component_shape = component_shape(shape);
         self.compute
             .map
@@ -395,7 +395,12 @@ impl TopKSampling {
     }
 
     fn validate(&self, shape: TopKSamplingShape) {
-        self.params.validate(shape);
+        let bounds = self.params.bounds();
+        assert!(shape.num_active_sampling_inputs > 0);
+        assert!(shape.num_active_sampling_inputs <= shape.num_total_sampling_inputs);
+        assert!(shape.num_total_sampling_inputs <= bounds.max_sampling_inputs);
+        assert_eq!(shape.vocab_size, bounds.vocab_size);
+        assert!(shape.top_k > 0 && shape.top_k <= bounds.top_k);
     }
 }
 

@@ -5,6 +5,7 @@ use inference_backend_metal::metal::Dtype;
 use inference_backend_metal::metal::ReplayU32;
 use inference_backend_metal::operators::affine_quantized;
 use inference_executor_core::backend::recorder::Recorder;
+use inference_executor_core::checkpoint::remove_tensor;
 use inference_executor_core::def::ModelExecutorError;
 use inference_executor_core::model::qwen::v3_x::dflash2::Qwen3xDFlash2Config;
 use inference_executor_core::model::qwen::v3_x::dflash2::Qwen3xDFlash2ConvWeightBindings;
@@ -13,7 +14,6 @@ use crate::checkpoint::SafeTensorStore;
 use crate::def::replay_op::ReplayOp;
 use crate::model::qwen::v3_x::weight::affine_parameter_safetensors_dtype;
 use crate::model::qwen::v3_x::weight::remove_quant_weight;
-use crate::model::qwen::v3_x::weight::remove_typed_tensor;
 use crate::model::qwen::v3_x::weight::to_u32;
 use crate::model::qwen::v3_x::weight::validate_len;
 
@@ -122,13 +122,13 @@ impl Qwen3xDFlash2Conv {
         let mut names = Vec::new();
         bindings.push_tensor_names(&mut names);
         let mut tensors = store.load_tensors(names)?;
-        let base = remove_typed_tensor(&mut tensors, &bindings.base_kernel, safetensors::Dtype::BF16)?.into_data();
+        let base = remove_tensor(&mut tensors, &bindings.base_kernel, safetensors::Dtype::BF16)?.into_data();
         let projection_weight = remove_quant_weight(&mut tensors, &bindings.kernel_projection.weight)?;
         let scale_bias_dtype = affine_parameter_safetensors_dtype(self.projection_config.scale_bias_dtype);
         let projection_scales =
-            remove_typed_tensor(&mut tensors, &bindings.kernel_projection.scales, scale_bias_dtype)?.into_data();
+            remove_tensor(&mut tensors, &bindings.kernel_projection.scales, scale_bias_dtype)?.into_data();
         let projection_biases =
-            remove_typed_tensor(&mut tensors, &bindings.kernel_projection.biases, scale_bias_dtype)?.into_data();
+            remove_tensor(&mut tensors, &bindings.kernel_projection.biases, scale_bias_dtype)?.into_data();
         validate_len(
             "Qwen3x DFlash2 convolution base",
             base.len(),

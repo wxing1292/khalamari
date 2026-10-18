@@ -25,7 +25,6 @@ use inference_executor_core::ngram_embedding::core::NGramEmbeddingCore;
 use inference_executor_core::ple::core::PLECore;
 use inference_executor_core::replay::ReplayBucketPolicy;
 
-use super::state::Qwen4xState;
 use crate::attn::gdn::backend::GDNMetalConfig;
 use crate::attn::qsa::backend::QSA;
 use crate::attn::qsa::backend::QSAInput;
@@ -52,9 +51,9 @@ use crate::model::qwen::v3_x::layer::Qwen3xMoE;
 use crate::model::qwen::v3_x::state::Qwen3xGDNState;
 use crate::model::qwen::v3_x::weight::load_qwen3x_norm_weight;
 use crate::model::qwen::v3_x::weight::resolve_uniform_quantization;
-use crate::model::qwen::v3_x::weight::typed_tensor;
 use crate::model::qwen::v3_x::weight::validate_len;
 use crate::model::qwen::v3_x::weight::validate_shape;
+use crate::model::qwen::v4_x::state::Qwen4xState;
 use crate::ple::backend::PLE;
 use crate::ple::backend::PLEApplyInput;
 use crate::ple::backend::PLEMetalConfig;

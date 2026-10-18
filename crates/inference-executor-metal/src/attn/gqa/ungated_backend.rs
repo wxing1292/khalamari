@@ -242,16 +242,7 @@ impl UngatedGQA {
         GQAReplayBucketPolicy::new(
             self.sdpa_selector.limits().max_tokens,
             self.sdpa_selector.limits().max_map_task_templates,
-            &self.replay_token_topology_boundaries(),
         )
-    }
-
-    fn replay_token_topology_boundaries(&self) -> Box<[u32]> {
-        let mut boundaries = self.qkv.topology_boundaries().into_vec();
-        boundaries.extend(self.output.topology_boundaries());
-        boundaries.sort_unstable();
-        boundaries.dedup();
-        boundaries.into_boxed_slice()
     }
 
     fn validate_token_capacity_topology(&self, num_tokens: u32, num_total_tokens: u32) {

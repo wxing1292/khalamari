@@ -10,6 +10,7 @@ use inference_backend_metal::metal::ReplayParameterKey;
 use inference_backend_metal::metal::ReplayU32;
 use inference_backend_metal::operators::affine_quantized;
 use inference_executor_core::backend::recorder::Recorder;
+use inference_executor_core::checkpoint::remove_tensor;
 use inference_executor_core::def::ModelExecutorError;
 use inference_executor_core::model::qwen::v3_x::dflash2::Qwen3xDFlash2Config;
 use inference_executor_core::model::qwen::v3_x::dflash2::Qwen3xDFlash2SelectorWeightBindings;
@@ -24,7 +25,6 @@ use crate::model::embedding::EmbedInput;
 use crate::model::gather::Gather;
 use crate::model::qwen::v3_x::weight::affine_parameter_safetensors_dtype;
 use crate::model::qwen::v3_x::weight::remove_quant_weight;
-use crate::model::qwen::v3_x::weight::remove_typed_tensor;
 use crate::model::qwen::v3_x::weight::to_u32;
 use crate::model::qwen::v3_x::weight::validate_len;
 use crate::model::unembedding::Unembed;
@@ -260,10 +260,8 @@ impl Qwen3xDFlash2Output {
         ])?;
         let weight = remove_quant_weight(&mut tensors, &bindings.hidden_projection.weight)?;
         let scale_bias_dtype = affine_parameter_safetensors_dtype(self.hidden_projection_config.scale_bias_dtype);
-        let scales =
-            remove_typed_tensor(&mut tensors, &bindings.hidden_projection.scales, scale_bias_dtype)?.into_data();
-        let biases =
-            remove_typed_tensor(&mut tensors, &bindings.hidden_projection.biases, scale_bias_dtype)?.into_data();
+        let scales = remove_tensor(&mut tensors, &bindings.hidden_projection.scales, scale_bias_dtype)?.into_data();
+        let biases = remove_tensor(&mut tensors, &bindings.hidden_projection.biases, scale_bias_dtype)?.into_data();
         validate_len(
             "Qwen3x DFlash2 selector hidden-projection weight",
             weight.len(),

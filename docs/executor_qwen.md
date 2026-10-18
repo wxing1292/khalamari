@@ -319,7 +319,7 @@ The executor embeds vocabulary tokens first and then replaces active audio place
 Text-only Qwen3 retains its original embedding path.
 [`qwen3_asr.md`](qwen3_asr.md) defines the complete current Qwen3-ASR contract.
 
-`Qwen3xGQA` and `Qwen3xGDN` store compact per-kind layer indices, not model-layer indices, for page-table and
+`Qwen3xGQA` and `Qwen3xGDN` name their compact per-kind coordinates `gqa_layer_index` and `gdn_layer_index` for page-table and
 state-arena addressing.
 
 ## Configuration, bindings, and load
@@ -477,6 +477,9 @@ after:  record(K129) -> Cache inserts P129   -> peek(K129)   -> submit P129
 Each submission retains its program resources until the submission drops.
 Cache eviction does not release resources that a submission still owns.
 
+Qwen3 and Qwen3.5 GatherUnembed derive replay keys without constructing submission arguments.
+Their `prepare_replay` methods use the same key derivation and construct the active-row arguments for submission.
+
 The independent cached graphs are:
 
 ```text
@@ -594,6 +597,7 @@ The executor token workspace capacity caps this policy.
 The executor forces both GQA and GDN metadata to use the selected Main token capacity.
 GQA continues to bucket Q-token tiles and SDPA map TaskTemplates independently.
 GDN continues to bucket requests independently.
+GQA and GDN metadata retain the initialized token limit without another token bucket policy.
 These dimensions use private replay arguments.
 All Main token-row commands use the single `qwen3.5.main.num_active_tokens` parameter.
 The Main replay does not declare the GQA or GDN component-local active-token parameters.

@@ -196,6 +196,10 @@ invocations. It also holds one `Rc<GQARequestPageTable>` and reusable `GQAMetada
 Each `Qwen3xGQA` layer component retains clones of the backend, scratch, and page-table handles. It also owns its
 weights and compact layer coordinate. Qwen3 Main uses its model-owned ungated leaf.
 
+`GQARequestPageTable::new` validates the complete page-table allocation.
+State and executor owners derive per-block page-ID counts from that initialized geometry with ordinary arithmetic.
+They still validate the length and physical-page range of each runtime-supplied page-ID block.
+
 `Qwen35MainLayer` and `Qwen35MTPLayer` use the gated shared leaf in separate role-specific owners.
 
 The gated and ungated executors share the lower-level norm/RoPE, KV update, SplitKV, and output-projection
@@ -485,8 +489,10 @@ The state receives static attention and KV-cache facts through `backend_sdpa::Co
 Q-token-range extent, scratch extent, replay extent, and launch-cost metrics for each candidate. Its `Selection`
 contains the execution variant and `BiDiBlockGQACapacity`. The selector first minimizes how many times one history K/V
 token must be loaded for the fixed proposal. It then compares the kernel KV-iteration width, padded Q-token/head coordinates, scratch
-extent, and Q-head coverage. The state freezes this result at initialization. The runtime metadata builder then
-materializes the current history and block-partial composition.
+extent, and Q-head coverage. The state retains the selected variant and capacity at initialization.
+It does not retain selection metrics or duplicate page geometry.
+Both GQA and BiDiBlockGQA selection and metadata owners expose the selected execution through `variant()`.
+The runtime metadata builder then materializes the current history and block-partial composition.
 
 Each concrete backend converts its core and `GQAMetalConfig` into a projection split. `GQAMetalConfig` contains only
 model, quantization, storage, and RoPE facts. The backend derives Metal SDPA tuning from `head_dim`. It then constructs
@@ -588,9 +594,11 @@ The caller-owned token capacity must satisfy `num_tokens <= num_total_tokens <= 
 QGKV and output affine topologies selected for `num_tokens`. GQA validates these topologies during preparation and
 recording. The recording check prevents a direct metadata update from bypassing the topology contract.
 
-The GQA token policy includes topology boundaries from both affine projections. The Q-token-range and KV-split
-policies use the shared default buckets. `GQA::replay_token_topology_boundaries()` exposes the union to composite
-stage policies. `backend_sdpa::ExecutionVariant` remains an explicit topology identity in the replay key.
+The GQA token policy includes topology boundaries from both affine projections. The Q-token-range and Map TaskTemplate
+policies use the shared default buckets. `GQAReplayBucketPolicy::capacity(...)` returns their recorded capacities.
+The model owner supplies the recorded token capacity separately.
+`GQA::replay_token_topology_boundaries()` exposes the union to composite stage policies.
+`backend_sdpa::ExecutionVariant` remains an explicit topology identity in the replay key.
 
 Parameterized GQA execution consumes these submission values:
 
@@ -1458,9 +1466,29 @@ Debug in this order:
 ## QSA SDPA
 
 Qwen4x reuses stable QSA metadata buffers across record-time capacities with `update_with_shape`.
+The dense selector, task metadata, scratch, and replay dispatch use the same initialized Map-task limit.
+This limit equals the initialized maximum token count. Smaller token replays retain that fixed task limit.
+Replay recording reads the initialized limit from the scratch owner's private shape.
+Submission supplies the active task count. Task capacity does not add a replay bucket or key field.
 The scratch owner allocates the peak SplitKV partial count across every supported capacity below its limit.
 A maximum-capacity S=1 path therefore does not exclude smaller SplitKV recordings.
 See [Qwen4x replay](executor_qwen4x.md#replay-and-reusable-storage) for model ownership.
+
+For initialized token capacity `M`, dense partial storage has `M` records per Q head.
+Sparse partial storage has `P = max(q * S(q))` records per Q head over `1 <= q <= M` with `S(q) > 1`.
+`S(q)` is the selected sparse split count. The S=1 path writes output directly.
+Initialization checks each split-count interval's upper endpoint because `q * S(q)` increases within that interval.
+The partial-output and two F32-statistic buffers require these byte counts for the current geometry:
+
+```text
+dense:  M * 24 * (256 * 2 + 2 * 4)
+sparse: P * 24 * (256 * 4 + 2 * 4)
+
+M=128: dense M=128, sparse P=512
+       dense 1,597,440 bytes + sparse 12,681,216 bytes
+```
+
+These counts exclude projections, prepared Q/K, indexer scores, selected IDs, and final attention output.
 
 The [QSA indexer](executor_qsa_indexer.md) owns pooled-key preparation, score selection, and indexer replay metadata.
 

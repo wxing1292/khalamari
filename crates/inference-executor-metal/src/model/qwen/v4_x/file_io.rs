@@ -63,7 +63,7 @@ impl Qwen4xExecutor {
     fn read_state(&mut self, path: &Path, plan: &ExecutorHibernationPlan) -> Result<(), ModelExecutorError> {
         let mut reader = StateSnapshotReader::open(path, STATE_FILES, plan, self.runtime.buffer_io())?;
         let device = self.runtime.device();
-        self.state.allocate(device, &self.model_config)?;
+        self.state.allocate_resources(device, &self.model_config)?;
         self.gdn.allocate_resources(device);
         self.pages.allocate_resources(device);
         let result = (|| {
@@ -101,12 +101,12 @@ impl Qwen4xExecutor {
         if let Err(error) = result {
             self.pages.release_resources();
             self.gdn.release_resources();
-            self.state.release();
+            self.state.release_resources();
             return Err(error);
         }
         self.state
             .restore_snapshot(device, &MetalReplayRuntime::new(self.runtime.stream()));
-        self.main.component_mut().attach_gdn(&self.gdn);
+        self.main.component_mut().load_state(&self.gdn);
         Ok(())
     }
 }

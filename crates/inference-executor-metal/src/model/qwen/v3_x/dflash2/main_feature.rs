@@ -7,6 +7,7 @@ use inference_backend_metal::metal::Dtype;
 use inference_backend_metal::metal::ReplayU32;
 use inference_backend_metal::operators::affine_quantized;
 use inference_executor_core::backend::recorder::Recorder;
+use inference_executor_core::checkpoint::remove_tensor;
 use inference_executor_core::def::ModelExecutorError;
 use inference_executor_core::model::qwen::v3_x::dflash2::Qwen3xDFlash2Config;
 use inference_executor_core::model::qwen::v3_x::dflash2::Qwen3xDFlash2MainFeatureWeightBindings;
@@ -17,14 +18,12 @@ use crate::model::main_residual_capture::MainResidualCapture;
 use crate::model::qwen::v3_x::weight::affine_parameter_safetensors_dtype;
 use crate::model::qwen::v3_x::weight::remove_quant_weight;
 use crate::model::qwen::v3_x::weight::remove_qwen3x_norm_weight;
-use crate::model::qwen::v3_x::weight::remove_typed_tensor;
 use crate::model::qwen::v3_x::weight::validate_len;
 use crate::model::rms_norm::RMSNorm;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct Qwen3xDFlash2MainFeatureLayout {
     max_tokens: u32,
-    num_selected_residuals: u32,
     hidden_dim: u32,
     selected_hidden_dim: u32,
 }
@@ -53,23 +52,9 @@ impl Qwen3xDFlash2MainFeatureLayout {
             .expect("Qwen3 DFlash2 selected Main width must fit u32");
         Self {
             max_tokens,
-            num_selected_residuals,
             hidden_dim,
             selected_hidden_dim,
         }
-    }
-
-    fn capture_columns(self, residual_slice_index: usize) -> Range<u32> {
-        assert!(
-            residual_slice_index < self.num_selected_residuals as usize,
-            "Qwen3 DFlash2 Main residual slice is outside the workspace"
-        );
-        let start: u32 = residual_slice_index
-            .checked_mul(self.hidden_dim as usize)
-            .and_then(|offset| offset.try_into().ok())
-            .expect("Qwen3 DFlash2 Main residual column start must fit u32");
-        let end = start + self.hidden_dim;
-        start..end
     }
 
     fn main_residual_elements(self) -> usize {
@@ -85,35 +70,6 @@ impl Qwen3xDFlash2MainFeatureLayout {
     }
 }
 
-struct Qwen3xDFlash2MainResidualBindings {
-    by_model_layer: Vec<Option<usize>>,
-}
-
-impl Qwen3xDFlash2MainResidualBindings {
-    fn new(target_layer_ids: &[usize]) -> Self {
-        let num_main_layers = target_layer_ids
-            .iter()
-            .copied()
-            .max()
-            .expect("Qwen3 DFlash2 Main residual bindings require layers")
-            + 1;
-        let mut by_model_layer = vec![None; num_main_layers];
-        for (residual_slice_index, &model_layer_index) in target_layer_ids.iter().enumerate() {
-            let slot = &mut by_model_layer[model_layer_index];
-            assert!(
-                slot.is_none(),
-                "Qwen3 DFlash2 selected Main decoder layers must be unique"
-            );
-            *slot = Some(residual_slice_index);
-        }
-        Self { by_model_layer }
-    }
-
-    fn get(&self, model_layer_index: usize) -> Option<usize> {
-        self.by_model_layer.get(model_layer_index).copied().flatten()
-    }
-}
-
 struct Qwen3xDFlash2MainFeatureWeights {
     fc_weight: Buffer,
     fc_scales: Buffer,
@@ -122,7 +78,7 @@ struct Qwen3xDFlash2MainFeatureWeights {
 
 pub struct Qwen3xDFlash2MainFeatureProjector {
     layout: Qwen3xDFlash2MainFeatureLayout,
-    residual_bindings: Qwen3xDFlash2MainResidualBindings,
+    residual_columns: Vec<Option<Range<u32>>>,
     fc_config: affine_quantized::Config,
     fc: affine_quantized::Matmul,
     hidden_norm: RMSNorm,
@@ -133,7 +89,16 @@ pub struct Qwen3xDFlash2MainFeatureProjector {
 
 impl MainResidualCapture for Qwen3xDFlash2MainFeatureProjector {
     fn capture_for_model_layer(&self, model_layer_index: usize) -> Option<residual_add::CaptureTarget<'_>> {
-        Qwen3xDFlash2MainFeatureProjector::capture_for_model_layer(self, model_layer_index)
+        self.residual_columns
+            .get(model_layer_index)
+            .and_then(Option::as_ref)
+            .map(|columns| {
+                residual_add::CaptureTarget::columns(
+                    &self.main_residuals,
+                    self.layout.selected_hidden_dim,
+                    columns.clone(),
+                )
+            })
     }
 }
 
@@ -153,9 +118,20 @@ impl Qwen3xDFlash2MainFeatureProjector {
             .resolve_for_tensor(&bindings.fc.weight);
         require_affine_quantization(&quantization, &bindings.fc.weight)?;
         let fc_config = dflash2_fc_config(layout, &quantization, scale_bias_dtype);
+        let num_main_layers = config.target_layer_ids.iter().copied().max().unwrap() + 1;
+        let mut residual_columns = vec![None; num_main_layers];
+        for (residual_slice_index, &model_layer_index) in config.target_layer_ids.iter().enumerate() {
+            let columns = &mut residual_columns[model_layer_index];
+            assert!(
+                columns.is_none(),
+                "Qwen3 DFlash2 selected Main decoder layers must be unique"
+            );
+            let start = residual_slice_index as u32 * layout.hidden_dim;
+            *columns = Some(start..start + layout.hidden_dim);
+        }
         Ok(Self {
             layout,
-            residual_bindings: Qwen3xDFlash2MainResidualBindings::new(&config.target_layer_ids),
+            residual_columns,
             fc_config,
             fc: affine_quantized::Matmul::new(device, fc_config),
             hidden_norm: RMSNorm::new(device, layout.hidden_dim as usize, config.rms_norm_eps),
@@ -181,8 +157,8 @@ impl Qwen3xDFlash2MainFeatureProjector {
         let mut tensors = store.load_tensors(tensor_names)?;
         let weight = remove_quant_weight(&mut tensors, &bindings.fc.weight)?;
         let scale_bias_dtype = affine_parameter_safetensors_dtype(self.fc_config.scale_bias_dtype);
-        let scales = remove_typed_tensor(&mut tensors, &bindings.fc.scales, scale_bias_dtype)?.into_data();
-        let biases = remove_typed_tensor(&mut tensors, &bindings.fc.biases, scale_bias_dtype)?.into_data();
+        let scales = remove_tensor(&mut tensors, &bindings.fc.scales, scale_bias_dtype)?.into_data();
+        let biases = remove_tensor(&mut tensors, &bindings.fc.biases, scale_bias_dtype)?.into_data();
         validate_len(
             "Qwen3 DFlash2 Main FC weight",
             weight.len(),
@@ -223,22 +199,6 @@ impl Qwen3xDFlash2MainFeatureProjector {
         );
         self.weights.take();
         self.hidden_norm.unload_weights();
-    }
-
-    pub fn capture_for_model_layer(&self, model_layer_index: usize) -> Option<residual_add::CaptureTarget<'_>> {
-        self.residual_bindings
-            .get(model_layer_index)
-            .map(|residual_slice_index| {
-                residual_add::CaptureTarget::columns(
-                    &self.main_residuals,
-                    self.layout.selected_hidden_dim,
-                    self.layout.capture_columns(residual_slice_index),
-                )
-            })
-    }
-
-    pub fn main_feature(&self) -> &Buffer {
-        &self.main_feature
     }
 
     pub fn record<'a, R>(&'a self, recorder: &mut R, num_total_tokens: u32, num_active_tokens: ReplayU32) -> &'a Buffer

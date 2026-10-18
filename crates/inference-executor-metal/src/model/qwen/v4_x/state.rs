@@ -18,10 +18,6 @@ use inference_runtime_core::compute::BatchDeviceRequest;
 use wincode::SchemaRead;
 use wincode::SchemaWrite;
 
-use super::executor::Qwen4xExecutorConfig;
-use super::main::Qwen4xMain;
-use super::main::ngram_core;
-use super::main::ple_core;
 use crate::attn::gqa::request_page_table::GQARequestPageTable;
 use crate::attn::qsa::backend::QSAActive;
 use crate::attn::qsa::batch_metadata::QSASDPAMetadataBuffers;
@@ -33,6 +29,10 @@ use crate::attn::qsa_indexer::batch_metadata::QSAIndexerRequest;
 use crate::def::replay_op::MetalReplayRuntime;
 use crate::def::replay_op::ReplayOp;
 use crate::def::replay_op::ReplayRecorder;
+use crate::model::qwen::v4_x::executor::Qwen4xExecutorConfig;
+use crate::model::qwen::v4_x::main::Qwen4xMain;
+use crate::model::qwen::v4_x::main::ngram_core;
+use crate::model::qwen::v4_x::main::ple_core;
 use crate::ple::batch_metadata::PLEMetadataBuffers;
 use crate::ple::batch_metadata::PLERequest;
 
@@ -226,10 +226,10 @@ impl Qwen4xState {
             ),
             pending_commit: None,
         };
-        state.allocate(device, model)?;
+        state.allocate_resources(device, model)?;
         Ok(state)
     }
-    pub fn allocate(&mut self, device: &Device, model: &Qwen4xModelConfig) -> Result<(), ModelExecutorError> {
+    pub fn allocate_resources(&mut self, device: &Device, model: &Qwen4xModelConfig) -> Result<(), ModelExecutorError> {
         assert!(self.resources.is_none(), "Qwen4x auxiliary state is already loaded");
         let c = self.config;
         let qsa = self.layout.num_gqa_layers as usize;
@@ -291,7 +291,7 @@ impl Qwen4xState {
     fn resources(&self) -> &Resources {
         self.resources.as_ref().expect("Qwen4x auxiliary state must be loaded")
     }
-    pub fn release(&mut self) {
+    pub fn release_resources(&mut self) {
         self.resources.take().expect("Qwen4x auxiliary state is not loaded");
     }
     pub fn batch(&self) -> &Qwen4xBatchState {
@@ -365,7 +365,7 @@ impl Qwen4xState {
         pages: &Buffer,
         request: &BatchDeviceRequest,
         batch: &Qwen35Microbatch,
-        total: u32,
+        num_total_tokens: u32,
         gdn_pages: usize,
     ) {
         self.publishes.clear();
@@ -466,13 +466,13 @@ impl Qwen4xState {
                 src_state_slot: slot,
             });
         }
-        let sparse_capacity = self.query_policy.capacity(sparse.max(1)).min(total);
+        let sparse_capacity = self.query_policy.capacity(sparse.max(1)).min(num_total_tokens);
         let shape = QSASDPAShape {
-            num_total_tokens: total,
+            num_total_tokens,
             num_total_sparse_queries: sparse_capacity,
         };
         self.batch.indexer_shape = qsa_indexer::Shape {
-            num_total_tokens: total,
+            num_total_tokens,
             num_total_sparse_queries: sparse_capacity,
             num_total_request_sparse_queries: self.query_policy.capacity(max_sparse.max(1)).min(sparse_capacity),
             num_total_groups: self.group_policy.capacity(groups),
@@ -569,12 +569,13 @@ impl Qwen4xState {
             );
         }
         for layer in 0..self.num_ple_layers {
-            let offset = self.layout.num_gqa_layers as usize * self.carry_bytes + layer * self.conv_bytes;
+            let ple_state_offset_bytes =
+                self.layout.num_gqa_layers as usize * self.carry_bytes + layer * self.conv_bytes;
             let jobs: Vec<_> = slots
                 .iter()
                 .map(|&slot| {
                     [
-                        (slot as usize * self.aux_bytes + offset) as u64,
+                        (slot as usize * self.aux_bytes + ple_state_offset_bytes) as u64,
                         (slot as usize * self.conv_bytes) as u64,
                         self.conv_bytes as u64,
                     ]
@@ -686,12 +687,13 @@ impl Qwen4xState {
             );
         }
         for layer in 0..self.num_ple_layers {
-            let offset = self.layout.num_gqa_layers as usize * self.carry_bytes + layer * self.conv_bytes;
+            let ple_state_offset_bytes =
+                self.layout.num_gqa_layers as usize * self.carry_bytes + layer * self.conv_bytes;
             let jobs: Vec<_> = (0..publishes.len())
                 .map(|index| {
                     [
                         ((2 * self.config.max_requests + index) * self.conv_bytes) as u64,
-                        ((self.config.max_requests + index) * self.aux_bytes + offset) as u64,
+                        ((self.config.max_requests + index) * self.aux_bytes + ple_state_offset_bytes) as u64,
                         self.conv_bytes as u64,
                     ]
                 })
@@ -802,12 +804,13 @@ impl Qwen4xState {
             );
         }
         for layer in 0..self.num_ple_layers {
-            let offset = self.layout.num_gqa_layers as usize * self.carry_bytes + layer * self.conv_bytes;
+            let ple_state_offset_bytes =
+                self.layout.num_gqa_layers as usize * self.carry_bytes + layer * self.conv_bytes;
             let jobs: Vec<_> = (0..self.config.max_requests)
                 .map(|slot| {
                     [
                         (slot * self.conv_bytes) as u64,
-                        (slot * self.aux_bytes + offset) as u64,
+                        (slot * self.aux_bytes + ple_state_offset_bytes) as u64,
                         self.conv_bytes as u64,
                     ]
                 })

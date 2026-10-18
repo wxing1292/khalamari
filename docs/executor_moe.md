@@ -15,7 +15,7 @@ The low-level sparse expert MLP remains an inner component of the MoE path.
 ```text
 crates/inference-executor-core/src/mlp/moe/
   mod.rs      semantic MoE component boundary exports
-  core.rs      GatedMoECore + GatedMoEReplayShape
+  core.rs      GatedMoECore
 
 crates/inference-executor-metal/src/mlp/moe/
   mod.rs      Metal MoE module root
@@ -85,7 +85,7 @@ router projection -> route top-k -> dispatch -> sparse expert MLP -> combine/sca
 ```
 
 `GatedMoE` owns the token-major and compact expert-major implementations.
-It selects one implementation from the active replay shape.
+It selects one implementation from the recorded token capacity.
 The backend implements the executor `ReplayLayer` contract.
 Qwen model and layer code use this contract to append MoE work to a larger e2e replay.
 The contract has one semantic input, one output, and a caller-owned recorder.
@@ -119,8 +119,8 @@ Benches must not assume one global bit width for all projections in a MoE layer.
 
 The router and shared-gate projections each use one adaptive affine operator.
 `GatedMoE` provides the fixed projection geometry and quantization layout when it creates each operator.
-It provides the current active token count when it records each projection.
-The affine operator selects QMV or a QMM tile.
+It provides the recorded token capacity and active-token replay parameter when it records each projection.
+The affine operator selects QMV or a QMM tile from the recorded capacity.
 `GatedMoE` does not store separate QMV/QMM kernels or a projection threshold.
 
 `GatedMoECore::shared_experts_intermediate_dim` is the only semantic source for shared-expert presence and shape.
@@ -144,8 +144,8 @@ The map must be empty after the complete MoE owner is constructed.
 It exposes token-major and expert-major sparse expert MLP compute.
 It does not own routing, dispatch, combine, shared-expert work, or execution-variant selection.
 
-Its token-major shape is `{ num_routes, num_tokens }`.
-Its expert-major shape is `{ num_routes }`.
+Its token-major shape is `{ num_total_routes, num_total_tokens }`.
+Its expert-major shape is `{ num_total_routes, num_total_tokens, num_experts_per_token }`.
 `components::sparse_mlp::Config` owns `num_experts` for both paths.
 Raw gather-matmul operators use semantic gather axes `{ num_routes, num_input_vectors }`.
 Only their true matrix axes retain `n` and `k`.
@@ -160,7 +160,8 @@ The semantic replay input is:
 
 ```text
 GatedMoEInput
-  shape    GatedMoEReplayShape
+  num_total_tokens   recorded token capacity
+  num_active_tokens active-token replay parameter or fixed count
   hidden_state      &Buffer
   next_hidden_state &Buffer
   scratch  MoEScratchBindings
@@ -170,6 +171,8 @@ GatedMoEInput
 
 Replay returns `next_hidden_state` directly.
 It does not wrap the caller-owned buffer in a one-field output object.
+Dense MLP and MoE pass the recorded capacity and active-token parameter directly to their backend invocations.
+Their immutable cores do not own a separate replay-count shape.
 
 Focused production-path tests use the same `ReplayLayer::record(...)` entrypoint as model replay.
 The full-forward MoE benchmark composes the lower-level backend components directly.
@@ -750,7 +753,7 @@ Registry
     TokenMajor  -> owns moe::combine::Compute
     ExpertMajor -> owns moe::expert_major::Compute
 
-Selector::select(&Registry, GatedMoEReplayShape)
+Selector::select(&Registry, num_total_tokens)
     -> (VariantKey::TokenMajor, &Variant::TokenMajor)
     |      routing -> token-major sparse expert MLP -> combine
     |

@@ -70,7 +70,6 @@ impl ReplayLayer for DenseMLP {
     where
         R: Recorder<'a, Operator = ReplayOp<'a>>,
     {
-        assert!(input.num_total_tokens > 0);
         let buffers = dense_mlp::Buffers {
             hidden_state: input.hidden_state,
             next_hidden_state: input.next_hidden_state,

@@ -267,7 +267,7 @@ impl Fixture {
             tokens_per_page,
         };
         let request_shapes = RequestShape::from_batch(&token_indices, &cu_tokens);
-        let replay_bucket_policy = GQAReplayBucketPolicy::new(MAX_TOKENS as u32, MAX_TOKENS as u32, &[]);
+        let replay_bucket_policy = GQAReplayBucketPolicy::new(MAX_TOKENS as u32, MAX_TOKENS as u32);
         let sliced_kv_variant = backend_sdpa::ExecutionVariant::sliced_kv(
             sdpa_config,
             params.sdpa_sliced_kv_kv_tokens_per_iteration,

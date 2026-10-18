@@ -12,7 +12,7 @@ It owns backend-neutral dense MLP layer metadata.
 ```text
 crates/inference-executor-core/src/mlp/dense/
   mod.rs
-  core.rs      DenseMLPCore + DenseMLPReplayShape
+  core.rs      DenseMLPCore
 
 crates/inference-executor-metal/src/mlp/dense/
   mod.rs
@@ -89,6 +89,8 @@ It does not own tensor storage or request lifecycle.
 The semantic layer input is
 `DenseMLPInput { num_total_tokens, num_active_tokens, hidden_state, next_hidden_state, scratch, weights }`.
 Replay returns the caller-owned `next_hidden_state` buffer directly.
+The immutable core does not wrap replay counts in a separate shape. Dense MLP and MoE pass the recorded capacity and
+active-token parameter directly to their backend invocations.
 
 The replay order is:
 
@@ -114,7 +116,8 @@ It does not accept quantization group size or bit width because those weight fac
 The model stream serializes Main and MTP execution.
 Thus, layers can reuse the SwiGLU scratch.
 
-The shared `Qwen3xDenseMLP` leaf directly owns immutable weights and per-layer output buffers.
+The shared `Qwen3xDenseMLP` leaf owns per-layer immutable weights and a shared scratch handle.
+The caller owns hidden input and output buffers.
 It retains the core and Metal configuration that created its backend.
 Weight reload uses these retained values.
 `Qwen3MainLayer` and the dense variants of `Qwen35MainLayer` and `Qwen35MTPLayer` compose that leaf.

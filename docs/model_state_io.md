@@ -261,6 +261,8 @@ The MTP and DFlash2 GQA files are topology-dependent.
 A snapshot contains at most one of them.
 
 The writer and reader validate the same topology-specific expected file set.
+`StateSnapshotWriter::new` and `StateSnapshotReader::open` validate this input once.
+They use the resulting set for file comparison.
 The writer rejects an incomplete set before it publishes the snapshot.
 The reader validates the manifest, sorted unique file set, semantic file kind, exact directory contents, regular-file
 type, and manifest file lengths before the model allocates restore buffers.

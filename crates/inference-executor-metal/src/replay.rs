@@ -93,46 +93,6 @@ mod tests {
     const NUM_ACTIVE_ROWS: inference_backend_metal::metal::ReplayParameterKey =
         inference_backend_metal::metal::ReplayParameterKey::new("test.replay.num_active_rows");
 
-    struct CountedComponent {
-        records: Cell<usize>,
-        kernel: bf16_concat_rows::Kernel,
-        lhs: Buffer,
-        rhs: Buffer,
-        output: Buffer,
-    }
-
-    impl ReplayComponent for CountedComponent {
-        type Key = u32;
-        type Input<'a> = u32;
-
-        fn replay_key(&self, input: &Self::Input<'_>) -> Self::Key {
-            *input
-        }
-
-        fn record<'a>(&'a self, recorder: &mut ReplayRecorder, _input: &Self::Input<'a>) {
-            self.records.set(self.records.get() + 1);
-            recorder.record(ReplayOp::opaque(self.kernel.invoke(
-                1,
-                inference_backend_metal::metal::ReplayU32::Parameter(NUM_ACTIVE_ROWS),
-                bf16_concat_rows::Buffers {
-                    lhs: &self.lhs,
-                    rhs: &self.rhs,
-                    output: &self.output,
-                },
-            )));
-        }
-    }
-
-    fn component(device: &Device) -> CountedComponent {
-        CountedComponent {
-            records: Cell::new(0),
-            kernel: bf16_concat_rows::Kernel::new(device, bf16_concat_rows::Config { num_columns: 4 }),
-            lhs: Buffer::new_zeroed_elements(device, 4, inference_backend_metal::metal::Dtype::Bfloat16),
-            rhs: Buffer::new_zeroed_elements(device, 4, inference_backend_metal::metal::Dtype::Bfloat16),
-            output: Buffer::new_zeroed_elements(device, 8, inference_backend_metal::metal::Dtype::Bfloat16),
-        }
-    }
-
     #[test]
     fn test_record_is_idempotent_and_replay_is_strict() {
         let device = Device::system_default();
@@ -179,5 +139,45 @@ mod tests {
         let device = Device::system_default();
         let replay = Replay::new("test", component(&device));
         let _ = replay.replay(&1);
+    }
+
+    struct CountedComponent {
+        records: Cell<usize>,
+        kernel: bf16_concat_rows::Kernel,
+        lhs: Buffer,
+        rhs: Buffer,
+        output: Buffer,
+    }
+
+    impl ReplayComponent for CountedComponent {
+        type Key = u32;
+        type Input<'a> = u32;
+
+        fn replay_key(&self, input: &Self::Input<'_>) -> Self::Key {
+            *input
+        }
+
+        fn record<'a>(&'a self, recorder: &mut ReplayRecorder, _input: &Self::Input<'a>) {
+            self.records.set(self.records.get() + 1);
+            recorder.record(ReplayOp::opaque(self.kernel.invoke(
+                1,
+                inference_backend_metal::metal::ReplayU32::Parameter(NUM_ACTIVE_ROWS),
+                bf16_concat_rows::Buffers {
+                    lhs: &self.lhs,
+                    rhs: &self.rhs,
+                    output: &self.output,
+                },
+            )));
+        }
+    }
+
+    fn component(device: &Device) -> CountedComponent {
+        CountedComponent {
+            records: Cell::new(0),
+            kernel: bf16_concat_rows::Kernel::new(device, bf16_concat_rows::Config { num_columns: 4 }),
+            lhs: Buffer::new_zeroed_elements(device, 4, inference_backend_metal::metal::Dtype::Bfloat16),
+            rhs: Buffer::new_zeroed_elements(device, 4, inference_backend_metal::metal::Dtype::Bfloat16),
+            output: Buffer::new_zeroed_elements(device, 8, inference_backend_metal::metal::Dtype::Bfloat16),
+        }
     }
 }

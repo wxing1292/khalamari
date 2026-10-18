@@ -223,7 +223,7 @@ impl BiDiBlockGQA {
             "BiDiBlockGQA layer index exceeds the page table"
         );
         let shape = input.metadata.replay_shape();
-        let sdpa_execution = input.metadata.sdpa_execution();
+        let sdpa_execution = input.metadata.variant();
         shape.validate();
         assert!(shape.reduce_sdpa_partial_outputs);
         assert!(
@@ -344,11 +344,11 @@ impl ReplayLayer for BiDiBlockGQA {
             input.hidden_state,
             0,
             input.weights.q.weight,
-            input.weights.q.weight_offset,
+            input.weights.q.weight_offset_bytes,
             input.weights.q.scales,
-            input.weights.q.scales_offset,
+            input.weights.q.scales_offset_bytes,
             input.weights.q.biases,
-            input.weights.q.biases_offset,
+            input.weights.q.biases_offset_bytes,
         )));
         recorder.record(ReplayOp::opaque(self.k.invoke(
             shape.num_total_tokens,
@@ -358,11 +358,11 @@ impl ReplayLayer for BiDiBlockGQA {
             input.hidden_state,
             0,
             input.weights.k.weight,
-            input.weights.k.weight_offset,
+            input.weights.k.weight_offset_bytes,
             input.weights.k.scales,
-            input.weights.k.scales_offset,
+            input.weights.k.scales_offset_bytes,
             input.weights.k.biases,
-            input.weights.k.biases_offset,
+            input.weights.k.biases_offset_bytes,
         )));
         recorder.record(ReplayOp::opaque(self.v.invoke(
             shape.num_total_tokens,
@@ -372,11 +372,11 @@ impl ReplayLayer for BiDiBlockGQA {
             input.hidden_state,
             0,
             input.weights.v.weight,
-            input.weights.v.weight_offset,
+            input.weights.v.weight_offset_bytes,
             input.weights.v.scales,
-            input.weights.v.scales_offset,
+            input.weights.v.scales_offset_bytes,
             input.weights.v.biases,
-            input.weights.v.biases_offset,
+            input.weights.v.biases_offset_bytes,
         )));
         recorder.record_with_barrier_before(ReplayOp::opaque(self.q_norm_rope.invoke(
             rms_norm_rope::Shape {
@@ -483,11 +483,11 @@ impl ReplayLayer for BiDiBlockGQA {
             scratch.attention_output,
             0,
             input.weights.output.weight,
-            input.weights.output.weight_offset,
+            input.weights.output.weight_offset_bytes,
             input.weights.output.scales,
-            input.weights.output.scales_offset,
+            input.weights.output.scales_offset_bytes,
             input.weights.output.biases,
-            input.weights.output.biases_offset,
+            input.weights.output.biases_offset_bytes,
         )));
         input.next_hidden_state
     }

@@ -9,31 +9,14 @@ use inference_executor_core::model::qwen::v3_x::QuantizationConfig;
 use inference_executor_core::model::qwen::v3_x::ResolvedQuantizationConfig;
 
 use crate::checkpoint::SafeTensorStore;
-use crate::checkpoint::TensorBytes;
 use crate::mlp::moe::backend::GatedMoEMetalConfig;
 
-pub fn typed_tensor(
-    store: &mut SafeTensorStore,
-    name: &str,
-    dtype: safetensors::Dtype,
-) -> Result<TensorBytes, ModelExecutorError> {
-    store.tensor_bytes(name, dtype)
-}
-
 pub fn quant_weight(store: &mut SafeTensorStore, name: &str) -> Result<Vec<u8>, ModelExecutorError> {
-    Ok(typed_tensor(store, name, safetensors::Dtype::U32)?.into_data())
-}
-
-pub fn remove_typed_tensor(
-    tensors: &mut TensorMap,
-    name: &str,
-    dtype: safetensors::Dtype,
-) -> Result<TensorBytes, ModelExecutorError> {
-    remove_tensor(tensors, name, dtype)
+    Ok(store.tensor_bytes(name, safetensors::Dtype::U32)?.into_data())
 }
 
 pub fn remove_quant_weight(tensors: &mut TensorMap, name: &str) -> Result<Vec<u8>, ModelExecutorError> {
-    Ok(remove_typed_tensor(tensors, name, safetensors::Dtype::U32)?.into_data())
+    Ok(remove_tensor(tensors, name, safetensors::Dtype::U32)?.into_data())
 }
 
 pub fn affine_parameter_safetensors_dtype(dtype: Dtype) -> safetensors::Dtype {
@@ -50,7 +33,7 @@ pub fn load_qwen3x_norm_weight(
     name: &str,
     expected_shape: &[usize],
 ) -> Result<Buffer, ModelExecutorError> {
-    let data = typed_tensor(store, name, safetensors::Dtype::BF16)?;
+    let data = store.tensor_bytes(name, safetensors::Dtype::BF16)?;
     validate_shape(name, data.shape(), expected_shape)?;
     Ok(Buffer::from_slice(device, data.data()))
 }
@@ -76,14 +59,14 @@ pub fn remove_norm_weight(
         Dtype::Float32 => safetensors::Dtype::F32,
         dtype => panic!("unsupported norm weight dtype {dtype:?}"),
     };
-    let data = remove_typed_tensor(tensors, name, dtype)?;
+    let data = remove_tensor(tensors, name, dtype)?;
     validate_shape(name, data.shape(), expected_shape)?;
     Ok(Buffer::from_slice(device, data.data()))
 }
 
 pub fn concat_bytes(parts: &[&[u8]]) -> Vec<u8> {
-    let len = parts.iter().map(|part| part.len()).sum();
-    let mut out = Vec::with_capacity(len);
+    let len_bytes = parts.iter().map(|part| part.len()).sum();
+    let mut out = Vec::with_capacity(len_bytes);
     for part in parts {
         out.extend_from_slice(part);
     }

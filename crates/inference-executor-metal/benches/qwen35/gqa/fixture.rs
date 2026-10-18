@@ -393,7 +393,6 @@ impl<'a> RealGQAFixture<'a> {
         let replay_bucket_policy = GQAReplayBucketPolicy::new(
             max_tokens.try_into().expect("GQA max token count must fit u32"),
             max_tokens.try_into().expect("GQA max token count must fit u32"),
-            &[],
         );
         let sdpa_config = backend_sdpa::Config {
             io_dtype: config.io_dtype,

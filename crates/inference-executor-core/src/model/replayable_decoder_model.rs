@@ -96,6 +96,8 @@ pub trait ReplayableDecoderModel {
 
     /// Prepares model metadata. The executor may reorder complete requests before
     /// packing them. Commit receives the same order and preserves request identity.
+    /// Input token IDs must be below `Self::vocab_size`. The caller must validate
+    /// user token IDs before runtime admission.
     fn prepare_batch(&mut self, core_batch_req: &mut BatchDeviceRequest) -> Self::ModelBatchRequest;
     fn commit_batch(
         &mut self,

@@ -108,7 +108,8 @@ score template: query_start=3, num_queries=5
 ```
 
 The replay key must include the complete shape, cache layout, and component configuration.
-Submission supplies `num_active_tokens` and `num_active_score_task_templates` independently.
+The replay owner must omit selection and its score-task parameter when `num_total_groups <= top_k`.
+When selection is recorded, submission supplies `num_active_tokens` and `num_active_score_task_templates` independently.
 The active template count can be zero when all queries use dense attention.
 Task-template capacity is independent of token capacity.
 A request with 32 sparse queries uses one head-loop task. A smaller request with 31 sparse queries uses four flat tasks.

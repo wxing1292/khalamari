@@ -210,7 +210,7 @@ fn test_sparse_replay_success() {
     };
     let scratch = replay.component().0.new_scratch(max_shape);
     let metadata = QSASDPAMetadataBuffers::new(&device, config, max_shape);
-    for (capacity, num_active) in [(1, 1), (2, 2), (4, 3), (8, 5), (128, 8), (513, 4)] {
+    for (capacity, num_active) in [(1, 1), (2, 2), (4, 3), (8, 5), (128, 8), (256, 8), (512, 8), (513, 4)] {
         let shape = QSASDPAShape {
             num_total_tokens: capacity + 2,
             num_total_sparse_queries: capacity,
@@ -220,7 +220,7 @@ fn test_sparse_replay_success() {
         let groups = fixture_selected_groups((capacity + 2) as usize, GROUP_START);
         let selected_group_ids = Buffer::from_slice(&device, &groups);
         let output = Buffer::new_zeroed_elements(&device, (capacity + 2) as usize * ROW_WIDTH, Dtype::Bfloat16);
-        let mut requests = vec![request(1, 100, 2), request(2, 2055, 1)];
+        let mut requests = vec![request(1, 509, 2), request(2, 2055, 1)];
         if num_active > 1 {
             requests.push(request(0, 2056, num_active - 1));
         }
@@ -236,7 +236,11 @@ fn test_sparse_replay_success() {
             selected_groups: &groups,
             output: &output,
         };
-        bindings.run(&runtime, &mut replay, &mut recorded_keys, &requests);
+        let active = bindings.run(&runtime, &mut replay, &mut recorded_keys, &requests);
+        assert_eq!(active.num_active_dense_tasks, 4);
+        if capacity == 1 {
+            assert!(active.num_active_dense_tasks > shape.num_total_tokens);
+        }
         // The same replay must ignore inactive work after a smaller submission.
         bindings.run(&runtime, &mut replay, &mut recorded_keys, &[request(1, 2058, 1)]);
     }
@@ -286,7 +290,6 @@ impl TestBindings<'_> {
         requests: &[QSASDPARequest],
     ) -> QSASDPAActive {
         let active = self.metadata.update_with_shape(requests, self.shape);
-        active.validate(self.shape);
         let expected = reference_outputs(self.config, self.cache, self.q_values, self.selected_groups, requests);
         let before = self
             .output

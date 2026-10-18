@@ -76,7 +76,7 @@ impl Qwen3xDFlash2Execution {
             .sliding_window
             .try_into()
             .expect("Qwen3x DFlash2 sliding window must fit u32");
-        let sdpa = loaded.gqa_state.metadata().sdpa_execution().map.thread_block;
+        let sdpa = loaded.gqa_state.metadata().variant().map.thread_block;
         let decode_input = SpecDecodeInput::new(
             device,
             SpecDecodeInputConfig::new(
@@ -113,9 +113,7 @@ impl Qwen3xDFlash2Execution {
     }
 
     pub fn num_gqa_page_ids_per_block(&self) -> usize {
-        (self.page_table_layout.num_gqa_layers as usize)
-            .checked_mul(self.page_table_layout.num_page_ids_per_block as usize)
-            .expect("Qwen3x DFlash2 page IDs per block must fit usize")
+        self.page_table_layout.num_gqa_layers as usize * self.page_table_layout.num_page_ids_per_block as usize
     }
 
     pub fn num_tokens_per_page(&self) -> usize {
@@ -206,8 +204,8 @@ impl Qwen3xDFlash2Execution {
             self.unloaded_model.is_none(),
             "Qwen3x DFlash2 model state is already unloaded"
         );
-        let prefill_model = self.prefill.component_mut().take_model();
-        let body_model = self.body.component_mut().take_model();
+        let prefill_model = self.prefill.component_mut().unload_model();
+        let body_model = self.body.component_mut().unload_model();
         assert!(Rc::ptr_eq(&prefill_model, &body_model));
         drop(body_model);
         let mut model = Rc::try_unwrap(prefill_model)
@@ -225,23 +223,19 @@ impl Qwen3xDFlash2Execution {
         self.gqa_state.release_resources();
     }
 
-    pub fn attach_state(&mut self) {
+    pub fn load_state(&mut self) {
         let mut model = self
             .unloaded_model
             .take()
             .expect("Qwen3x DFlash2 model state is not unloaded");
         model.load_state(&self.gqa_state);
         let model = Rc::new(model);
-        self.prefill.component_mut().set_model(Rc::clone(&model));
-        self.body.component_mut().set_model(model);
+        self.prefill.component_mut().load_model(Rc::clone(&model));
+        self.body.component_mut().load_model(model);
     }
 
     pub fn write_page_ids(&self, req_slot: u32, block_index: usize, page_ids: &[u32]) {
         self.gqa_state.write_page_ids(req_slot, block_index, page_ids);
-    }
-
-    pub fn read_page_ids(&self, req_slot: u32, block_index: usize) -> Vec<u32> {
-        self.gqa_state.read_page_ids(req_slot, block_index)
     }
 
     pub fn record_spec_prefill(
@@ -318,7 +312,6 @@ impl Qwen3xDFlash2Execution {
         let (embed_key, _) = self.embed.record(runtime, &embed_input);
         let embed_arguments = self.embed.component().replay_arguments(&embed_key);
         let body_input = Qwen3xDFlash2BodyArgs {
-            num_tokens: metadata.replay_shape().num_tokens,
             metadata,
             hidden_input: &self.hidden_input,
             hidden_output: &self.hidden_output,

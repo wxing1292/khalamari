@@ -6,6 +6,7 @@ use inference_backend_metal::metal::Device;
 use inference_backend_metal::metal::ReplayU32;
 use inference_executor_core::backend::recorder::Recorder;
 use inference_executor_core::checkpoint::TensorMap;
+use inference_executor_core::checkpoint::remove_tensor;
 use inference_executor_core::def::ModelExecutorError;
 use inference_executor_core::mlp::dense::DenseMLPCore;
 use inference_executor_core::model::qwen::v3_x::weight_layout::Qwen3xDenseMLPWeightBindings;
@@ -19,7 +20,6 @@ use crate::mlp::dense::backend::DenseMLPMetalConfig;
 use crate::mlp::dense::scratch::DenseMLPScratch;
 use crate::model::qwen::v3_x::weight::concat_bytes;
 use crate::model::qwen::v3_x::weight::remove_quant_weight;
-use crate::model::qwen::v3_x::weight::remove_typed_tensor;
 use crate::model::qwen::v3_x::weight::to_u32;
 use crate::model::qwen::v3_x::weight::validate_len;
 
@@ -111,7 +111,7 @@ pub struct DenseMLPWeightBuffers {
 }
 
 impl DenseMLPWeightBuffers {
-    pub fn load(
+    fn load(
         device: &Device,
         store: &mut SafeTensorStore,
         bindings: &Qwen3xDenseMLPWeightBindings,
@@ -139,13 +139,13 @@ impl DenseMLPWeightBuffers {
         let up_weight = remove_quant_weight(tensors, &bindings.up.weight)?;
         let gate_up_dtype = safetensors_dtype(metal.gate_up.scale_bias_dtype);
         let down_dtype = safetensors_dtype(metal.down.scale_bias_dtype);
-        let gate_scales = remove_typed_tensor(tensors, &bindings.gate.scales, gate_up_dtype)?.into_data();
-        let up_scales = remove_typed_tensor(tensors, &bindings.up.scales, gate_up_dtype)?.into_data();
-        let gate_biases = remove_typed_tensor(tensors, &bindings.gate.biases, gate_up_dtype)?.into_data();
-        let up_biases = remove_typed_tensor(tensors, &bindings.up.biases, gate_up_dtype)?.into_data();
+        let gate_scales = remove_tensor(tensors, &bindings.gate.scales, gate_up_dtype)?.into_data();
+        let up_scales = remove_tensor(tensors, &bindings.up.scales, gate_up_dtype)?.into_data();
+        let gate_biases = remove_tensor(tensors, &bindings.gate.biases, gate_up_dtype)?.into_data();
+        let up_biases = remove_tensor(tensors, &bindings.up.biases, gate_up_dtype)?.into_data();
         let down_weight = remove_quant_weight(tensors, &bindings.down.weight)?;
-        let down_scales = remove_typed_tensor(tensors, &bindings.down.scales, down_dtype)?.into_data();
-        let down_biases = remove_typed_tensor(tensors, &bindings.down.biases, down_dtype)?.into_data();
+        let down_scales = remove_tensor(tensors, &bindings.down.scales, down_dtype)?.into_data();
+        let down_biases = remove_tensor(tensors, &bindings.down.biases, down_dtype)?.into_data();
 
         let config = inference_backend_metal::components::dense_mlp::Config {
             hidden_dim: to_u32("dense hidden_dim", core.hidden_dim)?,

@@ -193,7 +193,7 @@ impl Qwen35Main {
         }
     }
 
-    pub fn num_total_tokens(&self, num_active_tokens: u32) -> u32 {
+    pub fn capacity(&self, num_active_tokens: u32) -> u32 {
         self.replay_bucket_policy.capacity(num_active_tokens)
     }
 
@@ -312,7 +312,7 @@ impl Qwen35Main {
 
     fn validate_capacity(&self, num_active_tokens: u32, num_total_tokens: u32) {
         assert_eq!(
-            self.num_total_tokens(num_active_tokens),
+            self.capacity(num_active_tokens),
             num_total_tokens,
             "qwen3.5 Main metadata token capacity must match the stage policy"
         );

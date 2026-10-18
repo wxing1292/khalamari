@@ -187,5 +187,9 @@ Model owners retain immutable weights. Replay programs retain backend pipelines 
 replay contract. Exact invocations record exact token or row counts. Bucketed invocations record capacity and bind one
 active-count parameter.
 
+`EmbedConfig` and `UnembedConfig` delegate quantization geometry validation to their backend configurations at initialization.
+Checkpoint loaders validate tensor byte lengths before they construct Metal buffers.
+`Unembed::load_tied_weights` validates shared embedding buffers against the unembedding configuration when it attaches them.
+
 The runtime core does not select primitive kernels. The Metal backend owns dtype specialization, affine selection, and
 execution configuration. Model code owns semantic composition and buffer roles.

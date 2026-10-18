@@ -31,24 +31,22 @@ fn test_selector_returns_registered_variant_at_crossover() {
     let device = Device::system_default();
     let (core, _) = routing_test_config(true);
     let registry = Registry::new(&device, &core);
-    assert_eq!(
-        Selector::select(&registry, GatedMoEReplayShape { num_tokens: 1 }).0,
-        VariantKey::TokenMajor
-    );
-    assert_eq!(
-        Selector::select(&registry, GatedMoEReplayShape { num_tokens: 4 }).0,
-        VariantKey::TokenMajor
-    );
-    assert_eq!(
-        Selector::select(&registry, GatedMoEReplayShape { num_tokens: 5 }).0,
-        VariantKey::ExpertMajor
-    );
+    assert_eq!(Selector::select(&registry, 1).0, VariantKey::TokenMajor);
+    assert_eq!(Selector::select(&registry, 4).0, VariantKey::TokenMajor);
+    assert_eq!(Selector::select(&registry, 5).0, VariantKey::ExpertMajor);
 }
 
 #[test]
 fn test_routing_replay_matches_reference_across_active_counts() {
     assert_routing_replay_matches_reference(8, 3);
     assert_routing_replay_matches_reference(512, 10);
+}
+
+#[test]
+fn test_full_replay_matches_reference_across_active_counts_and_topologies() {
+    assert_full_replay_matches_reference(8, 2);
+    assert_full_replay_matches_reference(512, 10);
+    assert_full_replay_matches_reference(512, 17);
 }
 
 fn assert_routing_replay_matches_reference(num_experts: usize, num_experts_per_token: usize) {
@@ -166,13 +164,6 @@ fn assert_routing_replay_matches_reference(num_experts: usize, num_experts_per_t
     }
 }
 
-#[test]
-fn test_full_replay_matches_reference_across_active_counts_and_topologies() {
-    assert_full_replay_matches_reference(8, 2);
-    assert_full_replay_matches_reference(512, 10);
-    assert_full_replay_matches_reference(512, 17);
-}
-
 fn assert_full_replay_matches_reference(num_experts: usize, num_experts_per_token: usize) {
     let device = Device::system_default();
     let stream = inference_backend_metal::metal::Stream::new(&device);
@@ -197,8 +188,8 @@ fn assert_full_replay_matches_reference(num_experts: usize, num_experts_per_toke
         let mut replay = Replay::new("test.gated_moe.full", TestGatedMoE(moe));
 
         for (num_total_tokens, active_counts) in [
-            (4_u32, [1_u32, 4, 2, 3, 0, 0, 0, 0]),
-            (8_u32, [1_u32, 8, 3, 7, 2, 6, 4, 5]),
+            (4_u32, &[1_u32, 4, 3, 2][..]),
+            (8_u32, &[1_u32, 8, 3, 7, 2, 6, 4, 5][..]),
         ] {
             let input = weights.input(
                 &scratch,
@@ -210,7 +201,7 @@ fn assert_full_replay_matches_reference(num_experts: usize, num_experts_per_toke
             let (key, cache_hit) = replay.record(&runtime, &input);
             assert!(!cache_hit);
 
-            for num_active_tokens in active_counts.into_iter().take(num_total_tokens as usize) {
+            for &num_active_tokens in active_counts {
                 assert_eq!(replay.record(&runtime, &input), (key, true));
                 runtime
                     .submit_replay_with_arguments(

@@ -101,16 +101,20 @@ impl Qwen3GatherUnembed {
     }
 
     pub fn prepare_replay(&self, num_active_rows: u32) -> (Qwen3GatherUnembedReplayKey, ReplayArguments) {
+        let key = self.replay_key_for_active_rows(num_active_rows);
+        let arguments = ReplayArguments::new().with_u32(QWEN3_GATHER_UNEMBED_NUM_ACTIVE_ROWS, num_active_rows);
+        (key, arguments)
+    }
+
+    fn replay_key_for_active_rows(&self, num_active_rows: u32) -> Qwen3GatherUnembedReplayKey {
         assert!(
             num_active_rows > 0,
             "qwen3 GatherUnembed replay requires Main output rows"
         );
-        let key = Qwen3GatherUnembedReplayKey {
+        Qwen3GatherUnembedReplayKey {
             num_total_rows: num_active_rows,
             unembed_topology: self.loaded_unembed().replay_topology(num_active_rows),
-        };
-        let arguments = ReplayArguments::new().with_u32(QWEN3_GATHER_UNEMBED_NUM_ACTIVE_ROWS, num_active_rows);
-        (key, arguments)
+        }
     }
 }
 
@@ -125,7 +129,7 @@ impl ReplayComponent for Qwen3GatherUnembed {
     type Input<'a> = Qwen3GatherUnembedArgs<'a>;
 
     fn replay_key(&self, input: &Self::Input<'_>) -> Self::Key {
-        self.prepare_replay(input.num_rows).0
+        self.replay_key_for_active_rows(input.num_rows)
     }
 
     fn record<'a>(&'a self, recorder: &mut ReplayRecorder, input: &Self::Input<'a>) {

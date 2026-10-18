@@ -8,6 +8,7 @@ use inference_backend_metal::metal::ReplayU32;
 use inference_backend_metal::metal::Stream;
 use inference_executor_core::attn::GDNCore;
 use inference_executor_core::attn::GDNReplayShape;
+use inference_executor_core::replay::ReplayBucketPolicy;
 use inference_runtime_core::runtime::RawRequestSlot;
 
 use crate::attn::gdn::backend::GDN;
@@ -16,7 +17,6 @@ use crate::attn::gdn::backend::GDNReplayTopology;
 use crate::attn::gdn::backend::add_gdn_private_replay_arguments;
 use crate::attn::gdn::backend::add_gdn_replay_arguments;
 use crate::attn::gdn::batch_metadata::GDNMetadataBuffers;
-use crate::attn::gdn::batch_metadata::GDNReplayBucketPolicy;
 use crate::attn::gdn::scratch::GDNScratch;
 use crate::attn::gdn::state_table::GDNPreparedRequestState;
 use crate::attn::gdn::state_table::GDNRequestStateResources;
@@ -46,7 +46,7 @@ pub struct Qwen3xGDNState {
     metal: GDNMetalConfig,
     num_req_slots: usize,
     max_tokens: usize,
-    replay_bucket_policy: GDNReplayBucketPolicy,
+    request_bucket_policy: ReplayBucketPolicy,
     request_state_table: GDNRequestStateTable,
     state_restore: Replay<GDNStateRestore>,
     state_commit: Replay<GDNStateCommit>,
@@ -164,20 +164,17 @@ impl Qwen3xGDNState {
             max_tokens,
         );
         let backend = Rc::new(GDN::new(device, representative.clone(), metal));
-        let max_requests = num_req_slots
-            .try_into()
-            .expect("qwen3.x GDN request capacity must fit u32");
-        let max_tokens_u32 = max_tokens.try_into().expect("qwen3.x GDN token capacity must fit u32");
-        let replay_bucket_policy = backend.replay_bucket_policy(max_requests, max_tokens_u32);
+        let metadata = GDNMetadataBuffers::new(device, num_req_slots, max_tokens);
+        let request_bucket_policy = ReplayBucketPolicy::new(num_req_slots as u32);
         Self {
             scratch: Some(Rc::new(backend.new_scratch(max_tokens))),
             backend: Some(backend),
-            metadata: Some(GDNMetadataBuffers::new(device, num_req_slots, max_tokens)),
+            metadata: Some(metadata),
             representative_core: representative.clone(),
             metal,
             num_req_slots,
             max_tokens,
-            replay_bucket_policy,
+            request_bucket_policy,
             request_state_table,
             state_restore: Replay::new("qwen3.x GDN state restore", GDNStateRestore),
             state_commit: Replay::new("qwen3.x GDN state commit", GDNStateCommit),
@@ -238,7 +235,7 @@ impl Qwen3xGDNState {
             cu_tokens,
             num_active_recurrent_requests,
             prepared,
-            &self.replay_bucket_policy,
+            &self.request_bucket_policy,
             num_total_tokens,
         )
     }

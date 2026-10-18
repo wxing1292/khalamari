@@ -136,7 +136,7 @@ impl PLEWeightsOwned {
                         &weights.biases,
                     ),
                 ] {
-                    let tensor = typed_tensor(store, name, dtype)?;
+                    let tensor = store.tensor_bytes(name, dtype)?;
                     validate_shape(name, tensor.shape(), &[sizes[shard], width / (dtype.bitsize() / 8)])?;
                     destination.write_bytes(dst_row * width, tensor.data());
                     store.unload_all();
@@ -154,7 +154,7 @@ impl PLEWeightsOwned {
         let norm = |store: &mut SafeTensorStore, name: &str| {
             load_qwen3x_norm_weight(device, store, name, &[core.residual_dim() as usize])
         };
-        let raw_conv = typed_tensor(store, &bindings.conv, safetensors::Dtype::BF16)?;
+        let raw_conv = store.tensor_bytes(&bindings.conv, safetensors::Dtype::BF16)?;
         validate_shape(
             &bindings.conv,
             raw_conv.shape(),
@@ -239,8 +239,8 @@ impl Qwen4xPLE {
     fn prepare<'a, R: Recorder<'a, Operator = ReplayOp<'a>>>(
         &'a self,
         recorder: &mut R,
-        total: u32,
-        active: ReplayU32,
+        num_total_tokens: u32,
+        num_active_tokens: ReplayU32,
         state: &'a Qwen4xState,
     ) {
         let weights = self.weights.as_ref().expect("Qwen4x PLE weights must be loaded");
@@ -248,8 +248,8 @@ impl Qwen4xPLE {
         self.compute.prepare(
             recorder,
             PLEPrepareInput {
-                num_total_tokens: total,
-                num_active_tokens: active,
+                num_total_tokens,
+                num_active_tokens,
                 metadata: state.ple_metadata(),
                 scratch: &self.scratch,
                 shards: &shards,
@@ -260,16 +260,16 @@ impl Qwen4xPLE {
     fn apply<'a, R: Recorder<'a, Operator = ReplayOp<'a>>>(
         &'a self,
         recorder: &mut R,
-        total: u32,
-        active: ReplayU32,
+        num_total_tokens: u32,
+        num_active_tokens: ReplayU32,
         residual: &'a Buffer,
         state: &'a Qwen4xState,
     ) {
         self.compute.apply(
             recorder,
             PLEApplyInput {
-                num_total_tokens: total,
-                num_active_tokens: active,
+                num_total_tokens,
+                num_active_tokens,
                 metadata: state.ple_metadata(),
                 scratch: &self.scratch,
                 residual,

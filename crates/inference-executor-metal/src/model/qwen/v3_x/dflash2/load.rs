@@ -43,7 +43,6 @@ pub struct Qwen3xDFlash2Loaded {
     pub mask_token_id: i32,
     pub sliding_window: usize,
     pub page_bytes: usize,
-    pub max_main_tokens: usize,
     pub max_anchor_position: u32,
 }
 
@@ -157,7 +156,6 @@ pub fn load_qwen3x_dflash2(
             .map_err(|_| ModelExecutorError::custom("Qwen3x DFlash2 MASK token ID must fit i32"))?,
         sliding_window: config.sliding_window,
         page_bytes: load_config.page_size_bytes,
-        max_main_tokens: load_config.max_tokens,
         max_anchor_position: load_config
             .max_position_embeddings
             .try_into()

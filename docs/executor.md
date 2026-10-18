@@ -89,6 +89,10 @@ Validation follows the same ownership:
 Do not restate component geometry during model normalization. Do not revalidate immutable core and config state on each
 record.
 
+Microbatch construction validates the sample-mask extent. Executors gather indices from this validated mask without
+another range scan. Repeated comparisons of prepared and recorded replay keys or fixed hidden workspaces use
+`debug_assert!` or `debug_assert_eq!`. These comparisons check internal wiring.
+
 Do not add wrappers only to align names. A type is useful when it owns a semantic boundary, invariant, resource, or
 lifecycle.
 
@@ -393,6 +397,7 @@ initialization.
 
 `SafeTensorStore` reads safetensors into a bounded `TensorMap` and releases the mapped shards after the copy.
 It does not materialize the full checkpoint at one time.
+Weight owners use `SafeTensorStore::tensor_bytes` and checkpoint `remove_tensor` directly for typed tensor access.
 Exact binding trees contain keys only.
 They do not own tensor bytes or duplicate checkpoint values.
 Generic embedding and unembedding owners apply the same contract to their exact quantized tensor binding.
@@ -412,6 +417,9 @@ ReplayLayer::record(typed input)
 
 The executor owns semantic stage order and the buffers exchanged between stages. Backend operators own kernel binding,
 resource usage, dispatch, and internal phase barriers.
+
+`def::replay_op::ReplayOp` re-exports the backend operation type.
+The executor `ReplayRecorder` and `MetalReplaySubmission` adapt the executor-core recorder and submission traits.
 
 The backend [`README`](../crates/inference-backend-metal/README.md) contains these details:
 
@@ -435,6 +443,7 @@ Keep these domains distinct:
 | Replay parameter buffer | backend replay program                     | submission-time scalar values for one recorded program              |
 
 A `Buffer` is raw storage. A tensor or weight view adds dtype, shape, layout, and byte offset.
+`QuantizedAffineWeights` names each binding offset `*_offset_bytes`, as the backend affine operator does.
 
 Different views may intentionally alias one buffer. Scratch reuse is correct only when the next writer cannot destroy
 data that a later stage still consumes.
@@ -478,6 +487,9 @@ Otherwise, the capacity policy selects the active count as the total capacity. T
 programs, but it preserves the same architecture: the total capacity remains in the key, and the active count remains
 a submission parameter. Padding is a dispatch property. It does not permit changes to valid work or semantic
 descriptor counts.
+
+Capacity queries use `capacity(...)` in both replay policies and model owners. Inputs identify the active work domains.
+The returned values use `num_total_<domain>` names in replay shapes and keys.
 
 The shared default capacity policy starts with these buckets:
 

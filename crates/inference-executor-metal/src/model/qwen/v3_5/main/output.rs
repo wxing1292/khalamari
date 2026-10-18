@@ -164,34 +164,17 @@ impl Qwen35GatherUnembed {
 
     fn replay_key_for_active_rows(&self, num_active_rows: u32) -> Qwen35GatherUnembedReplayKey {
         let num_total_rows = self.replay_bucket_policy.capacity(num_active_rows);
-        Qwen35GatherUnembedReplayKey::for_capacity(
+        Qwen35GatherUnembedReplayKey {
             num_total_rows,
-            self.loaded_unembed().replay_topology(num_total_rows),
-        )
+            unembed_topology: self.loaded_unembed().replay_topology(num_total_rows),
+        }
     }
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct Qwen35GatherUnembedReplayKey {
     num_total_rows: u32,
-    unembed_topology: Option<affine_quantized::KernelKind>,
-}
-
-impl Qwen35GatherUnembedReplayKey {
-    pub fn num_total_rows(&self) -> u32 {
-        self.num_total_rows
-    }
-
-    pub fn unembed_topology(&self) -> Option<affine_quantized::KernelKind> {
-        self.unembed_topology
-    }
-
-    fn for_capacity(num_total_rows: u32, unembed_topology: affine_quantized::KernelKind) -> Self {
-        Self {
-            num_total_rows,
-            unembed_topology: Some(unembed_topology),
-        }
-    }
+    unembed_topology: affine_quantized::KernelKind,
 }
 
 impl ReplayComponent for Qwen35GatherUnembed {

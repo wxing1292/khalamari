@@ -53,7 +53,6 @@ pub struct Qwen3xDFlash2LayerScratch {
 
 #[derive(Clone, Copy)]
 pub struct Qwen3xDFlash2LayerInput<'a> {
-    pub num_tokens: u32,
     pub metadata: &'a BiDiBlockGQAMetadataBuffers,
     pub pages: &'a Buffer,
     pub residual_input: &'a Buffer,
@@ -215,7 +214,7 @@ impl Qwen3xDFlash2Layer {
     where
         R: Recorder<'a, Operator = ReplayOp<'a>>,
     {
-        debug_assert!(input.num_tokens <= self.scratch.max_tokens);
+        debug_assert!(num_total_tokens <= self.scratch.max_tokens);
         self.input_norm.record_with_barrier(
             recorder,
             num_total_tokens,

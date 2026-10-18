@@ -19,17 +19,17 @@ struct SelectionMetrics {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Selection {
-    execution: ExecutionVariant,
+    variant: ExecutionVariant,
     capacity: BiDiBlockGQACapacity,
     metrics: SelectionMetrics,
 }
 
 impl Selection {
-    pub fn execution(self) -> ExecutionVariant {
-        self.execution
+    pub fn variant(&self) -> ExecutionVariant {
+        self.variant
     }
 
-    pub fn capacity(self) -> BiDiBlockGQACapacity {
+    pub fn capacity(&self) -> BiDiBlockGQACapacity {
         self.capacity
     }
 }
@@ -60,7 +60,7 @@ impl Selector {
             .variants()
             .iter()
             .copied()
-            .map(|execution| self.materialize_candidate(execution));
+            .map(|variant| self.materialize_candidate(variant));
 
         candidates
             .min_by_key(|selection| {
@@ -76,14 +76,14 @@ impl Selector {
             .expect("GQA SDPA registry must contain an execution variant")
     }
 
-    fn materialize_candidate(&self, execution: ExecutionVariant) -> Selection {
-        let map = execution.map.thread_block;
+    fn materialize_candidate(&self, variant: ExecutionVariant) -> Selection {
+        let map = variant.map.thread_block;
         let capacity = BiDiBlockGQACapacity::new(self.bidi_block_capacity, map.max_q_tokens);
         let q_token_ranges_per_request = self.bidi_block_capacity.block_size.div_ceil(capacity.max_q_tokens);
         let q_head_ranges_per_kv_head =
             (self.registry.config().q_heads_per_kv_head() as usize).div_ceil(map.max_q_heads as usize);
         Selection {
-            execution,
+            variant,
             capacity,
             metrics: SelectionMetrics {
                 history_kv_load_multiplicity_per_request: q_token_ranges_per_request
@@ -111,8 +111,8 @@ mod tests {
         let sliced_kv = selector(config(128, 16), 1).select();
         let sliced_q = selector(config(128, 16), 7).select();
 
-        assert_eq!(sliced_kv.execution().map.thread_block.max_q_tokens, 1);
-        assert_eq!(sliced_q.execution().map.thread_block.max_q_tokens, 8);
+        assert_eq!(sliced_kv.variant().map.thread_block.max_q_tokens, 1);
+        assert_eq!(sliced_q.variant().map.thread_block.max_q_tokens, 8);
         assert_eq!(sliced_q.capacity().max_q_tokens, 8);
     }
 
@@ -120,7 +120,7 @@ mod tests {
     fn test_selector_keeps_sliced_kv_for_unsupported_tiled_profile() {
         let selection = selector(config(128, 4), 7).select();
 
-        assert_eq!(selection.execution().map.thread_block.max_q_tokens, 1);
+        assert_eq!(selection.variant().map.thread_block.max_q_tokens, 1);
         assert_eq!(selection.capacity().max_q_tokens, 1);
     }
 
@@ -128,7 +128,7 @@ mod tests {
     fn test_selector_minimizes_history_kv_loads() {
         let selection = selector(config(256, 32), 7).select();
 
-        assert_eq!(selection.execution().map.thread_block.max_q_heads, 5);
+        assert_eq!(selection.variant().map.thread_block.max_q_heads, 5);
     }
 
     fn selector(config: backend_sdpa::Config, block_size: usize) -> Selector {

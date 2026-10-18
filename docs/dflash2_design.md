@@ -97,6 +97,8 @@ There is no CPU rejection read between Main verification and Spec Decode.
 A prefill-only batch creates history but has no sampled anchor and produces no proposals.
 
 Each selected Main layer writes every Main row directly into its assigned capture columns.
+The Main-feature projector stores the column range for each selected layer at initialization.
+Main replay recording uses this mapping through `MainResidualCapture`.
 Spec Prefill borrows the active token count, request slots, and flat token indices from the current Main GQA metadata.
 It persists every captured Main row, including the rejected physical suffix.
 Logical commit exposes only fixed Main rows and the accepted speculative prefix.
@@ -198,6 +200,10 @@ A reset clears both bindings, while runtime core retains physical-page ownership
 Persistent state contains the request page table and history K/V pages.
 Snapshots use `dflash2-gqa-request-page-table`.
 Local Q/K/V, attention partials, convolution coefficients, candidates, and selector output are ephemeral.
+
+`Qwen3xDFlash2Prefill` and `Qwen3xDFlash2Body` share one model through `load_model` and `unload_model`.
+`Qwen3xDFlash2Execution::unload_state` collects these handles before it releases the model's state bindings.
+After state restoration, `load_state` restores the bindings and shares the model with both replay owners.
 
 ## Checkpoint contract
 

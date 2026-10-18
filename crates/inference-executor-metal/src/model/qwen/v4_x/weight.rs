@@ -16,7 +16,7 @@ impl AffineWeights {
         let config = layout.config(output_dim, input_dim, Dtype::Bfloat16);
         config.validate();
         let load = |store: &mut SafeTensorStore, name: &str, dtype, expected| -> Result<Buffer, ModelExecutorError> {
-            let tensor = typed_tensor(store, name, dtype)?;
+            let tensor = store.tensor_bytes(name, dtype)?;
             validate_len(name, tensor.data().len(), expected)?;
             Ok(Buffer::from_slice(device, tensor.data()))
         };
@@ -149,7 +149,7 @@ impl QSAWeights {
             )?,
         };
         let norm = |store: &mut SafeTensorStore, name: &str, width: usize| -> Result<Buffer, ModelExecutorError> {
-            let data = typed_tensor(store, name, safetensors::Dtype::BF16)?;
+            let data = store.tensor_bytes(name, safetensors::Dtype::BF16)?;
             validate_shape(name, data.shape(), &[width])?;
             let values: Vec<f32> = data
                 .data()
@@ -205,17 +205,19 @@ fn join_tensors<'a>(
     dtype: safetensors::Dtype,
     parts: impl Iterator<Item = (&'a str, usize)> + Clone,
 ) -> Result<Buffer, ModelExecutorError> {
-    let len = parts
+    let len_bytes = parts
         .clone()
-        .try_fold(0usize, |sum, (_, len)| sum.checked_add(len))
+        .try_fold(0usize, |total_bytes, (_, part_bytes)| {
+            total_bytes.checked_add(part_bytes)
+        })
         .expect("joined weight bytes must fit usize");
-    let output = Buffer::new_uninit(device, len);
-    let mut offset = 0;
-    for (name, len) in parts {
-        let tensor = typed_tensor(store, name, dtype)?;
-        validate_len(name, tensor.data().len(), len)?;
-        output.write_bytes(offset, tensor.data());
-        offset += len;
+    let output = Buffer::new_uninit(device, len_bytes);
+    let mut offset_bytes = 0;
+    for (name, part_bytes) in parts {
+        let tensor = store.tensor_bytes(name, dtype)?;
+        validate_len(name, tensor.data().len(), part_bytes)?;
+        output.write_bytes(offset_bytes, tensor.data());
+        offset_bytes += part_bytes;
     }
     Ok(output)
 }

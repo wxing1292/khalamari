@@ -27,17 +27,11 @@ pub struct EmbedConfig {
 
 impl EmbedConfig {
     pub fn validate(self) {
-        validate_quantized_embedding(
-            self.max_tokens,
-            self.vocab_size,
-            self.hidden_dim,
-            self.group_size,
-            self.bits,
-        );
-        self.config().validate();
+        assert!(self.max_tokens > 0);
+        self.compute_config().validate();
     }
 
-    fn config(self) -> embedding::Config {
+    fn compute_config(self) -> embedding::Config {
         embedding::Config {
             vocab_size: self.vocab_size,
             hidden_dim: self.hidden_dim,
@@ -51,7 +45,7 @@ impl EmbedConfig {
 
 pub struct Embed {
     config: EmbedConfig,
-    kernel: Rc<embedding::Compute>,
+    compute: Rc<embedding::Compute>,
     weights: Option<Rc<QuantizedEmbeddingWeights>>,
 }
 
@@ -84,7 +78,7 @@ impl Embed {
         config.validate();
         Self {
             config,
-            kernel: Rc::clone(&self.kernel),
+            compute: Rc::clone(&self.compute),
             weights: self.weights.as_ref().map(Rc::clone),
         }
     }
@@ -93,7 +87,7 @@ impl Embed {
         config.validate();
         Self {
             config,
-            kernel: Rc::new(embedding::Compute::new(device, config.config())),
+            compute: Rc::new(embedding::Compute::new(device, config.compute_config())),
             weights: None,
         }
     }
@@ -108,10 +102,9 @@ impl Embed {
         self.weights = Some(Rc::new(QuantizedEmbeddingWeights::load(
             device,
             store,
-            self.config.config(),
+            self.config.compute_config(),
             bindings,
         )?));
-        self.validate_weights();
         Ok(())
     }
 
@@ -126,17 +119,6 @@ impl Embed {
                 .as_ref()
                 .expect("embedding weights must be loaded before they are tied"),
         )
-    }
-
-    fn validate_weights(&self) {
-        let config = self.config.config();
-        let weights = self.weights();
-        assert_eq!(weights.weight.len_bytes(), config.weight_bytes());
-        assert_eq!(
-            weights.scales.len_bytes(),
-            config.num_affine_params() * self.config.scale_bias_dtype.item_size()
-        );
-        assert_eq!(weights.biases.len_bytes(), weights.scales.len_bytes());
     }
 
     fn weights(&self) -> &QuantizedEmbeddingWeights {
@@ -176,7 +158,7 @@ impl ReplayLayer for Embed {
             biases: &weights.biases,
             output: input.output_hidden,
         };
-        let invocation = self.kernel.invoke(shape, input.num_active_tokens, buffers);
+        let invocation = self.compute.invoke(shape, input.num_active_tokens, buffers);
         recorder.record_with_barrier_before(ReplayOp::opaque(invocation));
         input.output_hidden
     }
@@ -234,13 +216,4 @@ fn validate_len(name: &str, actual: usize, expected: usize) -> Result<(), ModelE
         )));
     }
     Ok(())
-}
-
-fn validate_quantized_embedding(max_tokens: u32, vocab_size: u32, hidden_dim: u32, group_size: u32, bits: u32) {
-    assert!(max_tokens > 0);
-    assert!(vocab_size > 0);
-    assert!(hidden_dim > 0);
-    assert!(matches!(group_size, 32 | 64 | 128));
-    assert!(matches!(bits, 2 | 3 | 4 | 6 | 8));
-    assert_eq!(hidden_dim % group_size, 0);
 }

@@ -59,7 +59,6 @@ pub struct Qwen3xDFlash2PrefillArgs<'a> {
 
 #[derive(Clone, Copy)]
 pub struct Qwen3xDFlash2BodyArgs<'a> {
-    pub num_tokens: u32,
     pub metadata: &'a BiDiBlockGQAMetadataBuffers,
     pub hidden_input: &'a Buffer,
     pub hidden_output: &'a Buffer,
@@ -265,7 +264,6 @@ impl Qwen3xDFlash2Model {
                 num_active_tokens,
                 num_active_query_blocks,
                 Qwen3xDFlash2LayerInput {
-                    num_tokens: args.num_tokens,
                     metadata: args.metadata,
                     pages: args.pages,
                     residual_input: hidden,
@@ -289,13 +287,13 @@ impl Qwen3xDFlash2Prefill {
         Self { model: Some(model) }
     }
 
-    pub fn take_model(&mut self) -> Rc<Qwen3xDFlash2Model> {
+    pub fn unload_model(&mut self) -> Rc<Qwen3xDFlash2Model> {
         self.model
             .take()
             .expect("Qwen3.x DFlash2 Prefill model state must be loaded")
     }
 
-    pub fn set_model(&mut self, model: Rc<Qwen3xDFlash2Model>) {
+    pub fn load_model(&mut self, model: Rc<Qwen3xDFlash2Model>) {
         assert!(
             self.model.is_none(),
             "Qwen3.x DFlash2 Prefill model state is already loaded"
@@ -339,13 +337,13 @@ impl Qwen3xDFlash2Body {
         Self { model: Some(model) }
     }
 
-    pub fn take_model(&mut self) -> Rc<Qwen3xDFlash2Model> {
+    pub fn unload_model(&mut self) -> Rc<Qwen3xDFlash2Model> {
         self.model
             .take()
             .expect("Qwen3.x DFlash2 body model state must be loaded")
     }
 
-    pub fn set_model(&mut self, model: Rc<Qwen3xDFlash2Model>) {
+    pub fn load_model(&mut self, model: Rc<Qwen3xDFlash2Model>) {
         assert!(
             self.model.is_none(),
             "Qwen3.x DFlash2 body model state is already loaded"

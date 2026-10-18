@@ -1,9 +1,6 @@
 use std::time::Duration;
 
-use inference_backend_metal::components::gated_residual;
-use inference_backend_metal::components::residual_add;
-use inference_backend_metal::components::rms_norm;
-use inference_backend_metal::metal::Operator;
+pub use inference_backend_metal::components::ReplayOp;
 use inference_backend_metal::metal::ReplayArguments;
 use inference_backend_metal::metal::ReplayExecution;
 use inference_backend_metal::metal::ReplayProgram;
@@ -96,11 +93,11 @@ impl<'a> Recorder<'a> for ReplayRecorder {
     type Replay = ReplayProgram;
 
     fn record(&mut self, operator: Self::Operator) {
-        self.inner.record(operator.into_inner());
+        self.inner.record(operator);
     }
 
     fn record_with_barrier_before(&mut self, operator: Self::Operator) {
-        self.inner.record_with_barrier_before(operator.into_inner());
+        self.inner.record_with_barrier_before(operator);
     }
 
     fn build(self) -> Self::Replay {
@@ -133,61 +130,5 @@ impl ExecutionSubmission for MetalReplaySubmission {
 
     fn gpu_timestamp_durations(&self) -> Option<Vec<Duration>> {
         MetalReplaySubmission::gpu_timestamp_durations(self)
-    }
-}
-
-pub struct ReplayOp<'a> {
-    inner: inference_backend_metal::components::ReplayOp<'a>,
-}
-
-impl<'a> ReplayOp<'a> {
-    pub fn opaque<I>(operator: I) -> Self
-    where
-        I: Operator + 'a,
-    {
-        Self {
-            inner: inference_backend_metal::components::ReplayOp::opaque(operator),
-        }
-    }
-
-    pub fn gated_residual_read(invocation: gated_residual::ReadInvocation<'a>) -> Self {
-        Self {
-            inner: inference_backend_metal::components::ReplayOp::gated_residual_read(invocation),
-        }
-    }
-
-    pub fn gated_residual_write(invocation: gated_residual::WriteInvocation<'a>) -> Self {
-        Self {
-            inner: inference_backend_metal::components::ReplayOp::gated_residual_write(invocation),
-        }
-    }
-
-    pub fn residual_add(invocation: residual_add::Invocation<'a>) -> Self {
-        Self {
-            inner: inference_backend_metal::components::ReplayOp::residual_add(invocation),
-        }
-    }
-
-    /// Records a BF16 residual add that captures every complete output row.
-    ///
-    /// An adjacent compatible RMSNorm fuses opportunistically. Otherwise, the
-    /// backend records an independent padding-safe capture operation.
-    pub fn residual_add_with_capture(
-        invocation: residual_add::Invocation<'a>,
-        capture: residual_add::CaptureTarget<'a>,
-    ) -> Self {
-        Self {
-            inner: inference_backend_metal::components::ReplayOp::residual_add_with_capture(invocation, capture),
-        }
-    }
-
-    pub fn rms_norm(invocation: rms_norm::Invocation<'a>) -> Self {
-        Self {
-            inner: inference_backend_metal::components::ReplayOp::rms_norm(invocation),
-        }
-    }
-
-    fn into_inner(self) -> inference_backend_metal::components::ReplayOp<'a> {
-        self.inner
     }
 }

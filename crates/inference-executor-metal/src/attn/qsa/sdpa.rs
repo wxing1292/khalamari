@@ -96,18 +96,6 @@ pub struct QSASDPAActive {
 }
 
 impl QSASDPAActive {
-    pub fn validate(self, shape: QSASDPAShape) {
-        shape.validate();
-        assert!(self.num_active_tokens > 0 && self.num_active_tokens <= shape.num_total_tokens);
-        assert!(self.num_active_dense_queries <= self.num_active_tokens);
-        assert!(self.num_active_dense_tasks <= shape.num_total_tokens);
-        assert!(self.num_active_sparse_queries <= shape.num_total_sparse_queries);
-        assert_eq!(
-            self.num_active_sparse_queries,
-            self.num_active_tokens - self.num_active_dense_queries
-        );
-    }
-
     pub fn fixed_replay(self) -> QSASDPAReplay {
         QSASDPAReplay {
             num_active_tokens: ReplayU32::Fixed(self.num_active_tokens),
@@ -150,7 +138,7 @@ pub const QSA_NUM_ACTIVE_DENSE_QUERIES: ReplayParameterKey = ReplayParameterKey:
 pub const QSA_NUM_ACTIVE_DENSE_TASKS: ReplayParameterKey = ReplayParameterKey::new("qsa.num_active_dense_tasks");
 pub const QSA_NUM_ACTIVE_SPARSE_QUERIES: ReplayParameterKey = ReplayParameterKey::new("qsa.num_active_sparse_queries");
 
-/// Buffers owned by one recorded QSA SDPA shape.
+/// Initialized scratch capacity shared by smaller QSA SDPA replay shapes.
 pub struct QSASDPAScratch {
     shape: QSASDPAShape,
     dense: sliced_kv::Scratch,
@@ -253,7 +241,7 @@ impl QSASDPA {
 
         let dense_shape = sliced_kv::Shape {
             num_total_tokens: shape.num_total_tokens,
-            num_total_sdpa_map_task_templates: shape.num_total_tokens,
+            num_total_sdpa_map_task_templates: input.scratch.shape.num_total_tokens,
         };
         let dense_execution = input.metadata.dense_variant();
         let dense_config = dense_sliced_kv_config(self.config);

@@ -42,13 +42,6 @@ use inference_runtime_core::compute::QueryTokens;
 use inference_runtime_core::runtime::RawRequestSlot;
 use inference_runtime_core::runtime::Token;
 
-use super::main::Qwen4xMain;
-use super::main::Qwen4xMainInput;
-use super::main::Qwen4xMainReplayKey;
-use super::main::gdn_configs;
-use super::main::uniform_layout;
-use super::state::Qwen4xRequestState;
-use super::state::Qwen4xState;
 use crate::attn::gdn::backend::GDN;
 use crate::attn::gdn::state_table::GDNStateCapacity;
 use crate::checkpoint::SafeTensorStore;
@@ -64,6 +57,13 @@ use crate::model::qwen::v3_5::main::text_embed::Qwen35MainTextEmbed;
 use crate::model::qwen::v3_5::main::text_embed::Qwen35MainTextEmbedArgs;
 use crate::model::qwen::v3_5::main::text_embed::Qwen35MainTextEmbedReplayKey;
 use crate::model::qwen::v3_x::state::Qwen3xGDNState;
+use crate::model::qwen::v4_x::main::Qwen4xMain;
+use crate::model::qwen::v4_x::main::Qwen4xMainArgs;
+use crate::model::qwen::v4_x::main::Qwen4xMainReplayKey;
+use crate::model::qwen::v4_x::main::gdn_configs;
+use crate::model::qwen::v4_x::main::uniform_layout;
+use crate::model::qwen::v4_x::state::Qwen4xRequestState;
+use crate::model::qwen::v4_x::state::Qwen4xState;
 use crate::model::state_snapshot::FullStateIO;
 use crate::model::state_snapshot::GDNStateSnapshotFiles;
 use crate::model::state_snapshot::GQAStateSnapshotFiles;
@@ -289,15 +289,6 @@ impl Qwen4xExecutor {
     pub fn num_state_page_ids_per_block(&self) -> usize {
         self.gdn.num_pages_per_state_slot() + self.state.aux_pages_per_block()
     }
-    fn input(&self) -> Qwen4xMainInput<'_> {
-        Qwen4xMainInput {
-            hidden_input: &self.hidden_input,
-            hidden_output: &self.hidden_output,
-            pages: self.pages.buffer(),
-            state: &self.state,
-            gdn: &self.gdn,
-        }
-    }
 }
 
 pub struct Qwen4xModelOpsRecorder {
@@ -383,9 +374,9 @@ impl ReplayableDecoderModel for Qwen4xExecutor {
     }
     fn unload_state(&mut self, path: &Path, plan: &ExecutorHibernationPlan) -> Result<(), ModelExecutorError> {
         self.write_state(path, plan)?;
-        self.main.component_mut().detach_gdn();
+        self.main.component_mut().unload_state();
         self.gdn.release_resources();
-        self.state.release();
+        self.state.release_resources();
         self.pages.release_resources();
         Ok(())
     }
@@ -409,10 +400,6 @@ impl ReplayableDecoderModel for Qwen4xExecutor {
                 q.token_index()
                     .checked_add(q.token_consumption())
                     .is_some_and(|end| end <= self.model_config.text_config.max_position_embeddings)
-            );
-            assert!(
-                q.token_ids_by_lane(0)
-                    .all(|id| (id as usize) < self.model_config.text_config.vocab_size)
             );
         }
         request.dev_reqs.sort_by_key(|r| {
@@ -438,7 +425,7 @@ impl ReplayableDecoderModel for Qwen4xExecutor {
         let micro = batch.microbatch();
         self.sampler.set_params(micro.req_slots(), micro.sampler_configs());
         self.token_ids.write_typed(0, micro.flat_token_ids());
-        let total = self.main.component().num_total_tokens(micro.total_tokens() as u32);
+        let num_total_tokens = self.main.component().capacity(micro.total_tokens() as u32);
         let runtime = MetalReplayRuntime::new(self.runtime.stream());
         self.state.prepare(
             self.runtime.device(),
@@ -446,10 +433,10 @@ impl ReplayableDecoderModel for Qwen4xExecutor {
             self.pages.buffer(),
             request,
             micro,
-            total,
+            num_total_tokens,
             self.gdn.num_pages_per_state_slot(),
         );
-        let recurrent = (0..micro.num_reqs())
+        let num_active_recurrent_requests = (0..micro.num_reqs())
             .take_while(|&i| {
                 !micro.is_decode_req(i)
                     || self
@@ -464,11 +451,15 @@ impl ReplayableDecoderModel for Qwen4xExecutor {
             micro.token_indices(),
             micro.cu_tokens(),
             &vec![0; micro.num_reqs()],
-            recurrent,
+            num_active_recurrent_requests,
             self.state.gdn_page_ids(),
         );
-        self.gdn
-            .prepare_metadata(micro.cu_tokens(), recurrent as u32, &prepared, total);
+        self.gdn.prepare_metadata(
+            micro.cu_tokens(),
+            num_active_recurrent_requests as u32,
+            &prepared,
+            num_total_tokens,
+        );
         self.gdn.restore(&runtime, self.pages.buffer());
         batch
     }
@@ -491,9 +482,15 @@ impl ReplayableDecoderModel for Qwen4xExecutor {
             .embed
             .component()
             .prepare_replay(batch.microbatch().total_tokens() as u32);
-        let input = self.input();
+        let input = Qwen4xMainArgs {
+            hidden_input: &self.hidden_input,
+            hidden_output: &self.hidden_output,
+            pages: self.pages.buffer(),
+            state: &self.state,
+            gdn: &self.gdn,
+        };
         let main_key = self.main.component().replay_key(&input);
-        let main_arguments = self.main.component().arguments(&input);
+        let main_arguments = self.main.component().replay_arguments(&input);
         Qwen4xModelOpsRecorder {
             embed_key,
             embed_arguments,
@@ -526,7 +523,7 @@ impl ReplayableDecoderModel for Qwen4xExecutor {
         hidden: Self::ModelBatchHidden,
     ) -> Self::ModelBatchHidden {
         debug_assert!(Rc::ptr_eq(&hidden, &self.hidden_input));
-        let input = Qwen4xMainInput {
+        let input = Qwen4xMainArgs {
             hidden_input: &self.hidden_input,
             hidden_output: &self.hidden_output,
             pages: self.pages.buffer(),

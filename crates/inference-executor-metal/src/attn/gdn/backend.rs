@@ -10,9 +10,9 @@ use inference_executor_core::attn::GDNCore;
 use inference_executor_core::attn::GDNReplayShape;
 use inference_executor_core::attn::gdn::GDNOutputGate;
 use inference_executor_core::backend::recorder::Recorder;
+use inference_executor_core::replay::ReplayBucketPolicy;
 
 use crate::attn::gdn::batch_metadata::GDNMetadataBuffers;
-use crate::attn::gdn::batch_metadata::GDNReplayBucketPolicy;
 use crate::attn::gdn::scratch::GDNScratch;
 use crate::attn::gdn::scratch::GDNScratchBindings;
 use crate::attn::gdn::state_table::GDNPreparedRequestState;
@@ -203,19 +203,14 @@ impl GDN {
         cu_tokens: &[u32],
         num_active_recurrent_requests: u32,
         state: &GDNPreparedRequestState,
-        policy: &GDNReplayBucketPolicy,
+        request_bucket_policy: &ReplayBucketPolicy,
         num_total_tokens: u32,
     ) -> GDNReplayShape {
         let num_tokens = cu_tokens.last().copied().unwrap_or_default();
-        assert_eq!(metadata.max_requests(), policy.max_requests() as usize);
-        assert_eq!(metadata.max_tokens(), policy.max_tokens() as usize);
-        assert!(
-            num_total_tokens <= policy.max_tokens(),
-            "GDN total token count must not exceed the metadata capacity"
-        );
         self.validate_token_capacity(num_tokens, num_total_tokens);
         let num_active_requests =
             u32::try_from(state.src_recurrent_state_slots.len()).expect("GDN active request count must fit u32");
+        let num_total_requests = request_bucket_policy.capacity(num_active_requests);
         metadata.update(
             cu_tokens,
             num_active_recurrent_requests,
@@ -223,7 +218,7 @@ impl GDN {
             &state.src_conv_state_slots,
             &state.flat_recurrent_state_write_slots,
             &state.flat_conv_state_write_slots,
-            policy.num_total_requests(num_active_requests),
+            num_total_requests,
             num_total_tokens,
         )
     }
@@ -234,11 +229,6 @@ impl GDN {
         boundaries.sort_unstable();
         boundaries.dedup();
         boundaries.into_boxed_slice()
-    }
-
-    pub fn replay_bucket_policy(&self, max_requests: u32, max_tokens: u32) -> GDNReplayBucketPolicy {
-        let boundaries = self.replay_token_topology_boundaries();
-        GDNReplayBucketPolicy::new(max_requests, max_tokens, &boundaries)
     }
 
     pub fn replay_topology(&self, batch_metadata: &GDNMetadataBuffers) -> GDNReplayTopology {

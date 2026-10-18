@@ -6,6 +6,7 @@ use inference_backend_metal::metal::Device;
 use inference_backend_metal::metal::ReplayU32;
 use inference_executor_core::backend::recorder::Recorder;
 use inference_executor_core::checkpoint::TensorMap;
+use inference_executor_core::checkpoint::remove_tensor;
 use inference_executor_core::def::ModelExecutorError;
 use inference_executor_core::mlp::dense::DenseMLPCore;
 use inference_executor_core::mlp::moe::GatedMoECore;
@@ -28,7 +29,6 @@ use crate::mlp::moe::scratch::MoEScratch;
 use crate::model::qwen::v3_x::layer::dense_mlp::DenseMLPWeightBuffers;
 use crate::model::qwen::v3_x::weight::affine_config;
 use crate::model::qwen::v3_x::weight::remove_quant_weight;
-use crate::model::qwen::v3_x::weight::remove_typed_tensor;
 use crate::model::qwen::v3_x::weight::sparse_affine_layout;
 use crate::model::qwen::v3_x::weight::validate_len;
 
@@ -191,10 +191,8 @@ impl Qwen3xMoEWeights {
             metal.io_dtype,
         );
         let router_weight = remove_quant_weight(tensors, &bindings.router.weight)?;
-        let router_scales =
-            remove_typed_tensor(tensors, &bindings.router.scales, safetensors::Dtype::BF16)?.into_data();
-        let router_biases =
-            remove_typed_tensor(tensors, &bindings.router.biases, safetensors::Dtype::BF16)?.into_data();
+        let router_scales = remove_tensor(tensors, &bindings.router.scales, safetensors::Dtype::BF16)?.into_data();
+        let router_biases = remove_tensor(tensors, &bindings.router.biases, safetensors::Dtype::BF16)?.into_data();
         validate_len(
             "sparse router weight",
             router_weight.len(),
@@ -231,10 +229,8 @@ impl Qwen3xMoEWeights {
                 metal.io_dtype,
             );
             let gate_weight = remove_quant_weight(tensors, &gate_bindings.weight)?;
-            let gate_scales =
-                remove_typed_tensor(tensors, &gate_bindings.scales, safetensors::Dtype::BF16)?.into_data();
-            let gate_biases =
-                remove_typed_tensor(tensors, &gate_bindings.biases, safetensors::Dtype::BF16)?.into_data();
+            let gate_scales = remove_tensor(tensors, &gate_bindings.scales, safetensors::Dtype::BF16)?.into_data();
+            let gate_biases = remove_tensor(tensors, &gate_bindings.biases, safetensors::Dtype::BF16)?.into_data();
             validate_len(
                 "sparse shared expert gate weight",
                 gate_weight.len(),
@@ -308,14 +304,14 @@ impl Qwen3xSparseExpertWeights {
         let expert_gate_layout = sparse_affine_layout(core.num_experts, core.intermediate_dim, core.hidden_dim, metal);
         let expert_down_layout = sparse_affine_layout(core.num_experts, core.hidden_dim, core.intermediate_dim, metal);
         let gate_weight = remove_quant_weight(tensors, &bindings.gate.weight)?;
-        let gate_scales = remove_typed_tensor(tensors, &bindings.gate.scales, safetensors::Dtype::BF16)?.into_data();
-        let gate_biases = remove_typed_tensor(tensors, &bindings.gate.biases, safetensors::Dtype::BF16)?.into_data();
+        let gate_scales = remove_tensor(tensors, &bindings.gate.scales, safetensors::Dtype::BF16)?.into_data();
+        let gate_biases = remove_tensor(tensors, &bindings.gate.biases, safetensors::Dtype::BF16)?.into_data();
         let up_weight = remove_quant_weight(tensors, &bindings.up.weight)?;
-        let up_scales = remove_typed_tensor(tensors, &bindings.up.scales, safetensors::Dtype::BF16)?.into_data();
-        let up_biases = remove_typed_tensor(tensors, &bindings.up.biases, safetensors::Dtype::BF16)?.into_data();
+        let up_scales = remove_tensor(tensors, &bindings.up.scales, safetensors::Dtype::BF16)?.into_data();
+        let up_biases = remove_tensor(tensors, &bindings.up.biases, safetensors::Dtype::BF16)?.into_data();
         let down_weight = remove_quant_weight(tensors, &bindings.down.weight)?;
-        let down_scales = remove_typed_tensor(tensors, &bindings.down.scales, safetensors::Dtype::BF16)?.into_data();
-        let down_biases = remove_typed_tensor(tensors, &bindings.down.biases, safetensors::Dtype::BF16)?.into_data();
+        let down_scales = remove_tensor(tensors, &bindings.down.scales, safetensors::Dtype::BF16)?.into_data();
+        let down_biases = remove_tensor(tensors, &bindings.down.biases, safetensors::Dtype::BF16)?.into_data();
         validate_len(
             "sparse expert gate weight",
             gate_weight.len(),

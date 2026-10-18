@@ -49,7 +49,7 @@ pub fn gdn_configs(
     ))
 }
 
-pub fn qsa_configs(
+fn qsa_configs(
     config: &Qwen4xModelConfig,
     model_layer_index: usize,
     main: &inference_executor_core::model::qwen::v3_x::weight_layout::Qwen3xGQAWeightBindings,

@@ -1,3 +1,5 @@
+use std::cell::Cell;
+
 use inference_backend_metal::components::sampling::rejection;
 use inference_backend_metal::metal::Buffer;
 use inference_backend_metal::metal::Device;
@@ -9,7 +11,6 @@ use inference_executor_core::sampling::SparseRejectionSamplingReqParams;
 use inference_executor_core::sampling::SparseRejectionSamplingShape;
 
 use crate::def::replay_op::ReplayOp;
-use crate::sampling::RuntimeParamRows;
 
 #[derive(Clone, Copy)]
 pub struct SparseRejectionSamplingOutput<'a> {
@@ -24,7 +25,7 @@ pub struct SparseRejectionSampling {
     kernel: rejection::Compute,
     bounds: SparseRejectionSamplingBounds,
     runtime_params: Buffer,
-    runtime_param_rows: RuntimeParamRows,
+    runtime_param_rows: Cell<Option<u32>>,
 }
 
 impl SparseRejectionSampling {
@@ -40,7 +41,7 @@ impl SparseRejectionSampling {
                     .expect("sparse rejection runtime parameter capacity must fit usize"),
                 Dtype::Uint32,
             ),
-            runtime_param_rows: RuntimeParamRows::default(),
+            runtime_param_rows: Cell::new(None),
         }
     }
 
@@ -64,7 +65,7 @@ impl SparseRejectionSampling {
                 ],
             );
         }
-        self.runtime_param_rows.set(params.len() as u32);
+        self.runtime_param_rows.set(Some(params.len() as u32));
     }
 
     pub fn record<'a>(
@@ -74,7 +75,7 @@ impl SparseRejectionSampling {
         inputs: SparseRejectionSamplingInputs<'a>,
         output: SparseRejectionSamplingOutput<'a>,
     ) {
-        self.validate_input(shape);
+        self.validate(shape);
         recorder.record_with_barrier_before(ReplayOp::opaque(self.kernel.invoke_replay(
             component_shape(shape),
             rejection::Buffers {
@@ -96,10 +97,13 @@ impl SparseRejectionSampling {
         )));
     }
 
+    /// Adds active counts for the same shape used to record the replay.
     pub fn add_replay_arguments(&self, shape: SparseRejectionSamplingShape, arguments: &mut ReplayArguments) {
-        self.validate_input(shape);
-        self.runtime_param_rows
-            .consume(shape.num_active_reqs, "sparse rejection sampling");
+        assert_eq!(
+            self.runtime_param_rows.take(),
+            Some(shape.num_active_reqs),
+            "sparse rejection sampling runtime parameter rows must be freshly configured for the active replay rows"
+        );
         self.kernel.add_replay_arguments(
             component_shape(shape),
             shape.num_active_reqs,
@@ -109,7 +113,7 @@ impl SparseRejectionSampling {
         );
     }
 
-    fn validate_input(&self, shape: SparseRejectionSamplingShape) {
+    fn validate(&self, shape: SparseRejectionSamplingShape) {
         shape.validate();
         assert!(
             shape.num_total_reqs <= self.bounds.max_reqs,

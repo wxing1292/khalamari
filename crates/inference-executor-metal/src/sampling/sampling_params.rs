@@ -76,14 +76,6 @@ impl SamplingParamsStore {
     pub fn buffer(&self) -> &Buffer {
         &self.buffer
     }
-
-    pub fn validate(&self, shape: TopKSamplingShape) {
-        assert!(shape.num_active_sampling_inputs > 0);
-        assert!(shape.num_active_sampling_inputs <= shape.num_total_sampling_inputs);
-        assert!(shape.num_total_sampling_inputs <= self.bounds.max_sampling_inputs);
-        assert_eq!(shape.vocab_size, self.bounds.vocab_size);
-        assert!(shape.top_k > 0 && shape.top_k <= self.bounds.top_k);
-    }
 }
 
 #[cfg(test)]

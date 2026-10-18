@@ -2,6 +2,7 @@ use inference_backend_metal::metal::Buffer;
 use inference_backend_metal::metal::Device;
 use inference_executor_core::attn::UngatedGQACore;
 use inference_executor_core::checkpoint::TensorMap;
+use inference_executor_core::checkpoint::remove_tensor;
 use inference_executor_core::def::ModelExecutorError;
 use inference_executor_core::model::qwen::v3_x::weight_layout::Qwen3xGQAWeightBindings;
 
@@ -12,7 +13,6 @@ use crate::model::qwen::v3_x::weight::affine_config;
 use crate::model::qwen::v3_x::weight::concat_bytes;
 use crate::model::qwen::v3_x::weight::remove_quant_weight;
 use crate::model::qwen::v3_x::weight::remove_qwen3x_norm_weight;
-use crate::model::qwen::v3_x::weight::remove_typed_tensor;
 use crate::model::qwen::v3_x::weight::validate_len;
 
 pub struct Qwen3xUngatedGQAWeightBuffers {
@@ -54,12 +54,12 @@ impl Qwen3xUngatedGQAWeightBuffers {
         let q_weight = remove_quant_weight(tensors, &bindings.q.weight)?;
         let k_weight = remove_quant_weight(tensors, &bindings.k.weight)?;
         let v_weight = remove_quant_weight(tensors, &bindings.v.weight)?;
-        let q_scales = remove_typed_tensor(tensors, &bindings.q.scales, safetensors::Dtype::BF16)?.into_data();
-        let k_scales = remove_typed_tensor(tensors, &bindings.k.scales, safetensors::Dtype::BF16)?.into_data();
-        let v_scales = remove_typed_tensor(tensors, &bindings.v.scales, safetensors::Dtype::BF16)?.into_data();
-        let q_biases = remove_typed_tensor(tensors, &bindings.q.biases, safetensors::Dtype::BF16)?.into_data();
-        let k_biases = remove_typed_tensor(tensors, &bindings.k.biases, safetensors::Dtype::BF16)?.into_data();
-        let v_biases = remove_typed_tensor(tensors, &bindings.v.biases, safetensors::Dtype::BF16)?.into_data();
+        let q_scales = remove_tensor(tensors, &bindings.q.scales, safetensors::Dtype::BF16)?.into_data();
+        let k_scales = remove_tensor(tensors, &bindings.k.scales, safetensors::Dtype::BF16)?.into_data();
+        let v_scales = remove_tensor(tensors, &bindings.v.scales, safetensors::Dtype::BF16)?.into_data();
+        let q_biases = remove_tensor(tensors, &bindings.q.biases, safetensors::Dtype::BF16)?.into_data();
+        let k_biases = remove_tensor(tensors, &bindings.k.biases, safetensors::Dtype::BF16)?.into_data();
+        let v_biases = remove_tensor(tensors, &bindings.v.biases, safetensors::Dtype::BF16)?.into_data();
         let qkv_weight = concat_bytes(&[&q_weight, &k_weight, &v_weight]);
         let qkv_scales = concat_bytes(&[&q_scales, &k_scales, &v_scales]);
         let qkv_biases = concat_bytes(&[&q_biases, &k_biases, &v_biases]);
@@ -94,10 +94,8 @@ impl Qwen3xUngatedGQAWeightBuffers {
             metal.io_dtype,
         );
         let output_weight = remove_quant_weight(tensors, &bindings.output.weight)?;
-        let output_scales =
-            remove_typed_tensor(tensors, &bindings.output.scales, safetensors::Dtype::BF16)?.into_data();
-        let output_biases =
-            remove_typed_tensor(tensors, &bindings.output.biases, safetensors::Dtype::BF16)?.into_data();
+        let output_scales = remove_tensor(tensors, &bindings.output.scales, safetensors::Dtype::BF16)?.into_data();
+        let output_biases = remove_tensor(tensors, &bindings.output.biases, safetensors::Dtype::BF16)?.into_data();
         validate_len(
             "ungated GQA output weight",
             output_weight.len(),

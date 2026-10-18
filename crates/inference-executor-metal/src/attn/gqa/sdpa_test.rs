@@ -29,11 +29,7 @@ fn selection(token_indices: &[u32], request_tokens: &[u32]) -> Selection {
     }
     let request_shapes = RequestShape::from_batch(token_indices, &cu_tokens);
     let num_total_tokens = cu_tokens.last().copied().unwrap();
-    selector().select(
-        &request_shapes,
-        &GQAReplayBucketPolicy::new(128, 128, &[]),
-        num_total_tokens,
-    )
+    selector().select(&request_shapes, &GQAReplayBucketPolicy::new(128, 128), num_total_tokens)
 }
 
 fn is_sliced_kv(selection: &Selection) -> bool {
@@ -60,7 +56,7 @@ fn test_lookup_preserves_f32_execution_capability() {
                 num_page_ids_per_block: 1,
             },
         );
-        let policy = GQAReplayBucketPolicy::new(128, selector.limits().max_map_task_templates, &[]);
+        let policy = GQAReplayBucketPolicy::new(128, selector.limits().max_map_task_templates);
         for num_history_tokens in [0, 4096] {
             for num_q_tokens in [1, 8] {
                 let selection = selector.select(
@@ -97,7 +93,7 @@ fn test_lookup_preserves_single_query_kv_parallelism_across_short_context_bounda
                 num_page_ids_per_block: 1,
             },
         );
-        let policy = GQAReplayBucketPolicy::new(128, selector.limits().max_map_task_templates, &[]);
+        let policy = GQAReplayBucketPolicy::new(128, selector.limits().max_map_task_templates);
         for history in [0, 31, 32, 128, 384, 511, 512, 1024] {
             for requests in [1, 4, 8] {
                 let shapes = vec![
@@ -150,7 +146,7 @@ fn test_lookup_covers_ragged_queries_and_continuous_context_within_replay_capaci
             },
         );
         let limits = selector.limits();
-        let policy = GQAReplayBucketPolicy::new(2048, limits.max_map_task_templates, &[]);
+        let policy = GQAReplayBucketPolicy::new(2048, limits.max_map_task_templates);
         for history in [
             0_u32, 63, 64, 255, 256, 511, 512, 513, 1023, 2048, 4095, 4096, 4097, 8191, 16383, 32768, 65535, 98317,
             131073, 262144,
@@ -244,7 +240,7 @@ fn test_partition_envelope_covers_positive_request_compositions() {
             let selector =
                 Selector::for_partitions(registry.clone(), max_tokens, max_requests, |_| 130_u32.div_ceil(64));
             let limits = selector.limits();
-            let policy = GQAReplayBucketPolicy::new(max_tokens, limits.max_map_task_templates, &[]);
+            let policy = GQAReplayBucketPolicy::new(max_tokens, limits.max_map_task_templates);
             let mut max_observed_ranges = [0_u32; 6];
             for total in 1..=max_tokens {
                 for requests in 1..=max_requests.min(total) {
@@ -320,14 +316,7 @@ fn test_fixed_slices_cover_ragged_causal_ranges() {
         256,
     );
     let requests = RequestShape::from_batch(&[120, 2], &[0, 5, 8]);
-    let selection = selector.select_partitioned(
-        variant,
-        64,
-        false,
-        &requests,
-        &GQAReplayBucketPolicy::new(16, 64, &[]),
-        8,
-    );
+    let selection = selector.select_partitioned(variant, 64, false, &requests, &GQAReplayBucketPolicy::new(16, 64), 8);
     let ranges = selection.q_token_ranges();
     assert_eq!(
         ranges
@@ -348,14 +337,7 @@ fn test_fixed_slices_cover_ragged_causal_ranges() {
     assert_eq!(selection.metrics().max_kv_iterations_per_split, 4);
     assert!(!selection.direct_output());
 
-    let selection = selector.select_partitioned(
-        variant,
-        65,
-        false,
-        &requests,
-        &GQAReplayBucketPolicy::new(16, 64, &[]),
-        8,
-    );
+    let selection = selector.select_partitioned(variant, 65, false, &requests, &GQAReplayBucketPolicy::new(16, 64), 8);
     assert_eq!(selection.q_token_ranges(), ranges);
     assert_eq!(
         selection
@@ -384,8 +366,7 @@ fn test_direct_output_preserves_padded_range_identity_without_partials() {
     let variant = backend_sdpa::ExecutionVariant::sliced_q_per_head(config, 1, 16, 1);
     let selector = Selector::new(backend_sdpa::Registry::from_variants(config, vec![variant]), 9, 64, 1);
     let requests = RequestShape::from_batch(&[64, 2], &[0, 7, 9]);
-    let selection =
-        selector.select_partitioned(variant, 71, true, &requests, &GQAReplayBucketPolicy::new(9, 64, &[]), 9);
+    let selection = selector.select_partitioned(variant, 71, true, &requests, &GQAReplayBucketPolicy::new(9, 64), 9);
     let shape = selection.replay_shape();
     assert!(selection.direct_output());
     assert_eq!(shape.num_q_token_tiles, 9);
@@ -419,7 +400,7 @@ fn test_selector_preserves_other_profile_selection() {
         head_dim: 256,
         tokens_per_page: 32,
     })
-    .select(&request_shapes, &GQAReplayBucketPolicy::new(128, 128, &[]), 8);
+    .select(&request_shapes, &GQAReplayBucketPolicy::new(128, 128), 8);
     assert_eq!(d256_page32.variant().map.thread_block.max_q_tokens, 8);
     assert_eq!(d256_page32.variant().map.thread_block.max_q_heads, 3);
 
@@ -430,7 +411,7 @@ fn test_selector_preserves_other_profile_selection() {
         head_dim: 128,
         tokens_per_page: 16,
     })
-    .select(&request_shapes, &GQAReplayBucketPolicy::new(128, 128, &[]), 8);
+    .select(&request_shapes, &GQAReplayBucketPolicy::new(128, 128), 8);
     assert_eq!(d128_page16.variant().map.thread_block.max_q_tokens, 8);
     assert_eq!(d128_page16.variant().map.thread_block.max_q_heads, 8);
 
@@ -441,7 +422,7 @@ fn test_selector_preserves_other_profile_selection() {
         head_dim: 256,
         tokens_per_page: 4,
     })
-    .select(&request_shapes, &GQAReplayBucketPolicy::new(128, 128, &[]), 8);
+    .select(&request_shapes, &GQAReplayBucketPolicy::new(128, 128), 8);
     assert_eq!(unsupported.variant().map.thread_block.max_q_tokens, 1);
 }
 
@@ -527,7 +508,7 @@ fn test_dense_prefill_kv32_preserves_request_ranges_and_replay_capacity() {
     });
     let partial_state_group_capacity = 2048 * registry.max_q_tokens_per_map_task() as usize;
     let selector = Selector::new(registry, 2048, 2048, partial_state_group_capacity);
-    let policy = GQAReplayBucketPolicy::new(2048, 2048, &[]);
+    let policy = GQAReplayBucketPolicy::new(2048, 2048);
     for (histories, cu_tokens) in [
         (vec![0], vec![0, 1024]),
         (vec![4096], vec![0, 1024]),
@@ -576,7 +557,7 @@ fn test_map_capacity_preserves_token_domain_and_replay_padding() {
     };
     let variant = backend_sdpa::ExecutionVariant::sliced_kv(config, 64, 128, 1);
     let selector = Selector::new(backend_sdpa::Registry::from_variants(config, vec![variant]), 4, 32, 32);
-    let policy = GQAReplayBucketPolicy::new(4, 32, &[]);
+    let policy = GQAReplayBucketPolicy::new(4, 32);
     let selection = selector.select(&RequestShape::from_batch(&[1088], &[0, 1]), &policy, 2);
     let shape = selection.replay_shape();
     assert_eq!(selector.limits().max_tokens, 4);
@@ -612,7 +593,7 @@ fn test_partial_state_capacity_includes_replay_padding() {
     let selector = Selector::new(backend_sdpa::Registry::from_variants(config, vec![variant]), 4, 32, 18);
     selector.select(
         &RequestShape::from_batch(&[1088], &[0, 1]),
-        &GQAReplayBucketPolicy::new(4, 32, &[]),
+        &GQAReplayBucketPolicy::new(4, 32),
         2,
     );
 }
@@ -621,12 +602,12 @@ fn test_partial_state_capacity_includes_replay_padding() {
 #[should_panic(expected = "GQA active token count must not exceed the total token count")]
 fn test_total_token_count_rejects_active_overflow() {
     let request_shapes = RequestShape::from_batch(&[0], &[0, 5]);
-    selector().select(&request_shapes, &GQAReplayBucketPolicy::new(128, 128, &[]), 4);
+    selector().select(&request_shapes, &GQAReplayBucketPolicy::new(128, 128), 4);
 }
 
 #[test]
 #[should_panic(expected = "GQA total token count must not exceed the metadata capacity")]
 fn test_total_token_count_rejects_metadata_overflow() {
     let request_shapes = RequestShape::from_batch(&[0], &[0, 5]);
-    selector().select(&request_shapes, &GQAReplayBucketPolicy::new(128, 128, &[]), 129);
+    selector().select(&request_shapes, &GQAReplayBucketPolicy::new(128, 128), 129);
 }

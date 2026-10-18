@@ -104,7 +104,7 @@ impl QSASDPAMetadataBuffers {
                 dense_map_tasks,
                 dense_map_tasks,
             ),
-            dense_policy: GQAReplayBucketPolicy::new(shape.num_total_tokens, shape.num_total_tokens, &[]),
+            dense_policy: GQAReplayBucketPolicy::new(shape.num_total_tokens, shape.num_total_tokens),
             sparse_split_count: Cell::new(sparse_split_count),
         };
         buffers.sparse_cu_partial_outputs.write_typed(0, &sparse_offsets);
@@ -293,8 +293,6 @@ fn build_plan(
     };
 
     let num_dense_tasks = (dense_tasks.len() / TASK_TEMPLATE_FIELDS) as u32;
-    // The shared selector must fit QSA's one-task-per-dense-query allocation.
-    assert!(num_dense_tasks <= shape.num_total_tokens);
 
     let active = QSASDPAActive {
         num_active_tokens: num_tokens,

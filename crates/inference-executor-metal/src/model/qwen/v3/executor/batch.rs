@@ -67,10 +67,7 @@ impl Qwen3Executor {
 
     pub fn num_main_gqa_page_ids_per_block(&self) -> usize {
         let layout = self.gqa_page_table_layout;
-        let num_page_ids = (layout.num_gqa_layers as u64)
-            .checked_mul(layout.num_page_ids_per_block as u64)
-            .expect("qwen3 main GQA page IDs per block overflow");
-        usize::try_from(num_page_ids).expect("qwen3 main GQA page IDs per block must fit usize")
+        layout.num_gqa_layers as usize * layout.num_page_ids_per_block as usize
     }
 
     pub fn num_kv_page_ids_per_block(&self) -> usize {

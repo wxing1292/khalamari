@@ -559,8 +559,8 @@ impl Selector {
             .expect("GQA SDPA Map task-template count must fit u32");
         assert!(num_map_task_templates <= limits.max_map_task_templates);
         let num_tokens = request_shapes.iter().map(|shape| shape.num_q_tokens).sum();
-        let (num_total_tokens, num_total_q_token_ranges, mut num_total_map_task_templates) =
-            policy.capacities(num_total_tokens, num_q_token_ranges, num_map_task_templates);
+        let (num_total_q_token_ranges, mut num_total_map_task_templates) =
+            policy.capacity(num_q_token_ranges, num_map_task_templates);
         if direct_output {
             // One direct Map owns each Q range. Both padded domains must have the same extent.
             num_total_map_task_templates = num_total_q_token_ranges;

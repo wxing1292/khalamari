@@ -518,7 +518,7 @@ impl ReplayableDecoderModel for Qwen3Executor {
         };
         let runtime = MetalReplayRuntime::new(self.runtime.stream());
         let (recorded_key, _) = self.main_text_embed.record(&runtime, &input);
-        assert_eq!(
+        debug_assert_eq!(
             recorded_key, recorder.main_text_embed_key,
             "qwen3 MainTextEmbed replay input must match the prepared replay key"
         );
@@ -526,7 +526,7 @@ impl ReplayableDecoderModel for Qwen3Executor {
             .main_resource_embed
             .as_mut()
             .and_then(|main_resource_embed| main_resource_embed.record(&runtime, &self.token_hidden_input));
-        assert_eq!(
+        debug_assert_eq!(
             resource_embed_key, recorder.resource_embed_key,
             "Qwen3 ResourceEmbed replay input must match the prepared replay key"
         );
@@ -540,7 +540,7 @@ impl ReplayableDecoderModel for Qwen3Executor {
         model_batch_hidden: Self::ModelBatchHidden,
     ) -> Self::ModelBatchHidden {
         let microbatch = model_batch_req.microbatch();
-        assert!(
+        debug_assert!(
             Rc::ptr_eq(&model_batch_hidden, &self.token_hidden_input),
             "qwen3 Main must consume the MainTextEmbed hidden workspace"
         );
@@ -557,7 +557,7 @@ impl ReplayableDecoderModel for Qwen3Executor {
         };
         let runtime = MetalReplayRuntime::new(self.runtime.stream());
         let (recorded_key, _) = self.main.record(&runtime, &input);
-        assert_eq!(
+        debug_assert_eq!(
             recorded_key, recorder.main_key,
             "qwen3 Main replay input must match the prepared replay key"
         );
@@ -571,7 +571,7 @@ impl ReplayableDecoderModel for Qwen3Executor {
         model_batch_req: &Self::ModelBatchRequest,
         model_batch_hidden: &Self::ModelBatchHidden,
     ) -> Self::ModelBatchResponse {
-        assert!(
+        debug_assert!(
             Rc::ptr_eq(model_batch_hidden, &self.hidden_output),
             "qwen3 Output must consume the executor final-norm hidden workspace"
         );

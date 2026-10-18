@@ -310,7 +310,7 @@ impl FullMainFixture {
         .unwrap_or_else(|error| panic!("unable to construct the Qwen3.5 Main owner: {error}"));
         main.load_weights(device, store, config, bindings)
             .unwrap_or_else(|error| panic!("unable to load the Qwen3.5 Main owner: {error}"));
-        let num_total_tokens = main.num_total_tokens(shape.num_tokens);
+        let num_total_tokens = main.capacity(shape.num_tokens);
         gqa_state.prepare_metadata(&[0], &[shape.context], &[0, shape.num_tokens], num_total_tokens);
         prepare_gdn_metadata(&gdn_state, shape.num_tokens, num_total_tokens);
 

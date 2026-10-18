@@ -56,6 +56,8 @@ inside one executor. The executor updates active request-slot rows when it prepa
 The request-slot buffer capacity and each invocation's sampling-row capacity are independent. Qwen Main uses the
 compact output-row capacity defined in [`executor_qwen.md`](executor_qwen.md#replay-ownership).
 Each consumer validates its static capacity when it is initialized.
+Executor sampling adapters check workspace bounds when they record a replay.
+Cached submissions do not repeat these static workspace checks.
 Backend sampling components validate static shapes, buffer ranges, and dispatch products when they create invocations.
 Their `record` methods use these validated values.
 `add_replay_arguments` must receive the same shape used to record the replay.

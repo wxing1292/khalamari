@@ -142,11 +142,11 @@ impl BiDiBlockGQAKVCacheWriter {
             input.main_feature,
             0,
             input.weights.k.weight,
-            input.weights.k.weight_offset,
+            input.weights.k.weight_offset_bytes,
             input.weights.k.scales,
-            input.weights.k.scales_offset,
+            input.weights.k.scales_offset_bytes,
             input.weights.k.biases,
-            input.weights.k.biases_offset,
+            input.weights.k.biases_offset_bytes,
         )));
         recorder.record(ReplayOp::opaque(self.v.invoke(
             num_total_tokens,
@@ -156,11 +156,11 @@ impl BiDiBlockGQAKVCacheWriter {
             input.main_feature,
             0,
             input.weights.v.weight,
-            input.weights.v.weight_offset,
+            input.weights.v.weight_offset_bytes,
             input.weights.v.scales,
-            input.weights.v.scales_offset,
+            input.weights.v.scales_offset_bytes,
             input.weights.v.biases,
-            input.weights.v.biases_offset,
+            input.weights.v.biases_offset_bytes,
         )));
         recorder.record_with_barrier_before(ReplayOp::opaque(self.k_norm_rope.invoke(
             rms_norm_rope::Shape { num_total_tokens },

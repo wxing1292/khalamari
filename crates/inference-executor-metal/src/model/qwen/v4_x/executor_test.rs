@@ -15,6 +15,77 @@ use safetensors::tensor::serialize_to_file;
 
 use super::*;
 
+#[test]
+fn test_first8_cpu_reference_fixed_random_and_mixed_batch() {
+    for seed in [0, 0x4e45_5854_5245_4653] {
+        let fixture = Fixture::new(seed);
+        let mut model = fixture.executor();
+        let mut next_page = 0;
+        let mut a = Cache::new(0);
+        let mut b = Cache::new(1);
+        let tokens_a = [3, 7, 0, 11, 19, 23, 5];
+        let tokens_b = [29, 31, 37];
+        let req_a = a.request(&model, 0, &tokens_a, false, &mut next_page);
+        let req_b = b.request(&model, 0, &tokens_b, false, &mut next_page);
+        let outputs = execute(&mut model, 1, vec![req_a, req_b]);
+        for (slot, actual) in outputs {
+            let tokens = if slot == 0 {
+                tokens_a.as_slice()
+            } else {
+                tokens_b.as_slice()
+            };
+            let expected = reference::forward(&fixture.config, &model.bindings, &fixture.decoded, tokens);
+            assert_close(&actual, &expected, 0.025);
+        }
+        model.state.finish_commit();
+        model.gdn.finish_commit();
+    }
+}
+
+#[test]
+fn test_first8_chunked_decode_prefix_restore_and_hibernation() {
+    let fixture = Fixture::new(0x4341_4348_455f_4e58);
+    let mut model = fixture.executor();
+    let mut next_page = 0;
+    let mut full = Cache::new(0);
+    let mut chunked = Cache::new(1);
+    let tokens: Vec<u32> = (0..512).map(|i| (i * 17 % 251 + 1) as u32).collect();
+    let request = full.request(&model, 0, &tokens, false, &mut next_page);
+    let expected = execute(&mut model, 1, vec![request]).remove(0).1;
+    let request = chunked.request(&model, 0, &tokens[..509], false, &mut next_page);
+    execute(&mut model, 2, vec![request]);
+    let request = chunked.request(&model, 509, &tokens[509..], true, &mut next_page);
+    let actual = execute(&mut model, 3, vec![request]).remove(0).1;
+    assert_close(&actual, &expected[509 * 32..], 0.025);
+    let request = full.request(&model, 512, &[43], true, &mut next_page);
+    let expected = execute(&mut model, 4, vec![request]).remove(0).1;
+    model.state.finish_commit();
+    model.gdn.finish_commit();
+    model.reset_req_slots(&[1]);
+    let mut restored = full.clone();
+    restored.slot = 1;
+    restored.kv.truncate(1);
+    restored.state.truncate(1);
+    let request = restored.request(&model, 512, &[43], true, &mut next_page);
+    let actual = execute(&mut model, 5, vec![request]).remove(0).1;
+    assert_close(&actual, &expected, 0.025);
+    let request = restored.request(&model, 513, &[47, 53], false, &mut next_page);
+    let expected = execute(&mut model, 6, vec![request]).remove(0).1;
+    let snapshot = fixture.path.join("state");
+    let plan =
+        ExecutorHibernationPlan::selected(std::iter::once(0..1).collect(), std::iter::once(0..next_page).collect());
+    model.clear_replay_cache();
+    model.unload_state(&snapshot, &plan).unwrap();
+    model.unload_weights();
+    model.load_weights().unwrap();
+    model.load_state(&snapshot, &plan).unwrap();
+    let request = full.request(&model, 513, &[47, 53], false, &mut next_page);
+    let after = execute(&mut model, 7, vec![request]).remove(0).1;
+    assert_close(&after, &expected, 0.025);
+    model.state.finish_commit();
+    model.gdn.finish_commit();
+}
+
 static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
 struct Tensor {
     dtype: safetensors::Dtype,
@@ -174,6 +245,14 @@ impl Fixture {
             f.tensors.iter().map(|(name, tensor)| (name.as_str(), tensor)),
             None,
             &f.path.join("model.safetensors"),
+        )
+        .unwrap();
+        std::fs::write(
+            f.path.join("model.safetensors.index.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "weight_map": f.tensors.keys().map(|name| (name, "model.safetensors")).collect::<BTreeMap<_, _>>()
+            }))
+            .unwrap(),
         )
         .unwrap();
         f
@@ -394,75 +473,4 @@ fn assert_close(actual: &[f32], expected: &[f32], tolerance: f32) {
             "index={i} actual={a} expected={e}"
         );
     }
-}
-
-#[test]
-fn test_first8_cpu_reference_fixed_random_and_mixed_batch() {
-    for seed in [0, 0x4e45_5854_5245_4653] {
-        let fixture = Fixture::new(seed);
-        let mut model = fixture.executor();
-        let mut next_page = 0;
-        let mut a = Cache::new(0);
-        let mut b = Cache::new(1);
-        let tokens_a = [3, 7, 0, 11, 19, 23, 5];
-        let tokens_b = [29, 31, 37];
-        let req_a = a.request(&model, 0, &tokens_a, false, &mut next_page);
-        let req_b = b.request(&model, 0, &tokens_b, false, &mut next_page);
-        let outputs = execute(&mut model, 1, vec![req_a, req_b]);
-        for (slot, actual) in outputs {
-            let tokens = if slot == 0 {
-                tokens_a.as_slice()
-            } else {
-                tokens_b.as_slice()
-            };
-            let expected = reference::forward(&fixture.config, &model.bindings, &fixture.decoded, tokens);
-            assert_close(&actual, &expected, 0.025);
-        }
-        model.state.finish_commit();
-        model.gdn.finish_commit();
-    }
-}
-
-#[test]
-fn test_first8_chunked_decode_prefix_restore_and_hibernation() {
-    let fixture = Fixture::new(0x4341_4348_455f_4e58);
-    let mut model = fixture.executor();
-    let mut next_page = 0;
-    let mut full = Cache::new(0);
-    let mut chunked = Cache::new(1);
-    let tokens: Vec<u32> = (0..512).map(|i| (i * 17 % 251 + 1) as u32).collect();
-    let request = full.request(&model, 0, &tokens, false, &mut next_page);
-    let expected = execute(&mut model, 1, vec![request]).remove(0).1;
-    let request = chunked.request(&model, 0, &tokens[..509], false, &mut next_page);
-    execute(&mut model, 2, vec![request]);
-    let request = chunked.request(&model, 509, &tokens[509..], true, &mut next_page);
-    let actual = execute(&mut model, 3, vec![request]).remove(0).1;
-    assert_close(&actual, &expected[509 * 32..], 0.025);
-    let request = full.request(&model, 512, &[43], true, &mut next_page);
-    let expected = execute(&mut model, 4, vec![request]).remove(0).1;
-    model.state.finish_commit();
-    model.gdn.finish_commit();
-    model.reset_req_slots(&[1]);
-    let mut restored = full.clone();
-    restored.slot = 1;
-    restored.kv.truncate(1);
-    restored.state.truncate(1);
-    let request = restored.request(&model, 512, &[43], true, &mut next_page);
-    let actual = execute(&mut model, 5, vec![request]).remove(0).1;
-    assert_close(&actual, &expected, 0.025);
-    let request = restored.request(&model, 513, &[47, 53], false, &mut next_page);
-    let expected = execute(&mut model, 6, vec![request]).remove(0).1;
-    let snapshot = fixture.path.join("state");
-    let plan =
-        ExecutorHibernationPlan::selected(std::iter::once(0..1).collect(), std::iter::once(0..next_page).collect());
-    model.clear_replay_cache();
-    model.unload_state(&snapshot, &plan).unwrap();
-    model.unload_weights();
-    model.load_weights().unwrap();
-    model.load_state(&snapshot, &plan).unwrap();
-    let request = full.request(&model, 513, &[47, 53], false, &mut next_page);
-    let after = execute(&mut model, 7, vec![request]).remove(0).1;
-    assert_close(&after, &expected, 0.025);
-    model.state.finish_commit();
-    model.gdn.finish_commit();
 }

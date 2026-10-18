@@ -29,13 +29,8 @@ pub struct UnembedConfig {
 
 impl UnembedConfig {
     pub fn validate(self) {
-        validate_quantized_unembedding(
-            self.max_tokens,
-            self.vocab_size,
-            self.hidden_dim,
-            self.group_size,
-            self.bits,
-        );
+        assert!(self.max_tokens > 0);
+        self.compute_config().validate();
         assert_eq!(self.input_dtype, Dtype::Bfloat16);
         assert_eq!(self.output_dtype, Dtype::Bfloat16);
         assert_eq!(
@@ -47,11 +42,11 @@ impl UnembedConfig {
 
     pub fn logits_bytes(self) -> usize {
         self.validate();
-        self.affine_config()
+        self.compute_config()
             .output_bytes(self.max_tokens.try_into().expect("unembed max_tokens must fit i32"))
     }
 
-    fn affine_config(self) -> affine_quantized::Config {
+    fn compute_config(self) -> affine_quantized::Config {
         affine_quantized::Config {
             n: self.vocab_size.try_into().expect("unembed vocab_size must fit i32"),
             k: self.hidden_dim.try_into().expect("unembed hidden_dim must fit i32"),
@@ -66,7 +61,7 @@ impl UnembedConfig {
 
 pub struct Unembed {
     config: UnembedConfig,
-    matmul: Rc<affine_quantized::Matmul>,
+    compute: Rc<affine_quantized::Matmul>,
     weights: Option<UnembedWeightOwner>,
 }
 
@@ -93,10 +88,10 @@ pub struct UnembedInput<'a> {
 impl Unembed {
     pub fn new(device: &Device, config: UnembedConfig) -> Self {
         config.validate();
-        let affine_config = config.affine_config();
+        let affine_config = config.compute_config();
         Self {
             config,
-            matmul: Rc::new(affine_quantized::Matmul::new(device, affine_config)),
+            compute: Rc::new(affine_quantized::Matmul::new(device, affine_config)),
             weights: None,
         }
     }
@@ -111,10 +106,9 @@ impl Unembed {
         self.weights = Some(UnembedWeightOwner::Independent(Rc::new(UnembedWeights::load(
             device,
             store,
-            self.config.affine_config(),
+            self.config.compute_config(),
             bindings,
         )?)));
-        self.validate_weights();
         Ok(())
     }
 
@@ -130,7 +124,7 @@ impl Unembed {
     }
 
     fn validate_weights(&self) {
-        let config = self.config.affine_config();
+        let config = self.config.compute_config();
         let (weight, scales, biases) = self.weight_buffers();
         assert_eq!(weight.len_bytes(), config.weight_bytes());
         assert_eq!(scales.len_bytes(), config.scale_or_bias_bytes());
@@ -165,18 +159,18 @@ impl Unembed {
         config.validate();
         Self {
             config,
-            matmul: Rc::clone(&self.matmul),
+            compute: Rc::clone(&self.compute),
             weights: self.weights.clone(),
         }
     }
 
     pub fn replay_topology(&self, num_total_rows: u32) -> affine_quantized::KernelKind {
         self.validate_num_rows(num_total_rows);
-        self.matmul.topology(num_total_rows)
+        self.compute.topology(num_total_rows)
     }
 
     pub fn replay_topology_boundaries(&self) -> Box<[u32]> {
-        self.matmul.topology_boundaries()
+        self.compute.topology_boundaries()
     }
 
     fn validate_num_rows(&self, num_rows: u32) {
@@ -200,7 +194,7 @@ impl ReplayLayer for Unembed {
     {
         self.validate_num_rows(input.num_total_rows);
         let (weight, scales, biases) = self.weight_buffers();
-        let invocation = self.matmul.invoke(
+        let invocation = self.compute.invoke(
             input.num_total_rows,
             input.num_active_rows,
             input.logits,
@@ -256,21 +250,12 @@ fn validate_len(name: &str, actual: usize, expected: usize) -> Result<(), ModelE
     Ok(())
 }
 
-fn validate_quantized_unembedding(max_tokens: u32, vocab_size: u32, hidden_dim: u32, group_size: u32, bits: u32) {
-    assert!(max_tokens > 0);
-    assert!(vocab_size > 0);
-    assert!(hidden_dim > 0);
-    assert!(matches!(group_size, 32 | 64 | 128));
-    assert!(matches!(bits, 2 | 3 | 4 | 6 | 8));
-    assert_eq!(hidden_dim % group_size, 0);
-}
-
 #[cfg(test)]
 pub fn fixture_unembed(device: &Device, config: UnembedConfig) -> (Unembed, Vec<u8>, Vec<f32>, Vec<f32>) {
     use half::bf16;
 
     config.validate();
-    let affine_config = config.affine_config();
+    let affine_config = config.compute_config();
     let weight_values = (0..affine_config.weight_bytes())
         .map(|index| ((index * 17 + 3) % 31) as u8)
         .collect::<Vec<_>>();
@@ -290,7 +275,7 @@ pub fn fixture_unembed(device: &Device, config: UnembedConfig) -> (Unembed, Vec<
     };
     let unembed = Unembed {
         config,
-        matmul: Rc::new(affine_quantized::Matmul::new(device, affine_config)),
+        compute: Rc::new(affine_quantized::Matmul::new(device, affine_config)),
         weights: Some(UnembedWeightOwner::Independent(Rc::new(UnembedWeights {
             weight: Buffer::from_slice(device, &weight_values),
             scales: bf16_buffer(&scale_values),

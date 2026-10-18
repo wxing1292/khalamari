@@ -30,25 +30,26 @@ impl QuantizedAffineLayout {
     }
 }
 
+/// Quantized affine operands with byte offsets from the start of each buffer.
 #[derive(Clone, Copy)]
 pub struct QuantizedAffineWeights<'a> {
     pub weight: &'a Buffer,
-    pub weight_offset: usize,
+    pub weight_offset_bytes: usize,
     pub scales: &'a Buffer,
-    pub scales_offset: usize,
+    pub scales_offset_bytes: usize,
     pub biases: &'a Buffer,
-    pub biases_offset: usize,
+    pub biases_offset_bytes: usize,
 }
 
 impl<'a> QuantizedAffineWeights<'a> {
     pub fn new(weight: &'a Buffer, scales: &'a Buffer, biases: &'a Buffer) -> Self {
         Self {
             weight,
-            weight_offset: 0,
+            weight_offset_bytes: 0,
             scales,
-            scales_offset: 0,
+            scales_offset_bytes: 0,
             biases,
-            biases_offset: 0,
+            biases_offset_bytes: 0,
         }
     }
 }

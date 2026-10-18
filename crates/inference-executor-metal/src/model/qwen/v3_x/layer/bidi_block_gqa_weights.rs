@@ -4,6 +4,7 @@ use inference_backend_metal::metal::Dtype;
 use inference_executor_core::attn::UngatedGQACore;
 use inference_executor_core::checkpoint::QuantizedTensorBindings;
 use inference_executor_core::checkpoint::TensorMap;
+use inference_executor_core::checkpoint::remove_tensor;
 use inference_executor_core::def::ModelExecutorError;
 use inference_executor_core::model::qwen::v3_x::weight_layout::Qwen3xGQAWeightBindings;
 
@@ -12,10 +13,10 @@ use crate::attn::bidi_block_gqa::backend::BiDiBlockGQAWeights;
 use crate::checkpoint::SafeTensorStore;
 use crate::def::quantized_affine::QuantizedAffineLayout;
 use crate::def::quantized_affine::QuantizedAffineWeights;
+use crate::model::qwen::v3_x::weight::affine_parameter_safetensors_dtype;
 use crate::model::qwen::v3_x::weight::concat_bytes;
 use crate::model::qwen::v3_x::weight::remove_norm_weight;
 use crate::model::qwen::v3_x::weight::remove_quant_weight;
-use crate::model::qwen::v3_x::weight::remove_typed_tensor;
 use crate::model::qwen::v3_x::weight::validate_len;
 
 pub struct Qwen3xBiDiBlockGQAWeightBuffers {
@@ -34,9 +35,9 @@ pub struct Qwen3xBiDiBlockGQAWeightBuffers {
 
 #[derive(Clone, Copy)]
 struct AffineOffsets {
-    weight: usize,
-    scales: usize,
-    biases: usize,
+    weight_offset_bytes: usize,
+    scales_offset_bytes: usize,
+    biases_offset_bytes: usize,
 }
 
 struct AffineBytes {
@@ -74,27 +75,27 @@ impl Qwen3xBiDiBlockGQAWeightBuffers {
         let k = remove_affine(tensors, &bindings.k, metal.k, core.k_dim(), core.hidden_dim)?;
         let v = remove_affine(tensors, &bindings.v, metal.v, core.v_dim(), core.hidden_dim)?;
         let q_offsets = AffineOffsets {
-            weight: 0,
-            scales: 0,
-            biases: 0,
+            weight_offset_bytes: 0,
+            scales_offset_bytes: 0,
+            biases_offset_bytes: 0,
         };
         let k_offsets = AffineOffsets {
-            weight: q.weight.len(),
-            scales: q.scales.len(),
-            biases: q.biases.len(),
+            weight_offset_bytes: q.weight.len(),
+            scales_offset_bytes: q.scales.len(),
+            biases_offset_bytes: q.biases.len(),
         };
         let v_offsets = AffineOffsets {
-            weight: q
+            weight_offset_bytes: q
                 .weight
                 .len()
                 .checked_add(k.weight.len())
                 .expect("BiDiBlockGQA V weight offset must fit usize"),
-            scales: q
+            scales_offset_bytes: q
                 .scales
                 .len()
                 .checked_add(k.scales.len())
                 .expect("BiDiBlockGQA V scale offset must fit usize"),
-            biases: q
+            biases_offset_bytes: q
                 .biases
                 .len()
                 .checked_add(k.biases.len())
@@ -146,11 +147,11 @@ impl Qwen3xBiDiBlockGQAWeightBuffers {
     fn qkv_weights(&self, offsets: AffineOffsets) -> QuantizedAffineWeights<'_> {
         QuantizedAffineWeights {
             weight: &self.qkv_weight,
-            weight_offset: offsets.weight,
+            weight_offset_bytes: offsets.weight_offset_bytes,
             scales: &self.qkv_scales,
-            scales_offset: offsets.scales,
+            scales_offset_bytes: offsets.scales_offset_bytes,
             biases: &self.qkv_biases,
-            biases_offset: offsets.biases,
+            biases_offset_bytes: offsets.biases_offset_bytes,
         }
     }
 }
@@ -164,9 +165,9 @@ fn remove_affine(
 ) -> Result<AffineBytes, ModelExecutorError> {
     let config = layout.config(output_dim, input_dim, Dtype::Bfloat16);
     let weight = remove_quant_weight(tensors, &bindings.weight)?;
-    let tensor_dtype = safetensors_dtype(layout.scale_bias_dtype);
-    let scales = remove_typed_tensor(tensors, &bindings.scales, tensor_dtype)?.into_data();
-    let biases = remove_typed_tensor(tensors, &bindings.biases, tensor_dtype)?.into_data();
+    let tensor_dtype = affine_parameter_safetensors_dtype(layout.scale_bias_dtype);
+    let scales = remove_tensor(tensors, &bindings.scales, tensor_dtype)?.into_data();
+    let biases = remove_tensor(tensors, &bindings.biases, tensor_dtype)?.into_data();
     validate_len(
         &format!("{} weight", bindings.weight),
         weight.len(),
@@ -183,12 +184,4 @@ fn remove_affine(
         config.scale_or_bias_bytes(),
     )?;
     Ok(AffineBytes { weight, scales, biases })
-}
-
-fn safetensors_dtype(dtype: Dtype) -> safetensors::Dtype {
-    match dtype {
-        Dtype::Bfloat16 => safetensors::Dtype::BF16,
-        Dtype::Float32 => safetensors::Dtype::F32,
-        dtype => panic!("unsupported affine parameter dtype {dtype:?}"),
-    }
 }

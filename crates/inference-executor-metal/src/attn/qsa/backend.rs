@@ -131,12 +131,14 @@ impl QSAActive {
         }
     }
 
-    pub fn add_replay_arguments(self, arguments: &mut ReplayArguments) {
+    pub fn add_replay_arguments(self, indexer_shape: qsa_indexer::Shape, top_k: u32, arguments: &mut ReplayArguments) {
         self.sdpa.add_replay_arguments(arguments);
-        arguments.set_u32(
-            QSA_NUM_ACTIVE_SCORE_TASK_TEMPLATES,
-            self.num_active_score_task_templates,
-        );
+        if indexer_shape.num_total_groups > top_k {
+            arguments.set_u32(
+                QSA_NUM_ACTIVE_SCORE_TASK_TEMPLATES,
+                self.num_active_score_task_templates,
+            );
+        }
     }
 }
 

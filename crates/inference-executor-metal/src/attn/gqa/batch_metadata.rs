@@ -13,39 +13,33 @@ const NUM_SDPA_MAP_TASK_TEMPLATE_FIELDS: usize = 3;
 const NUM_Q_TOKEN_RANGE_FIELDS: usize = 2;
 const NUM_VISIBLE_KV_TOKEN_RANGE_FIELDS: usize = 2;
 
+/// Buckets SDPA metadata dimensions within a model-selected token capacity.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GQAReplayBucketPolicy {
-    tokens: ReplayBucketPolicy,
-    q_token_tiles: ReplayBucketPolicy,
-    kv_splits: ReplayBucketPolicy,
+    q_token_ranges: ReplayBucketPolicy,
+    map_task_templates: ReplayBucketPolicy,
 }
 
 impl GQAReplayBucketPolicy {
-    pub fn new(max_tokens: u32, max_map_task_templates: u32, token_topology_boundaries: &[u32]) -> Self {
+    pub fn new(max_tokens: u32, max_map_task_templates: u32) -> Self {
         Self {
-            tokens: ReplayBucketPolicy::with_topology_boundaries(max_tokens, token_topology_boundaries),
-            q_token_tiles: ReplayBucketPolicy::new(max_tokens),
-            kv_splits: ReplayBucketPolicy::new(max_map_task_templates),
+            q_token_ranges: ReplayBucketPolicy::new(max_tokens),
+            map_task_templates: ReplayBucketPolicy::new(max_map_task_templates),
         }
     }
 
     pub fn max_tokens(&self) -> u32 {
-        self.tokens.max_capacity()
+        self.q_token_ranges.max_capacity()
     }
 
     pub fn max_map_task_templates(&self) -> u32 {
-        self.kv_splits.max_capacity()
+        self.map_task_templates.max_capacity()
     }
 
-    pub fn kv_split_capacity(&self, num_kv_splits: u32) -> u32 {
-        self.kv_splits.capacity(num_kv_splits)
-    }
-
-    pub fn capacities(&self, num_total_tokens: u32, num_q_token_tiles: u32, num_kv_splits: u32) -> (u32, u32, u32) {
+    pub fn capacity(&self, num_active_q_token_ranges: u32, num_active_map_task_templates: u32) -> (u32, u32) {
         (
-            num_total_tokens,
-            self.q_token_tiles.capacity(num_q_token_tiles),
-            self.kv_splits.capacity(num_kv_splits),
+            self.q_token_ranges.capacity(num_active_q_token_ranges),
+            self.map_task_templates.capacity(num_active_map_task_templates),
         )
     }
 }
@@ -154,12 +148,7 @@ impl GQAMetadataBuffers {
                 let flat_token_index = token_indices[request_index] + q_token_index_in_request;
                 req_slots_by_token.push(req_slots[request_index]);
                 flat_token_indices.push(flat_token_index);
-                visible_kv_token_ranges.extend_from_slice(&[
-                    0,
-                    flat_token_index
-                        .checked_add(1)
-                        .expect("GQA visible K/V-token-range end must fit u32"),
-                ]);
+                visible_kv_token_ranges.extend_from_slice(&[0, flat_token_index + 1]);
             }
         }
         assert_eq!(req_slots_by_token.len(), replay_shape.num_tokens as usize);
@@ -296,7 +285,7 @@ mod tests {
             32,
             32,
         );
-        let policy = GQAReplayBucketPolicy::new(4, 32, &[]);
+        let policy = GQAReplayBucketPolicy::new(4, 32);
         let selection = selector.select(&RequestShape::from_batch(&[1088], &[0, 1]), &policy, 2);
         let shape = metadata.update(&[1], &[1088], &[0, 1], &selection);
         assert_eq!(metadata.max_tokens(), 4);
@@ -327,7 +316,7 @@ mod tests {
         let device = Device::system_default();
         let metadata = GQAMetadataBuffers::new(&device, 8, 8);
         let shapes = RequestShape::from_batch(&[7, 20], &[0, 2, 5]);
-        let policy = GQAReplayBucketPolicy::new(8, 8, &[]);
+        let policy = GQAReplayBucketPolicy::new(8, 8);
         let single = backend_sdpa::ExecutionVariant::sliced_kv(config(), 8, 32, 1);
         let single_selection = selector(8, single).select(&shapes, &policy, 5);
 
@@ -404,7 +393,7 @@ mod tests {
             .write_typed(0, &[0xC7C7_C7C7_u32; 13]);
         let variant = backend_sdpa::ExecutionVariant::sliced_q_per_head(config(), 8, 8, 1);
         let selector = selector(12, variant);
-        let policy = GQAReplayBucketPolicy::new(12, 12, &[]);
+        let policy = GQAReplayBucketPolicy::new(12, 12);
         let selection = selector.select(&RequestShape::from_batch(&[0, 0, 0], &[0, 4, 8, 9]), &policy, 12);
 
         let shape = metadata.update(&[2, 5, 7], &[0, 0, 0], &[0, 4, 8, 9], &selection);

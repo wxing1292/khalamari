@@ -248,11 +248,11 @@ impl PLE {
             input.embedding,
             0,
             weights.weight,
-            weights.weight_offset,
+            weights.weight_offset_bytes,
             weights.scales,
-            weights.scales_offset,
+            weights.scales_offset_bytes,
             weights.biases,
-            weights.biases_offset,
+            weights.biases_offset_bytes,
         )));
         let weights = input.weights.value;
         recorder.record(ReplayOp::opaque(self.value.invoke(
@@ -263,11 +263,11 @@ impl PLE {
             input.embedding,
             0,
             weights.weight,
-            weights.weight_offset,
+            weights.weight_offset_bytes,
             weights.scales,
-            weights.scales_offset,
+            weights.scales_offset_bytes,
             weights.biases,
-            weights.biases_offset,
+            weights.biases_offset_bytes,
         )));
         recorder.record_with_barrier_before(ReplayOp::opaque(self.compute.norm(
             num_total_tokens,

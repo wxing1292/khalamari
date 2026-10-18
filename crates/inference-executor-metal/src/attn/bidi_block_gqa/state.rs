@@ -19,14 +19,13 @@ use crate::attn::bidi_block_gqa::capacity::BiDiBlockGQACapacity;
 use crate::attn::bidi_block_gqa::kv_cache_write::BiDiBlockGQAKVCacheWriteScratch;
 use crate::attn::bidi_block_gqa::metadata::BiDiBlockGQAMetadataBuffers;
 use crate::attn::bidi_block_gqa::scratch::BiDiBlockGQAScratch;
-use crate::attn::bidi_block_gqa::sdpa::Selection as SDPASelection;
 use crate::attn::bidi_block_gqa::sdpa::Selector as SDPASelector;
 use crate::attn::gqa::request_page_table::GQARequestPageTable;
 
 mod file_io;
 
 pub struct BiDiBlockGQAState {
-    sdpa_selection: SDPASelection,
+    sdpa_execution: backend_sdpa::ExecutionVariant,
     bidi_block_scratch: Option<Rc<BiDiBlockGQAScratch>>,
     kv_cache_write_scratch: Option<Rc<BiDiBlockGQAKVCacheWriteScratch>>,
     request_page_table: Option<Rc<GQARequestPageTable>>,
@@ -36,7 +35,6 @@ pub struct BiDiBlockGQAState {
     capacity: BiDiBlockGQACapacity,
     max_context_tokens: usize,
     page_table_layout: GQAPageTableLayout,
-    num_tokens_per_page: usize,
     num_cache_pages: usize,
 }
 
@@ -71,11 +69,10 @@ impl BiDiBlockGQAState {
         assert_eq!(sdpa_config.num_kv_heads as usize, attention.num_kv_heads);
         assert_eq!(sdpa_config.head_dim as usize, attention.head_dim);
         let sdpa_selection = SDPASelector::new(backend_sdpa::Registry::new(sdpa_config), capacity).select();
-        let sdpa_execution = sdpa_selection.execution();
+        let sdpa_execution = sdpa_selection.variant();
         let gqa_capacity = sdpa_selection.capacity();
-        let num_tokens_per_page = sdpa_config.tokens_per_page as usize;
         Self {
-            sdpa_selection,
+            sdpa_execution,
             bidi_block_scratch: Some(Rc::new(BiDiBlockGQAScratch::new(
                 device,
                 &core,
@@ -95,13 +92,12 @@ impl BiDiBlockGQAState {
             capacity: gqa_capacity,
             max_context_tokens,
             page_table_layout,
-            num_tokens_per_page,
             num_cache_pages,
         }
     }
 
     pub fn num_tokens_per_page(&self) -> usize {
-        self.num_tokens_per_page
+        self.sdpa_config.tokens_per_page as usize
     }
 
     pub fn max_sdpa_map_task_templates(&self) -> u32 {
@@ -134,16 +130,13 @@ impl BiDiBlockGQAState {
         assert_eq!(attention.num_kv_heads, shared.num_kv_heads);
         assert_eq!(attention.scale, shared.scale);
         assert_eq!(metal.io_dtype, self.sdpa_config.io_dtype);
-        BiDiBlockGQA::new(device, core, metal, self.sdpa_selection.execution())
+        BiDiBlockGQA::new(device, core, metal, self.sdpa_execution)
     }
 
     pub fn write_page_ids(&self, req_slot: u32, block_index: usize, page_ids: &[u32]) {
         let request_page_table = self.request_page_table_ref();
         let num_page_ids_per_layer = request_page_table.num_page_ids_per_block();
-        let expected_page_ids = request_page_table
-            .num_layers()
-            .checked_mul(num_page_ids_per_layer)
-            .expect("BiDiBlockGQA page-ID count must fit usize");
+        let expected_page_ids = request_page_table.num_layers() * num_page_ids_per_layer;
         assert_eq!(
             page_ids.len(),
             expected_page_ids,
@@ -162,12 +155,8 @@ impl BiDiBlockGQAState {
 
     pub fn read_page_ids(&self, req_slot: u32, block_index: usize) -> Vec<u32> {
         let request_page_table = self.request_page_table_ref();
-        let mut page_ids = Vec::with_capacity(
-            request_page_table
-                .num_layers()
-                .checked_mul(request_page_table.num_page_ids_per_block())
-                .expect("BiDiBlockGQA page-ID count must fit usize"),
-        );
+        let mut page_ids =
+            Vec::with_capacity(request_page_table.num_layers() * request_page_table.num_page_ids_per_block());
         for layer_index in 0..request_page_table.num_layers() {
             page_ids.extend(request_page_table.read_page_ids(req_slot, layer_index, block_index));
         }
@@ -244,7 +233,7 @@ impl BiDiBlockGQAState {
         self.metadata = Some(BiDiBlockGQAMetadataBuffers::new(
             device,
             self.capacity,
-            self.sdpa_selection.execution(),
+            self.sdpa_execution,
         ));
     }
 

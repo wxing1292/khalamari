@@ -17,7 +17,7 @@ enum Qwen4xAttention {
     },
 }
 
-const MAIN_TOKENS: ReplayParameterKey = ReplayParameterKey::new("qwen4x.main.num_active_tokens");
+const QWEN4X_MAIN_NUM_ACTIVE_TOKENS: ReplayParameterKey = ReplayParameterKey::new("qwen4x.main.num_active_tokens");
 
 pub struct Qwen4xMain {
     layers: Vec<Qwen4xLayer>,
@@ -30,10 +30,10 @@ pub struct Qwen4xMain {
     channels: Buffer,
     expand: inference_backend_metal::operators::repeat_rows::Compute,
     qsa_scratch: crate::attn::qsa::scratch::QSAScratch,
-    policy: ReplayBucketPolicy,
+    replay_bucket_policy: ReplayBucketPolicy,
 }
 
-pub struct Qwen4xMainInput<'a> {
+pub struct Qwen4xMainArgs<'a> {
     pub hidden_input: &'a Buffer,
     pub hidden_output: &'a Buffer,
     pub pages: &'a Buffer,
@@ -146,20 +146,20 @@ impl Qwen4xMain {
         };
         Ok(Self {
             layers,
-            residual: GatedResidual::new(device, gr_core(config)),
+            residual: GatedResidual::new(device, core),
             mixer: None,
-            gr_scratch: GatedResidualScratch::new(device, gr_core(config), max_tokens as usize),
+            gr_scratch: GatedResidualScratch::new(device, core, max_tokens as usize),
             mixed: bf16(hidden),
             branch: bf16(hidden),
             gate: bf16(config.text_config.hc_count),
-            channels: bf16(gr_core(config).residual_dim()),
+            channels: bf16(core.residual_dim()),
             expand: inference_backend_metal::operators::repeat_rows::Compute::new(
                 device,
                 hidden as u32,
                 config.text_config.hc_count as u32,
             ),
             qsa_scratch: qsa_scratch.expect("Qwen4x requires QSA layers"),
-            policy: ReplayBucketPolicy::with_topology_boundaries(max_tokens, &boundaries),
+            replay_bucket_policy: ReplayBucketPolicy::with_topology_boundaries(max_tokens, &boundaries),
         })
     }
     pub fn load_weights(
@@ -223,22 +223,22 @@ impl Qwen4xMain {
             }
         }
     }
-    pub fn detach_gdn(&mut self) {
+    pub fn unload_state(&mut self) {
         for layer in &mut self.layers {
             if let Qwen4xAttention::GDN(gdn) = &mut layer.attention {
                 gdn.unload_state();
             }
         }
     }
-    pub fn attach_gdn(&mut self, state: &Qwen3xGDNState) {
+    pub fn load_state(&mut self, state: &Qwen3xGDNState) {
         for layer in &mut self.layers {
             if let Qwen4xAttention::GDN(gdn) = &mut layer.attention {
                 gdn.load_state(state);
             }
         }
     }
-    pub fn num_total_tokens(&self, active: u32) -> u32 {
-        self.policy.capacity(active)
+    pub fn capacity(&self, num_active_tokens: u32) -> u32 {
+        self.replay_bucket_policy.capacity(num_active_tokens)
     }
     pub fn ple_scratch(&self, index: usize) -> &PLEScratch {
         &self
@@ -249,45 +249,53 @@ impl Qwen4xMain {
             .expect("PLE ordinal must exist")
             .scratch
     }
-    pub fn arguments(&self, input: &Qwen4xMainInput<'_>) -> ReplayArguments {
-        let mut args = ReplayArguments::new().with_u32(MAIN_TOKENS, input.state.batch().active.sdpa.num_active_tokens);
-        input.state.batch().active.add_replay_arguments(&mut args);
-        input.gdn.add_replay_arguments(&mut args);
+    pub fn replay_arguments(&self, input: &Qwen4xMainArgs<'_>) -> ReplayArguments {
+        let batch = input.state.batch();
+        let mut args =
+            ReplayArguments::new().with_u32(QWEN4X_MAIN_NUM_ACTIVE_TOKENS, batch.active.sdpa.num_active_tokens);
+        batch
+            .active
+            .add_replay_arguments(batch.indexer_shape, batch.sdpa.config().top_k, &mut args);
+        input.gdn.add_private_replay_arguments(&mut args);
         args
     }
     fn read<'a, R: Recorder<'a, Operator = ReplayOp<'a>>>(
         &'a self,
-        r: &mut R,
+        recorder: &mut R,
         weights: &'a GRWeights,
-        total: u32,
-        active: ReplayU32,
-        write: bool,
+        num_total_tokens: u32,
+        num_active_tokens: ReplayU32,
         output: &'a Buffer,
     ) {
         self.residual.read(
-            r,
+            recorder,
             ReadInput {
-                num_total_tokens: total,
-                num_active_tokens: active,
+                num_total_tokens,
+                num_active_tokens,
                 residual: &self.channels,
                 hidden_state: output,
                 scratch: &self.gr_scratch,
                 weights: weights.read(),
-                write_gate: write.then(|| {
+                write_gate: weights.write.as_ref().map(|weight| {
                     gated_residual::WriteGate {
-                        weight: weights.write.as_ref().unwrap(),
+                        weight,
                         output: &self.gate,
                     }
                 }),
             },
         );
     }
-    fn write<'a, R: Recorder<'a, Operator = ReplayOp<'a>>>(&'a self, r: &mut R, total: u32, active: ReplayU32) {
+    fn write<'a, R: Recorder<'a, Operator = ReplayOp<'a>>>(
+        &'a self,
+        recorder: &mut R,
+        num_total_tokens: u32,
+        num_active_tokens: ReplayU32,
+    ) {
         self.residual.write(
-            r,
+            recorder,
             WriteInput {
-                num_total_tokens: total,
-                num_active_tokens: active,
+                num_total_tokens,
+                num_active_tokens,
                 residual: &self.channels,
                 gate: &self.gate,
                 hidden_state: &self.branch,
@@ -298,12 +306,12 @@ impl Qwen4xMain {
 }
 impl ReplayComponent for Qwen4xMain {
     type Key = Qwen4xMainReplayKey;
-    type Input<'a> = Qwen4xMainInput<'a>;
+    type Input<'a> = Qwen4xMainArgs<'a>;
     fn replay_key(&self, input: &Self::Input<'_>) -> Self::Key {
         let batch = input.state.batch();
-        let total = batch.sdpa.shape().num_total_tokens;
+        let num_total_tokens = batch.sdpa.shape().num_total_tokens;
         Qwen4xMainReplayKey {
-            num_total_tokens: total,
+            num_total_tokens,
             num_total_gdn_requests: input.gdn.metadata().replay_shape().num_total_reqs,
             gdn: input.gdn.replay_topology(),
             sdpa: batch.sdpa.shape(),
@@ -313,16 +321,20 @@ impl ReplayComponent for Qwen4xMain {
                 .iter()
                 .filter_map(|l| {
                     match &l.attention {
-                        Qwen4xAttention::QSA { backend, .. } => Some(backend.replay_topology(total)),
+                        Qwen4xAttention::QSA { backend, .. } => Some(backend.replay_topology(num_total_tokens)),
                         _ => None,
                     }
                 })
                 .collect(),
-            mlp: self.layers.iter().map(|l| l.mlp.replay_topology(total)).collect(),
+            mlp: self
+                .layers
+                .iter()
+                .map(|l| l.mlp.replay_topology(num_total_tokens))
+                .collect(),
             ple: self
                 .layers
                 .iter()
-                .filter_map(|l| l.ple.as_ref().map(|p| p.compute.replay_topology(total)))
+                .filter_map(|l| l.ple.as_ref().map(|p| p.compute.replay_topology(num_total_tokens)))
                 .collect(),
             lookup: self
                 .layers
@@ -337,44 +349,57 @@ impl ReplayComponent for Qwen4xMain {
                         .iter()
                         .map(ResidentGroup::shard)
                         .collect();
-                    p.compute.lookup_topology(total, &shards)
+                    p.compute.lookup_topology(num_total_tokens, &shards)
                 })
                 .collect(),
         }
     }
-    fn record<'a>(&'a self, r: &mut ReplayRecorder, input: &Self::Input<'a>) {
+    fn record<'a>(&'a self, recorder: &mut ReplayRecorder, input: &Self::Input<'a>) {
         let batch = input.state.batch();
-        let total = batch.sdpa.shape().num_total_tokens;
-        let active = ReplayU32::Parameter(MAIN_TOKENS);
+        let num_total_tokens = batch.sdpa.shape().num_total_tokens;
+        let num_active_tokens = ReplayU32::Parameter(QWEN4X_MAIN_NUM_ACTIVE_TOKENS);
         // Token-only preparation precedes layer 0. This initial schedule executes it serially.
         for layer in &self.layers {
             if let Some(ple) = &layer.ple {
-                ple.prepare(r, total, active, input.state);
+                ple.prepare(recorder, num_total_tokens, num_active_tokens, input.state);
             }
         }
-        r.record_with_barrier_before(ReplayOp::opaque(self.expand.invoke(
-            total,
-            active,
+        recorder.record_with_barrier_before(ReplayOp::opaque(self.expand.invoke(
+            num_total_tokens,
+            num_active_tokens,
             input.hidden_input,
             &self.channels,
         )));
         for layer in &self.layers {
             if let Some(ple) = &layer.ple {
-                ple.apply(r, total, active, &self.channels, input.state);
+                ple.apply(
+                    recorder,
+                    num_total_tokens,
+                    num_active_tokens,
+                    &self.channels,
+                    input.state,
+                );
             }
             self.read(
-                r,
+                recorder,
                 layer
                     .attention_residual
                     .as_ref()
                     .expect("Qwen4x GR weights must be loaded"),
-                total,
-                active,
-                true,
+                num_total_tokens,
+                num_active_tokens,
                 &self.mixed,
             );
             match &layer.attention {
-                Qwen4xAttention::GDN(gdn) => gdn.record(r, &self.mixed, &self.branch, input.gdn.metadata(), active),
+                Qwen4xAttention::GDN(gdn) => {
+                    gdn.record(
+                        recorder,
+                        &self.mixed,
+                        &self.branch,
+                        input.gdn.metadata(),
+                        num_active_tokens,
+                    )
+                },
                 Qwen4xAttention::QSA {
                     backend,
                     weights,
@@ -385,7 +410,7 @@ impl ReplayComponent for Qwen4xMain {
                     scratch.sdpa_shape = batch.sdpa.shape();
                     scratch.indexer_shape = batch.indexer_shape;
                     backend.record(
-                        r,
+                        recorder,
                         QSAInput {
                             batch_metadata: &batch.sdpa,
                             indexer_metadata: &batch.indexer,
@@ -408,24 +433,24 @@ impl ReplayComponent for Qwen4xMain {
                     );
                 },
             }
-            self.write(r, total, active);
+            self.write(recorder, num_total_tokens, num_active_tokens);
             self.read(
-                r,
+                recorder,
                 layer.mlp_residual.as_ref().unwrap(),
-                total,
-                active,
-                true,
+                num_total_tokens,
+                num_active_tokens,
                 &self.mixed,
             );
-            layer.mlp.record(r, &self.mixed, &self.branch, total, active);
-            self.write(r, total, active);
+            layer
+                .mlp
+                .record(recorder, &self.mixed, &self.branch, num_total_tokens, num_active_tokens);
+            self.write(recorder, num_total_tokens, num_active_tokens);
         }
         self.read(
-            r,
+            recorder,
             self.mixer.as_ref().expect("Qwen4x final mixer weights must be loaded"),
-            total,
-            active,
-            false,
+            num_total_tokens,
+            num_active_tokens,
             input.hidden_output,
         );
     }

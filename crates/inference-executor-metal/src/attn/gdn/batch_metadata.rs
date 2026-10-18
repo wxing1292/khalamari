@@ -5,34 +5,6 @@ use inference_backend_metal::metal::Buffer;
 use inference_backend_metal::metal::Device;
 use inference_backend_metal::metal::Dtype;
 use inference_executor_core::attn::GDNReplayShape;
-use inference_executor_core::replay::ReplayBucketPolicy;
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct GDNReplayBucketPolicy {
-    requests: ReplayBucketPolicy,
-    tokens: ReplayBucketPolicy,
-}
-
-impl GDNReplayBucketPolicy {
-    pub fn new(max_requests: u32, max_tokens: u32, token_topology_boundaries: &[u32]) -> Self {
-        Self {
-            requests: ReplayBucketPolicy::new(max_requests),
-            tokens: ReplayBucketPolicy::with_topology_boundaries(max_tokens, token_topology_boundaries),
-        }
-    }
-
-    pub fn max_requests(&self) -> u32 {
-        self.requests.max_capacity()
-    }
-
-    pub fn max_tokens(&self) -> u32 {
-        self.tokens.max_capacity()
-    }
-
-    pub fn num_total_requests(&self, num_active_requests: u32) -> u32 {
-        self.requests.capacity(num_active_requests)
-    }
-}
 
 /// Capacity-sized GPU metadata and replay shape refreshed during GDN state
 /// preparation and shared by all GDN layers.
@@ -75,14 +47,6 @@ impl GDNMetadataBuffers {
 
     pub fn num_active_recurrent_requests(&self) -> u32 {
         self.num_active_recurrent_requests.get()
-    }
-
-    pub fn max_requests(&self) -> usize {
-        self.src_recurrent_state_slots.len_bytes() / size_of::<u32>()
-    }
-
-    pub fn max_tokens(&self) -> usize {
-        self.flat_recurrent_state_write_slots.len_bytes() / size_of::<u32>()
     }
 
     pub fn src_recurrent_state_slots(&self) -> &Buffer {

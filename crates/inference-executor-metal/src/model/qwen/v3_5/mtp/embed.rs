@@ -9,6 +9,7 @@ use inference_backend_metal::metal::ReplayU32;
 use inference_backend_metal::operators::affine_quantized;
 use inference_backend_metal::operators::bf16_concat_rows;
 use inference_executor_core::backend::recorder::Recorder;
+use inference_executor_core::checkpoint::remove_tensor;
 use inference_executor_core::def::ModelExecutorError;
 use inference_executor_core::model::qwen::v3_5::Qwen35ModelConfig;
 use inference_executor_core::model::qwen::v3_5::weight_layout::Qwen35MTPEmbedWeightBindings;
@@ -22,7 +23,6 @@ use crate::model::embedding::Embed;
 use crate::model::embedding::EmbedInput;
 use crate::model::qwen::v3_x::weight::remove_quant_weight;
 use crate::model::qwen::v3_x::weight::remove_qwen3x_norm_weight;
-use crate::model::qwen::v3_x::weight::remove_typed_tensor;
 use crate::model::qwen::v3_x::weight::validate_len;
 use crate::model::rms_norm::RMSNorm;
 use crate::replay::ReplayComponent;
@@ -344,10 +344,8 @@ impl Qwen35MTPEmbedWeights {
             scale_bias_dtype: Dtype::Bfloat16,
         };
         let fc_weight = remove_quant_weight(&mut tensors, &bindings.projection.weight)?;
-        let fc_scales =
-            remove_typed_tensor(&mut tensors, &bindings.projection.scales, safetensors::Dtype::BF16)?.into_data();
-        let fc_biases =
-            remove_typed_tensor(&mut tensors, &bindings.projection.biases, safetensors::Dtype::BF16)?.into_data();
+        let fc_scales = remove_tensor(&mut tensors, &bindings.projection.scales, safetensors::Dtype::BF16)?.into_data();
+        let fc_biases = remove_tensor(&mut tensors, &bindings.projection.biases, safetensors::Dtype::BF16)?.into_data();
         validate_len("MTP fc weight", fc_weight.len(), fc_config.weight_bytes())?;
         validate_len("MTP fc scales", fc_scales.len(), fc_config.scale_or_bias_bytes())?;
         validate_len("MTP fc biases", fc_biases.len(), fc_config.scale_or_bias_bytes())?;

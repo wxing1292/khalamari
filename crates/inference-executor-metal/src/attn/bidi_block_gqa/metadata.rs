@@ -32,13 +32,13 @@ pub struct BiDiBlockGQAMetadataBuffers {
     sdpa_map_task_templates: Buffer,
     cu_sdpa_partial_outputs: Buffer,
     replay_shape: Cell<Option<GQAReplayShape>>,
-    sdpa_execution: ExecutionVariant,
+    variant: ExecutionVariant,
 }
 
 impl BiDiBlockGQAMetadataBuffers {
-    pub fn new(device: &Device, capacity: BiDiBlockGQACapacity, sdpa_execution: ExecutionVariant) -> Self {
+    pub fn new(device: &Device, capacity: BiDiBlockGQACapacity, variant: ExecutionVariant) -> Self {
         assert_eq!(
-            sdpa_execution.map.thread_block.max_q_tokens as usize, capacity.max_q_tokens,
+            variant.map.thread_block.max_q_tokens as usize, capacity.max_q_tokens,
             "BiDiBlockGQA history attention execution must match metadata capacity"
         );
         let task_template_values = capacity
@@ -76,7 +76,7 @@ impl BiDiBlockGQAMetadataBuffers {
                 Dtype::Uint32,
             ),
             replay_shape: Cell::new(None),
-            sdpa_execution,
+            variant,
         }
     }
 
@@ -109,7 +109,7 @@ impl BiDiBlockGQAMetadataBuffers {
         self.req_slots.write_typed(0, block.req_slots());
         self.flat_token_indices.write_typed(0, block.flat_token_indices());
 
-        let metadata = build_metal_metadata(block, self.sdpa_execution, self.capacity.max_sdpa_map_task_templates);
+        let metadata = build_metal_metadata(block, self.variant, self.capacity.max_sdpa_map_task_templates);
         let num_q_token_ranges = metadata.replay_shape.num_q_token_tiles as usize;
         assert!(
             num_q_token_ranges <= self.capacity.max_q_token_ranges,
@@ -124,7 +124,7 @@ impl BiDiBlockGQAMetadataBuffers {
             .write_typed(0, &metadata.cu_sdpa_partial_outputs);
         let num_q_ranges_per_request = block
             .block_size()
-            .div_ceil(self.sdpa_execution.map.thread_block.max_q_tokens as usize);
+            .div_ceil(self.variant.map.thread_block.max_q_tokens as usize);
         let num_active_tokens = num_active_requests * block.block_size();
         let num_active_q_token_ranges = num_active_requests * num_q_ranges_per_request;
         let num_active_task_templates = metadata.cu_sdpa_partial_outputs[num_active_q_token_ranges];
@@ -168,8 +168,8 @@ impl BiDiBlockGQAMetadataBuffers {
             .expect("BiDiBlockGQA metadata must be updated before recording")
     }
 
-    pub fn sdpa_execution(&self) -> ExecutionVariant {
-        self.sdpa_execution
+    pub fn variant(&self) -> ExecutionVariant {
+        self.variant
     }
 }
 
@@ -398,7 +398,7 @@ mod tests {
         );
         assert_eq!(buffers.q_token_ranges().read_typed::<u32>(0, 4), [0, 3, 3, 6]);
         assert_eq!(buffers.cu_sdpa_partial_outputs().read_typed::<u32>(0, 3), [0, 2, 5]);
-        assert_eq!(variant, buffers.sdpa_execution());
+        assert_eq!(variant, buffers.variant());
     }
 
     #[test]
@@ -592,7 +592,7 @@ mod tests {
             BiDiBlockCapacity::new(max_requests, block_size),
         )
         .select()
-        .execution()
+        .variant()
     }
 
     fn config() -> backend_sdpa::Config {

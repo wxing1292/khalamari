@@ -289,7 +289,6 @@ impl GQA {
         GQAReplayBucketPolicy::new(
             self.sdpa_selector.limits().max_tokens,
             self.sdpa_selector.limits().max_map_task_templates,
-            &self.replay_token_topology_boundaries(),
         )
     }
 
