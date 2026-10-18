@@ -3,6 +3,7 @@ use std::sync::Arc;
 use crossbeam_channel::Receiver;
 
 use crate::channel::DedupNotifier;
+use crate::channel::Shutdown;
 use crate::memory::U32IDAllocator;
 use crate::runtime::RawRequestSlot;
 
@@ -50,8 +51,8 @@ pub struct RequestSlotAllocator {
 }
 
 impl RequestSlotAllocator {
-    pub fn new(max_requests: u64) -> (Self, Receiver<()>) {
-        let (reset_notifier, reset_rx) = DedupNotifier::new();
+    pub fn new(max_requests: u64, shutdown: Shutdown) -> (Self, Receiver<()>) {
+        let (reset_notifier, reset_rx) = DedupNotifier::new(shutdown);
         (
             Self {
                 allocator: Arc::new(U32IDAllocator::new(max_requests)),

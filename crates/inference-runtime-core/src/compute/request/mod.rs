@@ -15,7 +15,7 @@ pub use resource::DeviceResourcePlacement;
 pub trait DevReq: Send + 'static {
     fn id(&self) -> RawRequestID;
 
-    fn req_cost(&self) -> usize;
+    fn request_cost(&self) -> usize;
     fn token_cost(&self) -> usize;
 }
 
@@ -71,7 +71,7 @@ impl DevReq for DeviceRequest {
         self.req_id
     }
 
-    fn req_cost(&self) -> usize {
+    fn request_cost(&self) -> usize {
         1
     }
 

@@ -76,7 +76,7 @@ then use that block as a non-terminal prefix.
 ┌────────────────────────────────────────────────────────────────────────────┐
 │ ScheduleQueue                                                              │
 │ new_queue | unique run_queue | ID -> request map                           │
-│ unordered AwaitReservation futures | swap-out task sender                  │
+│ unordered AwaitReservation futures | async-task request sender             │
 └───────────────────────────────────┬────────────────────────────────────────┘
                                     v
 ┌────────────────────────────────────────────────────────────────────────────┐
@@ -100,7 +100,7 @@ then use that block as a non-terminal prefix.
 │ initialize/reserve decoder blocks -> schedule query tokens                 │
 │ -> build DecoderSyncBlocks -> DeviceRequest                                │
 └──────────┬───────────────┬────────────────┬──────────────────┬─────────────┘
-           │ Continue      │ Pending        │ Await            │ async/term
+           │ Continue      │ Skip           │ Await            │ async/term
            v               v                v                  v
 ┌──────────────────┐  ┌───────────────┐  ┌────────────────┐  ┌───────────────┐
 │ BatchDeviceReq   │  │ ID map only   │  │ waiting_reqs   │  │ task pool or  │
@@ -136,10 +136,10 @@ then use that block as a non-terminal prefix.
                                                └──────────────────┘
 ```
 
-`PrepareResult::Pending` deliberately leaves the request in the ID map. It does not put the request on `run_queue`.
+`PrepareResult::Skip` deliberately leaves the request in the ID map. It does not put the request on `run_queue`.
 Previously submitted work owns the next transition. The executor response returns the request through `commit`.
 
-`PrepareResult::Continue` carries a `PreparePhase`. A Prefill query returns to `run_queue` after preparation so that
+`PrepareResult::Continue` carries a `ComputePhase`. A Prefill query returns to `run_queue` after preparation so that
 another Prefill query can enter the pipeline. A Decode query stays only in the ID map until a response commits or a
 cancellation restores it.
 
@@ -156,11 +156,14 @@ The model executor can reorder complete requests during `prepare_batch`, before 
 This packing order does not change the scheduler's request selection or sticky order.
 The same order reaches model commit and response construction. Runtime core continues to resolve responses by request ID.
 
-`SimpleScheduler` resolves only runnable sticky IDs. It skips IDs that are pending, terminal, swapped, or absent. It
-first creates immutable `ReqTokenInventory` values. It then allocates minimum validated, maximum validated, and
+`SimpleScheduler` resolves retained sticky IDs through the request-ID map. It skips absent IDs and
+creates immutable `ReqTokenInventory` values. It then allocates minimum validated, maximum validated, and
 speculative token budgets. The speculative phase uses a request-local causal candidate heap. The allocator returns a
 request-ID-to-token-budget map. `FIFOBatcher` consumes this map before it uses the remaining hard request and token
 budgets for the normal FIFO queue.
+
+An assigned token budget is an upper bound. Block initialization can reuse a cached prefix and leave less work than
+the budget. The request selects only the remaining validated tokens and available drafts.
 
 Runtime admission and scheduler batching have separate limits. `RuntimeConfig::max_running_requests` bounds the
 request-slot domain, the request channel, and the async-task request and response channels. Every request-channel
@@ -168,6 +171,7 @@ entry owns one request slot, so this limit is also a strict channel-capacity bou
 
 `SchedulerConfig::max_requests`, `max_tokens`, and `max_tokens_per_request` remain per-batch limits.
 `max_tokens_per_request` must not exceed `max_tokens`.
+`DevReq` and `BatchDevReq` expose `request_cost` and `token_cost` for prepared work.
 `SchedulerConfig::max_compute_slots` bounds outstanding batches. It therefore also bounds the batch-request and
 batch-response channels.
 
@@ -206,6 +210,10 @@ unused speculative proposals. The next turn adds prompt tokens to the retained `
 suffix ready for scheduling. The service returns the same `InternalRequest` through the request channel. Event-loop
 admission enqueues this request without allocating a new slot and without changing its `Running` status.
 
+The session manager checks the request status before resume.
+External cancellation can make the request terminal while turn metadata changes.
+This race must not panic. Scheduler admission and preparation retire terminal requests.
+
 The retained blocks preserve committed KV and state progress. Scheduling starts at the retained cursor. It includes
 the prior turn's last sampled token and the new prompt because these tokens have no committed model state yet. It does
 not include earlier committed tokens. Initial and resumed turns use the same request channel.
@@ -240,14 +248,13 @@ releases the compute slot in normal sequence order.
 The request remains `Running` while it waits for the reservation. A reservation wait does not change model-state
 residency.
 
-`SimpleScheduler::commit` commits the device response first. After `commit` returns, the event loop calls
-`Scheduler::pop_ready_reqs` until the method returns `None`. `SimpleScheduler` delegates each call to
-`ScheduleQueue::pop_ready_reqs`. This method synchronously polls the unordered wait collection and returns at most one
-ready request.
+`SimpleScheduler::commit`, `cancel`, and `handle_async_task_resp` update their work.
+They then call `ScheduleQueue::handle_ready_waits`.
+This method polls `ScheduleQueue::pop_ready_reqs` until it returns `None`.
+Each poll returns at most one ready request from the unordered wait collection.
 
-A request can become terminal before or during the wait. The request then stays terminal. The event loop releases a
-terminal reservation-wait request. Otherwise, it calls `Scheduler::resume`, which appends the request to the back of
-`run_queue`.
+A request can become terminal before or during the wait. The request then stays terminal.
+`handle_ready_waits` drops terminal requests and appends other ready requests to the back of `run_queue`.
 
 Shutdown cancels reservation waits when it drops the scheduler and its wait collection. The scheduler event loop
 remains a synchronous thread.
@@ -308,7 +315,8 @@ The task carries the request ID and required resource IDs.
 The response returns concrete resources with the same identities.
 The internal request changes the matching symbolic resources to concrete resources.
 
-Runtime does not keep a mutable cache-block reservation while a blocking resource task runs.
+Before a blocking resource task starts, runtime releases the reservation for the block that requires materialization.
+Earlier unfinished blocks can remain reserved.
 A concrete resource must remain alive until all device work that reads its allocation is complete.
 After commit caches all placement ranges for one resource, runtime changes that resource back to symbolic.
 The transition can occur while the last cache block is still mutable.
@@ -318,12 +326,14 @@ The current runtime has one async response type.
 `InternalRequest` therefore downcasts `AsyncTaskResp` to `ResourceMaterializationResp`.
 [`future_work.md`](future_work.md) records the required typed dispatch work before a second response type is added.
 
-The event loop can submit after two request-work events:
+The event loop can submit after these request-work events:
 
 - It receives a user request.
+- It applies an async-task response.
 - It commits a device response.
 
-A device-response commit also discovers completed reservation waits before the event loop prepares the next batch.
+Device-response commits and async-task responses also discover completed reservation waits.
+The event loop then prepares the next batch.
 
 The event loop submits immediately when the scheduler has runnable token work and a free compute slot.
 
@@ -509,9 +519,12 @@ It sends `Start` with the stored Stop plan when a stopped executor has work to f
 It can append a batch after `Start` without a separate transition state.
 The ordered channel guarantees that the executor handles `Start` before that batch.
 The runtime consumes `Started` and `Stopped` as acknowledgements and then attempts the next flush.
+The runtime disables the idle timer while Start awaits `Started` or any batch remains in flight.
+The last batch-response commit starts a new timeout interval.
+`Started` starts a timeout interval only when no batch remains in flight.
 
 Each protocol channel reserves one entry in addition to the compute-slot capacity.
-This entry lets runtime core append `Stop` after every compute slot has submitted a batch.
+This entry preserves capacity for lifecycle commands alongside submitted batches.
 
 The idle condition does not require zero live requests.
 A request can remain in runtime core while it waits for resources.
@@ -601,6 +614,11 @@ Request-slot drop adds its slot to a deduplicated reset set. It does this before
 A capacity-one channel only wakes the executor. It never carries slot IDs. A full wake channel means that a wake is
 already pending.
 
+The reset notifier uses the runtime's `Shutdown` handle.
+Only a disconnected wake send checks this handle.
+After shutdown, a disconnected receiver does not prevent slot release.
+A disconnected receiver during normal operation remains an internal invariant violation.
+
 The executor event loop selects over wake notifications and device batches. It can therefore reset dropped slots while
 the executor is otherwise idle.
 
@@ -657,12 +675,12 @@ drop the guard. Both paths notify the other runtime loops to stop.
 
 A failed worker must not leave a partially live service waiting indefinitely.
 
-`PrepareResult::Pending` means a request has no additional runnable query while
+`PrepareResult::Skip` means a request has no additional runnable query while
 previous scheduled work is still in flight. The batcher keeps it in the
 request-ID map. It does not put the request back on the run queue. The model executor response returns it through
 `commit`.
 
-Do not requeue `Pending` requests. Device batch responses must commit in compute-sequence order because decoder
+Do not requeue a skipped request until its in-flight work makes it runnable. Device batch responses must commit in compute-sequence order because decoder
 scheduled token ranges are FIFO-owned. Within a batch, commit and cancellation resolve each request by request ID.
 Request order within a batch does not have to match the scheduler's selection order.
 
@@ -676,11 +694,11 @@ An out-of-order response is an internal contract violation.
 
 Recommendation: Fail fast on this response until a real transport reorder contract exists.
 
-Reservation waits do not use the swap-out and swap-in channels. `ScheduleQueue` owns them in `waiting_reqs`.
+`ScheduleQueue` owns reservation waits in `waiting_reqs`.
 `RuntimeConfig::max_running_requests` bounds this collection through the request-slot limit. Every admitted request
 owns exactly one slot while it waits.
 
-The existing swap-task channels remain separate from reservation waits. Their capacities equal
+The async-task channels carry resource materialization work separately from reservation waits. Their capacities equal
 `RuntimeConfig::max_running_requests`.
 
 The run queue has priority over the new queue:
@@ -706,3 +724,11 @@ gated-delta-net recurrent-state layout
 MLP routing/fusion policy
 per-component benchmark/profiling details
 ```
+
+## Verification
+
+Run the runtime-core owner tests with `cargo test -p inference-runtime-core --lib`.
+`blocks/trie/api_test_single_lane.rs` covers one cache lane with and without speculative proposals.
+`blocks/trie/api_test_w_mtp.rs` covers shifted multi-lane token and cache progress.
+Each module uses the production trie cache and page allocators.
+The service runtime tests cover admission, completion, and hibernation through the scheduler event loop.

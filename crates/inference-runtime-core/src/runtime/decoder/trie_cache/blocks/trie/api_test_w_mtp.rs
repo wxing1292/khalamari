@@ -754,7 +754,7 @@ fn test_prepare_resource_not_found_w_mtp() {
         total_tokens,
     );
     let context_window = blocks.num_total_tokens() + 1;
-    let (request_slot_allocator, _reset_rx) = RequestSlotAllocator::new(1);
+    let (request_slot_allocator, _reset_rx) = RequestSlotAllocator::new(1, Shutdown::new());
     let RequestSlotAllocationResult::Ok { request_slot } = request_slot_allocator.allocate() else {
         unreachable!()
     };

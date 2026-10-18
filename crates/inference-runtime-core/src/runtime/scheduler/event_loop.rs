@@ -8,6 +8,7 @@ use crossbeam_channel::Receiver;
 use crossbeam_channel::Select;
 use crossbeam_channel::Sender;
 use crossbeam_channel::after;
+use crossbeam_channel::never;
 
 use super::executor_hibernate::collect_allocated_id_ranges;
 use crate::Result;
@@ -48,7 +49,7 @@ pub struct EventLoop<UsrReq, DeviceReq, DeviceResp, BatchDeviceReq, BatchDeviceR
     executor_hibernation_mode: ExecutorHibernationMode,
     executor_hibernation_timeout: Duration,
     executor_hibernation_timer: Receiver<Instant>,
-    idle_heartbeat: Instant,
+    num_in_flight_batches: usize,
 
     shutdown: Shutdown,
 
@@ -106,7 +107,7 @@ where
             executor_hibernation_mode,
             executor_hibernation_timeout,
             executor_hibernation_timer: after(executor_hibernation_timeout),
-            idle_heartbeat: Instant::now(),
+            num_in_flight_batches: 0,
 
             shutdown,
 
@@ -164,9 +165,17 @@ where
                                     break 'event_loop;
                                 };
                             }
-                            self.idle_heartbeat = Instant::now();
+                            self.num_in_flight_batches -= 1;
+                            if self.num_in_flight_batches == 0 {
+                                self.executor_hibernation_timer = after(self.executor_hibernation_timeout);
+                            }
                         },
-                        ReplayableModelExecutorResponse::Started | ReplayableModelExecutorResponse::Stopped => {},
+                        ReplayableModelExecutorResponse::Started => {
+                            if self.num_in_flight_batches == 0 {
+                                self.executor_hibernation_timer = after(self.executor_hibernation_timeout);
+                            }
+                        },
+                        ReplayableModelExecutorResponse::Stopped => {},
                     }
                 },
                 _ if op_index == op_scheduler_stats_timer => {
@@ -180,14 +189,9 @@ where
                     let _ = op
                         .recv(&self.executor_hibernation_timer)
                         .expect("selected executor hibernation timer must fire");
-                    let idle_duration = self.idle_heartbeat.elapsed();
-                    if idle_duration >= self.executor_hibernation_timeout {
-                        if let Err(error) = self.stop_model_executor() {
-                            result = Err(error);
-                            break 'event_loop;
-                        }
-                    } else {
-                        self.executor_hibernation_timer = after(self.executor_hibernation_timeout - idle_duration);
+                    if let Err(error) = self.stop_model_executor() {
+                        result = Err(error);
+                        break 'event_loop;
                     }
                 },
                 _ if op_index == op_shutdown => {
@@ -218,7 +222,8 @@ where
                         .try_send(ReplayableModelExecutorRequest::Batch(batch_dev_req))
                     {
                         Ok(()) => {
-                            self.idle_heartbeat = Instant::now();
+                            self.num_in_flight_batches += 1;
+                            self.executor_hibernation_timer = never();
                         },
                         Err(error) => {
                             let ReplayableModelExecutorRequest::Batch(batch_dev_req) = error.into_inner() else {
@@ -251,13 +256,13 @@ where
                 log_err_internal!("model executor request channel full / closed while starting, stopping: {error}")
             })?;
         self.model_executor_state = ModelExecutorState::Started;
-        self.executor_hibernation_timer = after(self.executor_hibernation_timeout);
-        self.idle_heartbeat = Instant::now();
+        self.executor_hibernation_timer = never();
         Ok(())
     }
 
     fn stop_model_executor(&mut self) -> Result<()> {
         debug_assert_eq!(self.model_executor_state, ModelExecutorState::Started);
+        debug_assert_eq!(self.num_in_flight_batches, 0);
 
         let plan = match self.executor_hibernation_mode {
             ExecutorHibernationMode::All => ExecutorHibernationPlan::All,

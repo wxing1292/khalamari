@@ -110,6 +110,7 @@ where
 
     fn handle_async_task_resp(&mut self, resp: Box<dyn AsyncTaskResp>) {
         self.schedule_queue.handle_async_task_resp(resp);
+        self.schedule_queue.handle_ready_waits();
     }
 
     fn can_flush(&self) -> bool {

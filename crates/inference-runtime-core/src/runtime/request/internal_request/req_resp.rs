@@ -47,10 +47,6 @@ where
         self.num_in_flight_nonblocking_async_tasks
     }
 
-    fn request_estimate(&self) -> usize {
-        1
-    }
-
     fn token_estimate(&self) -> ReqTokenInventory<'_> {
         ReqTokenInventory::new::<L>(
             self.req_id,

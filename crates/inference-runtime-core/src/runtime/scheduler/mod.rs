@@ -130,7 +130,6 @@ where
     fn num_in_flight_blocking_async_tasks(&self) -> usize;
     fn num_in_flight_nonblocking_async_tasks(&self) -> usize;
 
-    fn request_estimate(&self) -> usize;
     fn token_estimate(&self) -> ReqTokenInventory<'_>;
 
     fn prepare(&mut self, token_budget: usize) -> PrepareResult<DeviceReq>;

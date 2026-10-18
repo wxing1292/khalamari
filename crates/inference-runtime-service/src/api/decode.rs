@@ -19,6 +19,7 @@ use crate::api::Inference;
 
 impl<const N: usize, const L: usize, const P: usize> Inference<N, L, P> {
     pub fn create_session(&self, request: DecodeRequest) -> Result<DecodeSession<N, L, P>> {
+        self.validate_input_tokens(&request.tokens)?;
         let request_id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
         assert_ne!(request_id, 0, "decode request ID allocator wrapped to zero");
 
@@ -48,6 +49,7 @@ impl<const N: usize, const L: usize, const P: usize> Inference<N, L, P> {
             session.num_turn_output_tokens.is_none(),
             "decode session cannot resume before turn completion",
         );
+        self.validate_input_tokens(&request.tokens)?;
         let DecodeRequest {
             tokens,
             token_positions,
@@ -68,6 +70,17 @@ impl<const N: usize, const L: usize, const P: usize> Inference<N, L, P> {
         merge_stop_sequences(&mut sampling.stop_sequences, &self.default_stop_sequences);
         self.runtime.resume_session(&session.request, tokens, sampling).await?;
         session.start_turn(num_prompt_tokens);
+        Ok(())
+    }
+
+    fn validate_input_tokens(&self, tokens: &[Token]) -> Result<()> {
+        if let Some(token) = tokens.iter().find(|token| token.value() as usize >= self.vocab_size) {
+            return Err(Error::invalid_argument(format!(
+                "input token ID {} must be below model vocab_size={}",
+                token.value(),
+                self.vocab_size
+            )));
+        }
         Ok(())
     }
 }

@@ -8,22 +8,26 @@ use crossbeam_channel::Sender;
 use crossbeam_channel::TrySendError;
 use crossbeam_channel::bounded;
 
+use crate::channel::Shutdown;
+
 #[derive(Debug)]
 pub struct DedupNotifier<T> {
     wake_tx: Sender<()>,
     pending: Mutex<HashSet<T>>,
+    shutdown: Shutdown,
 }
 
 impl<T> DedupNotifier<T>
 where
     T: Eq + Hash,
 {
-    pub fn new() -> (Arc<Self>, Receiver<()>) {
+    pub fn new(shutdown: Shutdown) -> (Arc<Self>, Receiver<()>) {
         let (wake_tx, wake_rx) = bounded(1);
         (
             Arc::new(Self {
                 wake_tx,
                 pending: Mutex::new(HashSet::new()),
+                shutdown,
             }),
             wake_rx,
         )
@@ -50,7 +54,12 @@ where
     fn notify(&self) {
         match self.wake_tx.try_send(()) {
             Ok(()) | Err(TrySendError::Full(())) => {},
-            Err(TrySendError::Disconnected(())) => panic!("dedup notifier receiver disconnected"),
+            Err(TrySendError::Disconnected(())) => {
+                if self.shutdown.is_shutdown() {
+                    return;
+                }
+                panic!("dedup notifier receiver disconnected");
+            },
         }
     }
 
@@ -64,10 +73,11 @@ mod tests {
     use std::collections::HashSet;
 
     use super::DedupNotifier;
+    use crate::channel::Shutdown;
 
     #[test]
     fn test_send_one_recv_many() {
-        let (notifier, wake_rx) = DedupNotifier::new();
+        let (notifier, wake_rx) = DedupNotifier::new(Shutdown::new());
 
         notifier.send_one(3_u32);
 
@@ -77,7 +87,7 @@ mod tests {
 
     #[test]
     fn test_send_two_recv_many() {
-        let (notifier, wake_rx) = DedupNotifier::new();
+        let (notifier, wake_rx) = DedupNotifier::new(Shutdown::new());
 
         notifier.send_one(3_u32);
         notifier.send_one(7);
@@ -88,7 +98,7 @@ mod tests {
 
     #[test]
     fn test_send_many_recv_many() {
-        let (notifier, wake_rx) = DedupNotifier::new();
+        let (notifier, wake_rx) = DedupNotifier::new(Shutdown::new());
 
         notifier.send_many([3_u32, 7, 3]);
 

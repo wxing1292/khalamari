@@ -553,7 +553,7 @@ fn test_prepare_resource_not_found_single_lane() {
         total_tokens,
     );
     let context_window = blocks.num_total_tokens() + 1;
-    let (request_slot_allocator, _reset_rx) = RequestSlotAllocator::new(1);
+    let (request_slot_allocator, _reset_rx) = RequestSlotAllocator::new(1, Shutdown::new());
     let RequestSlotAllocationResult::Ok { request_slot } = request_slot_allocator.allocate() else {
         unreachable!()
     };
@@ -769,6 +769,163 @@ fn test_prepare_cancel_commit_overlapping_prefill_decode_single_lane() {
         },
     );
     assert_state(&blocks, 1, &total_tokens, &[], &token_vec([4]), &[], &[]);
+}
+
+#[test]
+fn test_prepare_cancel_commit_decode_zero_token_index_single_lane_wo_spec_token() {
+    let total_tokens = token_vec([1, 2, 3]);
+    let output_sampled_token = Token::new(4);
+    let block_cache = initialize_block_cache(1024);
+    let mut blocks = initialize_blocks(block_cache, total_tokens.clone());
+    let InitBlockOnceResult::Success { ready_token_slots } = blocks.init_block_once() else {
+        unreachable!()
+    };
+    assert_eq!(NUM_TOKEN_PER_BLOCK, ready_token_slots);
+
+    let query_tokens = blocks.prepare(3).unwrap();
+    let sync_blocks = blocks.prepare_blocks();
+    match &query_tokens {
+        QueryTokens::Decode {
+            epoch,
+            token_index,
+            tokens,
+            spec_tokens,
+        } => {
+            assert_eq!(0, *epoch);
+            assert_eq!(0, *token_index);
+            assert_eq!(token_vec([1, 2, 3]), *tokens);
+            assert!(spec_tokens.is_empty());
+        },
+        _ => unreachable!(),
+    }
+    let expected_query_tokens = query_tokens.clone();
+    let expected_sync_blocks = sync_blocks.clone();
+    assert_sync_blocks(&sync_blocks, &blocks, 0);
+    assert_state(&blocks, 1, &[], &token_vec([1, 2, 3]), &[], &[], &[]);
+
+    blocks.cancel_blocks(sync_blocks);
+    blocks.cancel(query_tokens);
+    assert_state(&blocks, 0, &[], &[], &token_vec([1, 2, 3]), &[], &[]);
+
+    let query_tokens = blocks.prepare(3).unwrap();
+    let sync_blocks = blocks.prepare_blocks();
+    assert_eq!(expected_query_tokens, query_tokens);
+    assert_eq!(expected_sync_blocks, sync_blocks);
+    assert_state(&blocks, 1, &[], &token_vec([1, 2, 3]), &[], &[], &[]);
+
+    let epoch = query_tokens.epoch();
+    blocks.commit_blocks(sync_blocks);
+    blocks.commit(
+        query_tokens,
+        SampledTokens::Decode {
+            epoch,
+            validated_tokens: vec![],
+            validated_probs: vec![],
+            sampled_token: output_sampled_token,
+            sampled_prob: NotNan::new(0.5).unwrap(),
+            spec_tokens: vec![],
+            spec_probs: vec![],
+            spec_confidences: vec![],
+        },
+    );
+    assert_state(&blocks, 1, &token_vec([1, 2, 3]), &[], &token_vec([4]), &[], &[]);
+}
+
+#[test]
+fn test_prepare_cancel_commit_decode_nonzero_token_index_single_lane_wo_spec_token() {
+    let total_tokens = token_vec([1, 2, 3, 4, 5, 6, 7]);
+    let output_sampled_token = Token::new(8);
+    let block_cache = initialize_block_cache(1024);
+    insert_immutable_block(&block_cache, 0, None, token_vec([1, 2, 3, 4]));
+    let mut blocks = initialize_blocks(block_cache, total_tokens.clone());
+    let InitBlockOnceResult::Success { ready_token_slots } = blocks.init_block_once() else {
+        unreachable!()
+    };
+    assert_eq!(0, ready_token_slots);
+    let InitBlockOnceResult::Success { ready_token_slots } = blocks.init_block_once() else {
+        unreachable!()
+    };
+    assert_eq!(NUM_TOKEN_PER_BLOCK, ready_token_slots);
+
+    let query_tokens = blocks.prepare(3).unwrap();
+    let sync_blocks = blocks.prepare_blocks();
+    match &query_tokens {
+        QueryTokens::Decode {
+            epoch,
+            token_index,
+            tokens,
+            spec_tokens,
+        } => {
+            assert_eq!(0, *epoch);
+            assert_eq!(NUM_TOKEN_PER_BLOCK, *token_index);
+            assert_eq!(token_vec([5, 6, 7]), *tokens);
+            assert!(spec_tokens.is_empty());
+        },
+        _ => unreachable!(),
+    }
+    let expected_query_tokens = query_tokens.clone();
+    let expected_sync_blocks = sync_blocks.clone();
+    assert_sync_blocks(&sync_blocks, &blocks, 0);
+    assert_state(
+        &blocks,
+        2,
+        &token_vec([1, 2, 3, 4]),
+        &token_vec([5, 6, 7]),
+        &[],
+        &[],
+        &[],
+    );
+
+    blocks.cancel_blocks(sync_blocks);
+    blocks.cancel(query_tokens);
+    assert_state(
+        &blocks,
+        0,
+        &token_vec([1, 2, 3, 4]),
+        &[],
+        &token_vec([5, 6, 7]),
+        &[],
+        &[],
+    );
+
+    let query_tokens = blocks.prepare(3).unwrap();
+    let sync_blocks = blocks.prepare_blocks();
+    assert_eq!(expected_query_tokens, query_tokens);
+    assert_eq!(expected_sync_blocks, sync_blocks);
+    assert_state(
+        &blocks,
+        2,
+        &token_vec([1, 2, 3, 4]),
+        &token_vec([5, 6, 7]),
+        &[],
+        &[],
+        &[],
+    );
+
+    let epoch = query_tokens.epoch();
+    blocks.commit_blocks(sync_blocks);
+    blocks.commit(
+        query_tokens,
+        SampledTokens::Decode {
+            epoch,
+            validated_tokens: vec![],
+            validated_probs: vec![],
+            sampled_token: output_sampled_token,
+            sampled_prob: NotNan::new(0.5).unwrap(),
+            spec_tokens: vec![],
+            spec_probs: vec![],
+            spec_confidences: vec![],
+        },
+    );
+    assert_state(
+        &blocks,
+        2,
+        &token_vec([1, 2, 3, 4, 5, 6, 7]),
+        &[],
+        &token_vec([8]),
+        &[],
+        &[],
+    );
 }
 
 #[test]

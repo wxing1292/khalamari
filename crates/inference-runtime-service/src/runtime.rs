@@ -131,7 +131,7 @@ impl<const N: usize, const L: usize, const P: usize> InferenceRuntime<N, L, P> {
         );
 
         let (req_slot_allocator, request_slot_reset_rx) =
-            RequestSlotAllocator::new(model_runtime_config.max_running_requests as u64);
+            RequestSlotAllocator::new(model_runtime_config.max_running_requests as u64, shutdown.clone());
         let request_slot_reset_notifier = req_slot_allocator.reset_notifier();
         let page_id_allocator = Arc::new(U32IDAllocator::new(model_runtime_config.num_pages as u64));
         let block_cache = {
@@ -315,6 +315,7 @@ where
     let server_tokio_runtime = tokio::runtime::Runtime::new()
         .map_err(|error| log_err_unavailable!("unable to initialize RPC async runtime: {error}"))?;
     let model_name = executors.decoder().model_name().to_string();
+    let vocab_size = executors.decoder().vocab_size();
     let default_stop_sequences = executors.decoder().default_stop_sequences();
     let num_spec_tokens = executors.decoder().num_spec_tokens();
     let runtime = Arc::new(InferenceRuntime::<N, L, NUM_TRIE_PARTITION>::new(
@@ -325,7 +326,7 @@ where
         server_tokio_runtime.handle(),
         resource_processors,
     ));
-    let inference = Arc::new(Inference::new(runtime.clone(), default_stop_sequences));
+    let inference = Arc::new(Inference::new(runtime.clone(), vocab_size, default_stop_sequences));
     let server_shutdown = shutdown.clone();
     let server_thread = std::thread::Builder::new()
         .name("inference-rpc-servers".to_string())
@@ -596,7 +597,7 @@ mod tests {
     fn test_decode_completes_at_context_window_through_runtime_event_loop() {
         let (runtime, shutdown, async_runtime) = test_runtime_with_context::<1>(4);
         let runtime = Arc::new(runtime);
-        let inference = Inference::new(runtime.clone(), vec![]);
+        let inference = Inference::new(runtime.clone(), 1024, vec![]);
         let sampling = SamplingConfig {
             max_sampled_tokens: 8,
             ..SamplingConfig::default()
@@ -661,7 +662,6 @@ mod tests {
             panic!("idle runtime must stop the model executor")
         };
         assert_eq!(stopped_plan, ExecutorHibernationPlan::selected(vec![], vec![]));
-        response_tx.send(ReplayableModelExecutorResponse::Stopped).unwrap();
 
         let _external_request = runtime
             .sessions
@@ -672,7 +672,10 @@ mod tests {
                 vec![],
                 None,
                 vec![],
-                SamplingConfig::default(),
+                SamplingConfig {
+                    max_sampled_tokens: 1,
+                    ..SamplingConfig::default()
+                },
             )
             .unwrap();
         let ReplayableModelExecutorRequest::Start(started_plan) =
@@ -681,11 +684,33 @@ mod tests {
             panic!("queued request must start the model executor")
         };
         assert_eq!(started_plan, stopped_plan);
+        // A delayed Stopped acknowledgement can submit the batch behind Start.
+        response_tx.send(ReplayableModelExecutorResponse::Stopped).unwrap();
+        let ReplayableModelExecutorRequest::Batch(batch_request) =
+            request_rx.recv_timeout(Duration::from_secs(1)).unwrap()
+        else {
+            panic!("runtime must queue the batch after Start")
+        };
+        assert!(matches!(
+            request_rx.recv_timeout(Duration::from_millis(100)),
+            Err(crossbeam_channel::RecvTimeoutError::Timeout)
+        ));
+        assert!(!shutdown.is_shutdown());
         response_tx.send(ReplayableModelExecutorResponse::Started).unwrap();
         assert!(matches!(
-            request_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
-            ReplayableModelExecutorRequest::Batch(_)
+            request_rx.recv_timeout(Duration::from_millis(100)),
+            Err(crossbeam_channel::RecvTimeoutError::Timeout)
         ));
+        let dev_resp = batch_request
+            .dev_reqs
+            .into_iter()
+            .map(|dev_req| decode_response(dev_req.req_id, dev_req.decoder_query_tokens, &[], 2, &[]));
+        response_tx
+            .send(ReplayableModelExecutorResponse::Batch(BatchDeviceResponse::new(
+                batch_request.seq,
+                dev_resp,
+            )))
+            .unwrap();
         let ReplayableModelExecutorRequest::Stop(active_plan) =
             request_rx.recv_timeout(Duration::from_secs(1)).unwrap()
         else {

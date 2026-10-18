@@ -366,6 +366,7 @@ The gRPC address defaults to `127.0.0.1:50051`. The HTTP address defaults to `12
 
 The executor hibernation timeout defaults to 300 seconds.
 After this period without executable model work, the service writes model state to SSD and unloads model resources.
+Model loading and in-flight batch execution do not count as idle time.
 The listeners and runtime requests remain active.
 The next executable batch loads weights and state before execution.
 `--executor-hibernation-timeout-secs` accepts a positive integer.
@@ -499,6 +500,17 @@ The service exports four symmetric RPCs:
 `GenerateTokensRequest` contains token IDs and generation fields. The internal service API can also contain explicit
 token positions for model-specific inputs such as M-RoPE. The gRPC request derives normal sequential token positions
 and does not expose this field.
+
+The service must reject each input token ID outside `[0, model.vocab_size)` with `InvalidArgument`.
+The model executor supplies its vocabulary size when the service starts.
+The service validates initial input and each appended prompt suffix before runtime admission.
+Message-generated token IDs use the same boundary.
+
+```text
+model.vocab_size = 1024
+input [1, 1024] -> service validation -> InvalidArgument
+input [1, 1023] -> service validation -> runtime admission -> embedding
+```
 
 `GenerateTokensStream` requires one initial request. The first request contains the initial model input. Each later
 request contains only the new prompt tokens for one turn. Each request supplies the generation configuration for that

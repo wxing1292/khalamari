@@ -53,7 +53,7 @@ type TestRuntime = InferenceRuntime<1024, 1, 4>;
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_generate_tokens_stream_lifecycle() {
     let runtime = new_runtime(4);
-    let inference = Arc::new(Inference::new(runtime.clone(), Vec::new()));
+    let inference = Arc::new(Inference::new(runtime.clone(), 1024, Vec::new()));
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let listen_addr = listener.local_addr().unwrap();
     let (server_shutdown_tx, server_shutdown_rx) = oneshot::channel();
@@ -67,6 +67,11 @@ async fn test_generate_tokens_stream_lifecycle() {
     let mut client = InferenceRuntimeClient::connect(format!("http://{listen_addr}"))
         .await
         .unwrap();
+    for token_id in [1024, u32::MAX] {
+        let status = client.generate_tokens(fixture_request(token_id)).await.unwrap_err();
+        assert_eq!(status.code(), Code::InvalidArgument);
+        assert!(status.message().contains("must be below model vocab_size=1024"));
+    }
     let empty_stream = tokio_stream::empty::<ProtoGenerateTokensRequest>();
     let status = client
         .generate_tokens_stream(Request::new(empty_stream))
@@ -152,7 +157,7 @@ async fn test_generate_tokens_stream_lifecycle() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_generate_messages_stream_reuses_resident_request() {
     let runtime = new_runtime(5);
-    let inference = Arc::new(Inference::new(runtime.clone(), Vec::new()));
+    let inference = Arc::new(Inference::new(runtime.clone(), 1024, Vec::new()));
     let codec = Arc::new(fixture_message_codec());
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let listen_addr = listener.local_addr().unwrap();

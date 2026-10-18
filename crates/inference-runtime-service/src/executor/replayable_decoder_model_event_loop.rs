@@ -712,6 +712,10 @@ mod tests {
             "test"
         }
 
+        fn vocab_size(&self) -> usize {
+            1024
+        }
+
         fn model_mode(&self) -> &'static str {
             "test"
         }
@@ -904,6 +908,10 @@ mod tests {
 
         fn model_name(&self) -> &str {
             "spec-lifecycle-test"
+        }
+
+        fn vocab_size(&self) -> usize {
+            1024
         }
 
         fn model_mode(&self) -> &'static str {
@@ -1223,9 +1231,9 @@ mod tests {
     fn test_request_slot_resets() {
         let (_model_executor_req_tx, model_executor_req_rx) = bounded(1);
         let (model_executor_resp_tx, _model_executor_resp_rx) = bounded(1);
-        let (req_slot_reset_notifier, req_slot_reset_rx) = DedupNotifier::new();
-        let (event_tx, event_rx) = unbounded();
         let shutdown = Shutdown::new();
+        let (req_slot_reset_notifier, req_slot_reset_rx) = DedupNotifier::new(shutdown.clone());
+        let (event_tx, event_rx) = unbounded();
         let snapshot_path = test_snapshot_path("request-slot-resets");
         let executor = ReplayableDecoderModelEventLoop::new(
             model_executor_req_rx,
@@ -1264,9 +1272,9 @@ mod tests {
     fn test_start_stop_and_batch_start_are_idempotent() {
         let (model_executor_req_tx, model_executor_req_rx) = bounded(1);
         let (model_executor_resp_tx, model_executor_resp_rx) = bounded(1);
-        let (req_slot_reset_notifier, req_slot_reset_rx) = DedupNotifier::new();
-        let (event_tx, event_rx) = unbounded();
         let shutdown = Shutdown::new();
+        let (req_slot_reset_notifier, req_slot_reset_rx) = DedupNotifier::new(shutdown.clone());
+        let (event_tx, event_rx) = unbounded();
         let snapshot_path = test_snapshot_path("start-stop");
         let executor = ReplayableDecoderModelEventLoop::new(
             model_executor_req_rx,
@@ -1353,14 +1361,15 @@ mod tests {
     fn execute_spec_lifecycle(run_spec: bool, run_prefill: bool, run_decode: bool) -> Vec<SpecLifecycleEvent> {
         let (_model_executor_req_tx, model_executor_req_rx) = bounded(1);
         let (model_executor_resp_tx, _model_executor_resp_rx) = bounded(1);
-        let (req_slot_reset_notifier, req_slot_reset_rx) = DedupNotifier::new();
+        let shutdown = Shutdown::new();
+        let (req_slot_reset_notifier, req_slot_reset_rx) = DedupNotifier::new(shutdown.clone());
         let events = Rc::new(RefCell::new(Vec::new()));
         let mut executor = ReplayableDecoderModelEventLoop::new(
             model_executor_req_rx,
             model_executor_resp_tx,
             req_slot_reset_notifier,
             req_slot_reset_rx,
-            Shutdown::new(),
+            shutdown,
             ReplayableModelExecutors::new(
                 SpecLifecycleModel {
                     events: Rc::clone(&events),

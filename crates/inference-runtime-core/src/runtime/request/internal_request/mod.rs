@@ -131,7 +131,6 @@ where
     }
 
     pub fn start_turn(&mut self, prompt_tokens: Vec<Token>, sampling_config: SamplingConfig) {
-        assert!(self.status().is_running(), "only a running request can start a turn");
         assert!(
             self.in_flight_computes.is_empty(),
             "a new turn cannot have in-flight computes"

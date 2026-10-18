@@ -323,6 +323,10 @@ impl ReplayableDecoderModel for Qwen4xExecutor {
     fn model_name(&self) -> &str {
         &self.model_config.model_type
     }
+    fn vocab_size(&self) -> usize {
+        self.model_config.text_config.vocab_size
+    }
+
     fn model_mode(&self) -> &'static str {
         "vanilla"
     }

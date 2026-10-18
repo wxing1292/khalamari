@@ -138,10 +138,10 @@ where
                 },
                 PrepareResult::Continue { dev_req, compute_phase } => {
                     sticky_token_budgets.remove(&req_id);
-                    let req_cost = dev_req.req_cost();
+                    let request_cost = dev_req.request_cost();
                     let token_cost = dev_req.token_cost();
                     debug_assert!(
-                        req_cost <= req_budget,
+                        request_cost <= req_budget,
                         "prepared request cost exceeds fifo batch request budget"
                     );
                     debug_assert!(
@@ -152,7 +152,7 @@ where
                         token_cost <= token_budget,
                         "prepared request token cost exceeds fifo batch token budget"
                     );
-                    req_budget -= req_cost;
+                    req_budget -= request_cost;
                     token_budget -= token_cost;
                     match compute_phase {
                         ComputePhase::Prefill { .. } => self.running_reqs.push(user_req),
@@ -564,7 +564,7 @@ mod tests {
             .return_once(move |_| {
                 let mut dev_req = MockDevReq::new();
                 dev_req.expect_id().return_const(continue_req_id);
-                dev_req.expect_req_cost().once().return_const(1usize);
+                dev_req.expect_request_cost().once().return_const(1usize);
                 dev_req.expect_token_cost().once().return_const(token_budget_per_req);
                 PrepareResult::Continue {
                     dev_req,
@@ -588,7 +588,7 @@ mod tests {
             .return_once(move |_| {
                 let mut dev_req = MockDevReq::new();
                 dev_req.expect_id().return_const(pending_req_id);
-                dev_req.expect_req_cost().once().return_const(1usize);
+                dev_req.expect_request_cost().once().return_const(1usize);
                 dev_req.expect_token_cost().once().return_const(token_budget_per_req);
                 PrepareResult::Continue {
                     dev_req,
@@ -612,7 +612,7 @@ mod tests {
             .return_once(move |_| {
                 let mut dev_req = MockDevReq::new();
                 dev_req.expect_id().return_const(terminal_req_id);
-                dev_req.expect_req_cost().once().return_const(1usize);
+                dev_req.expect_request_cost().once().return_const(1usize);
                 dev_req.expect_token_cost().once().return_const(token_budget_per_req);
                 PrepareResult::Continue {
                     dev_req,
@@ -710,7 +710,7 @@ mod tests {
             .return_once(move |_| {
                 let mut dev_req = MockDevReq::new();
                 dev_req.expect_id().return_const(continue_req_id);
-                dev_req.expect_req_cost().once().return_const(1usize);
+                dev_req.expect_request_cost().once().return_const(1usize);
                 dev_req.expect_token_cost().once().return_const(token_budget_per_req);
                 PrepareResult::Continue {
                     dev_req,
@@ -734,7 +734,7 @@ mod tests {
             .return_once(move |_| {
                 let mut dev_req = MockDevReq::new();
                 dev_req.expect_id().return_const(pending_req_id);
-                dev_req.expect_req_cost().once().return_const(1usize);
+                dev_req.expect_request_cost().once().return_const(1usize);
                 dev_req.expect_token_cost().once().return_const(token_budget_per_req);
                 PrepareResult::Continue {
                     dev_req,
@@ -758,7 +758,7 @@ mod tests {
             .return_once(move |_| {
                 let mut dev_req = MockDevReq::new();
                 dev_req.expect_id().return_const(terminal_req_id);
-                dev_req.expect_req_cost().once().return_const(1usize);
+                dev_req.expect_request_cost().once().return_const(1usize);
                 dev_req.expect_token_cost().once().return_const(token_budget_per_req);
                 PrepareResult::Continue {
                     dev_req,
@@ -782,7 +782,7 @@ mod tests {
             .return_once(move |_| {
                 let mut dev_req = MockDevReq::new();
                 dev_req.expect_id().return_const(completed_turn_req_id);
-                dev_req.expect_req_cost().once().return_const(1usize);
+                dev_req.expect_request_cost().once().return_const(1usize);
                 dev_req.expect_token_cost().once().return_const(token_budget_per_req);
                 PrepareResult::Continue {
                     dev_req,
@@ -883,7 +883,7 @@ mod tests {
         sticky_req_1.expect_prepare().once().with(eq(3)).return_once(|_| {
             let mut dev_req = MockDevReq::new();
             dev_req.expect_id().return_const(1usize);
-            dev_req.expect_req_cost().once().return_const(1usize);
+            dev_req.expect_request_cost().once().return_const(1usize);
             dev_req.expect_token_cost().once().return_const(3usize);
             PrepareResult::Continue {
                 dev_req,
@@ -898,7 +898,7 @@ mod tests {
         sticky_req_2.expect_prepare().once().with(eq(2)).return_once(|_| {
             let mut dev_req = MockDevReq::new();
             dev_req.expect_id().return_const(2usize);
-            dev_req.expect_req_cost().once().return_const(1usize);
+            dev_req.expect_request_cost().once().return_const(1usize);
             dev_req.expect_token_cost().once().return_const(2usize);
             PrepareResult::Continue {
                 dev_req,
@@ -935,7 +935,7 @@ mod tests {
         req_1.expect_prepare().once().with(eq(3)).return_once(|_| {
             let mut dev_req = MockDevReq::new();
             dev_req.expect_id().return_const(1usize);
-            dev_req.expect_req_cost().once().return_const(1usize);
+            dev_req.expect_request_cost().once().return_const(1usize);
             dev_req.expect_token_cost().once().return_const(3usize);
             PrepareResult::Continue {
                 dev_req,
@@ -954,7 +954,7 @@ mod tests {
         req_2.expect_prepare().once().with(eq(2)).return_once(|_| {
             let mut dev_req = MockDevReq::new();
             dev_req.expect_id().return_const(2usize);
-            dev_req.expect_req_cost().once().return_const(1usize);
+            dev_req.expect_request_cost().once().return_const(1usize);
             dev_req.expect_token_cost().once().return_const(2usize);
             PrepareResult::Continue {
                 dev_req,
@@ -1027,7 +1027,7 @@ mod tests {
             } else {
                 let mut dev_req = MockDevReq::new();
                 dev_req.expect_id().return_const(req_id);
-                dev_req.expect_req_cost().once().return_const(1usize);
+                dev_req.expect_request_cost().once().return_const(1usize);
                 dev_req.expect_token_cost().once().return_const(token_budget);
                 PrepareResult::Continue {
                     dev_req,
@@ -1147,7 +1147,7 @@ mod tests {
     struct TestScheduledReq {
         req_id: RawRequestID,
         prepare_token_budget: usize,
-        req_cost: usize,
+        request_cost: usize,
         token_cost: usize,
     }
 
@@ -1170,13 +1170,13 @@ mod tests {
     fn new_test_scheduled_req(
         req_id: RawRequestID,
         prepare_token_budget: usize,
-        req_cost: usize,
+        request_cost: usize,
         token_cost: usize,
     ) -> TestScheduledReq {
         TestScheduledReq {
             req_id,
             prepare_token_budget,
-            req_cost,
+            request_cost,
             token_cost,
         }
     }
@@ -1192,7 +1192,7 @@ mod tests {
         let TestScheduledReq {
             req_id,
             prepare_token_budget,
-            req_cost,
+            request_cost,
             token_cost,
         } = *scheduled_req;
         user_req
@@ -1207,7 +1207,7 @@ mod tests {
             .return_once(move |_| {
                 let mut dev_req = MockDevReq::new();
                 dev_req.expect_id().return_const(req_id);
-                dev_req.expect_req_cost().once().return_const(req_cost);
+                dev_req.expect_request_cost().once().return_const(request_cost);
                 dev_req.expect_token_cost().once().return_const(token_cost);
                 PrepareResult::Continue {
                     dev_req,

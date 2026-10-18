@@ -31,10 +31,16 @@ type TestSession = DecodeSession<1024, 1, 4>;
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_evict_one_req() {
     let (runtime, shutdown) = new_runtime(2);
-    let inference = Inference::new(runtime.clone(), Vec::new());
+    let inference = Inference::new(runtime.clone(), 1024, Vec::new());
     let mut first = complete_turn(&runtime, &inference, 1, 101).await;
     let mut second = complete_turn(&runtime, &inference, 2, 202).await;
     let second_request_id = second.request_id();
+    for token_id in [1024, u32::MAX] {
+        assert!(matches!(
+            inference.resume_session(&mut first, request(token_id)).await,
+            Err(Error::InvalidArgument(message)) if message.contains("must be below model vocab_size=1024")
+        ));
+    }
 
     assert!(runtime.evict_one_req().await.unwrap());
     assert!(matches!(
@@ -59,7 +65,7 @@ async fn test_evict_one_req() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_evict_expired() {
     let (runtime, shutdown) = new_runtime(1);
-    let inference = Inference::new(runtime.clone(), Vec::new());
+    let inference = Inference::new(runtime.clone(), 1024, Vec::new());
     let mut session = complete_turn(&runtime, &inference, 1, 101).await;
 
     assert_eq!(runtime.evict_expired(Duration::MAX).await.unwrap(), 0);

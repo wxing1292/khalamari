@@ -244,9 +244,9 @@ where
         } else {
             debug_assert!(self.queued_tokens.is_empty());
             tokens.truncate(token_window);
-            let num_selected_spec_tokens = token_budget - token_window;
-            debug_assert!(num_selected_spec_tokens <= self.spec_tokens.len());
-            self.truncate_spec_tokens(num_selected_spec_tokens);
+            // Prefix cache hits can leave unused budget after block initialization.
+            let max_spec_tokens = token_budget - token_window;
+            self.truncate_spec_tokens(max_spec_tokens);
             let spec_tokens = self.spec_tokens.clone();
 
             Some(QueryTokens::Decode {
@@ -708,10 +708,6 @@ where
         })
     }
 }
-
-#[cfg(test)]
-#[path = "./api_test_vanilla.rs"]
-mod api_test_vanilla;
 
 #[cfg(test)]
 #[path = "./api_test_w_mtp.rs"]

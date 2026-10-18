@@ -74,6 +74,9 @@ pub trait ReplayableDecoderModel {
     fn model_name(&self) -> &str;
     fn model_mode(&self) -> &'static str;
 
+    /// Returns the exclusive upper bound for input token IDs.
+    fn vocab_size(&self) -> usize;
+
     /// Returns the maximum number of speculative tokens in one request step.
     fn num_spec_tokens(&self) -> usize {
         0

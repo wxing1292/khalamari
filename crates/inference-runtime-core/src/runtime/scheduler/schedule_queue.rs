@@ -189,10 +189,6 @@ where
         self.id_requests.get(req_id)
     }
 
-    pub fn request_estimate(&self) -> usize {
-        self.run_queue.len() + self.new_queue.len()
-    }
-
     pub fn token_estimate(&self, max_token_per_req: usize) -> usize {
         self.run_queue.iter().fold(0, |sum, req_id| {
             sum + self

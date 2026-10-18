@@ -213,11 +213,23 @@ One request channel orders `Batch`, `Start`, and `Stop`.
 One response channel preserves the matching response order.
 The model event loop processes one request at a time.
 Each channel reserves one entry in addition to the compute-slot capacity.
-This entry lets `Stop` follow a full set of submitted batches.
+This entry preserves capacity for lifecycle commands alongside submitted batches.
 
 Runtime core sends and receives all protocol variants.
 It consumes `Started` and `Stopped` as acknowledgements and then attempts the next flush.
 It does not maintain separate transition states for these acknowledgements.
+After sending `Start`, runtime core disables the idle timer until it receives `Started`.
+Submitting a batch also disables the idle timer.
+Runtime core starts a new timeout interval after the last in-flight batch response commits.
+The `Started` acknowledgement starts a timeout interval only when no batch remains in flight.
+Weight loading, state loading, and batch execution do not count as idle time.
+
+```text
+event       submit A, B    commit A       commit B       timeout
+in flight        2             1              0             0
+idle timer  disabled      disabled       starts        Stop(plan)
+```
+
 Future wiring may expose the tracked residency through a status API.
 
 ## Failure contract

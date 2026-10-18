@@ -970,6 +970,10 @@ impl ReplayableDecoderModel for Qwen35Executor {
         &self.model_name
     }
 
+    fn vocab_size(&self) -> usize {
+        self.layout.vocab_size as usize
+    }
+
     fn model_mode(&self) -> &'static str {
         match &self.speculator {
             Qwen35Speculator::Vanilla => "vanilla",
