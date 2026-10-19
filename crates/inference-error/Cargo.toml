@@ -8,4 +8,6 @@ repository.workspace = true
 
 [dependencies]
 thiserror = { workspace = true }
+
+[dev-dependencies]
 tracing = { workspace = true }

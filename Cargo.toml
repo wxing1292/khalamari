@@ -1,15 +1,15 @@
 [workspace]
 resolver = "2"
 members = [
-  "crates/inference-error",
-  "crates/inference-runtime-launcher",
-  "crates/inference-backend-metal",
-  "crates/inference-executor-core",
-  "crates/inference-executor-metal",
-  "crates/inference-runtime-core",
-  "crates/inference-runtime-macro",
-  "crates/inference-runtime-proto",
-  "crates/inference-runtime-service",
+    "crates/inference-backend-metal",
+    "crates/inference-error",
+    "crates/inference-executor-core",
+    "crates/inference-executor-metal",
+    "crates/inference-runtime-core",
+    "crates/inference-runtime-launcher",
+    "crates/inference-runtime-macro",
+    "crates/inference-runtime-proto",
+    "crates/inference-runtime-service",
 ]
 
 [workspace.package]
@@ -20,12 +20,12 @@ license = "MIT"
 repository = "https://github.com/wxing1292/psi-dec"
 
 [workspace.dependencies]
-axum = "0.8"
 ahash = "0.8"
 async-channel = "2.5"
 async-stream = "0.3"
 async-trait = "0.1"
-base64 = "0.22"
+axum = "0.8"
+base64 = "0.23"
 block2 = "0.6"
 clap = "4.6"
 comfy-table = "8"
@@ -42,11 +42,11 @@ half = "2.7"
 hdrhistogram = "7.6"
 hf-chat-template = "1.0"
 hound = "3.5"
-inference-error = { path = "crates/inference-error" }
-inference-runtime-launcher = { path = "crates/inference-runtime-launcher" }
 inference-backend-metal = { path = "crates/inference-backend-metal" }
+inference-error = { path = "crates/inference-error" }
 inference-executor-core = { path = "crates/inference-executor-core" }
 inference-executor-metal = { path = "crates/inference-executor-metal" }
+inference-runtime-launcher = { path = "crates/inference-runtime-launcher" }
 intrusive-collections = "0.10"
 itertools = "0.15"
 libc = "0.2"
@@ -57,30 +57,32 @@ nix = "0.31"
 objc2 = "0.6"
 objc2-foundation = "0.3"
 objc2-metal = { version = "0.3", default-features = false, features = [
-  "MTLAllocation",
-  "MTLBuffer",
-  "MTLCommandBuffer",
-  "MTLCommandEncoder",
-  "MTLCommandQueue",
-  "MTLComputeCommandEncoder",
-  "MTLComputePipeline",
-  "MTLDevice",
-  "MTLIndirectCommandBuffer",
-  "MTLIndirectCommandEncoder",
-  "MTLLibrary",
-  "MTLEvent",
-  "MTLResource",
-  "MTLTypes",
+    "MTLAllocation",
+    "MTLBuffer",
+    "MTLCommandBuffer",
+    "MTLCommandEncoder",
+    "MTLCommandQueue",
+    "MTLComputeCommandEncoder",
+    "MTLComputePipeline",
+    "MTLDevice",
+    "MTLIndirectCommandBuffer",
+    "MTLIndirectCommandEncoder",
+    "MTLLibrary",
+    "MTLEvent",
+    "MTLResource",
+    "MTLTypes",
 ] }
 offset-allocator = "0.2"
 ordered-float = "5.3"
 prost = "0.14"
-quick_cache = { version = "0.7", default-features = false, features = ["custom-hasher"] }
+quick_cache = { version = "0.7", default-features = false, features = [
+    "custom-hasher",
+] }
 quote = "1.0"
 rand = "0.10"
 reqwest = { version = "0.13", default-features = false, features = [
-  "blocking",
-  "rustls",
+    "blocking",
+    "rustls",
 ] }
 rubato = "5.0"
 rustfft = "6.4"

@@ -23,7 +23,6 @@ hdrhistogram = { workspace = true }
 hf-chat-template = { workspace = true }
 inference-runtime-macro = { path = "../inference-runtime-macro" }
 intrusive-collections = { workspace = true }
-itertools = { workspace = true }
 map-macro = { workspace = true }
 mockall = { workspace = true }
 nix = { workspace = true, features = ["fs", "mman", "process", "zerocopy"] }
@@ -38,3 +37,6 @@ tokio = { workspace = true, features = ["full"] }
 tracing = { workspace = true }
 uuid = { workspace = true }
 zerocopy = { workspace = true }
+
+[dev-dependencies]
+itertools = { workspace = true }
