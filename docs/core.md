@@ -561,6 +561,43 @@ from core lifecycle.
 If one forward must replace only executor-local state, use a specific set or update operation. Do not reset the whole
 slot.
 
+## Guided decode state machine
+
+[`GuidedDecodeSM`](../crates/inference-runtime-core/src/runtime/guided_decode.rs) defines a standalone CPU state machine.
+Requests, scheduling, sampling, and service APIs do not use it yet. `DefaultStateMachine` permits every token and never
+terminates. Its status is always `StateMachineStatus::Accepting`.
+
+`try_apply` consumes one `Token` value and returns `StateMachineTransition::Allow`, `Reject`, or `Error`.
+A rejection includes the token ID, a byte offset when available, and a reason. A rejection or error may change the
+receiver. A caller that needs to preserve its state must clone it before applying a token.
+Implementations derive or implement `Clone`. `dyn-clone` also makes `Box<dyn GuidedDecodeSM>` implement `Clone`.
+Clones must share immutable data and keep mutable state inexpensive to copy or clone on write.
+
+`fill_mask(self: Box<Self>)` consumes an owned SM snapshot and returns one `MaskFuture`.
+The caller clones its SM before calling `fill_mask` when it needs to retain the original.
+An implementation must submit any background work before it returns. The task owns the consumed snapshot and the
+mask buffer. The future does not borrow the caller's SM. No CPU task pool is implemented yet.
+
+`Mask::AllowAll` permits every token without allocating a bitset. `Mask::Bitset` owns packed `u32` words.
+Bit `token_id % 32` in word `token_id / 32` permits that token when set. The bitset must cover the vocabulary.
+The consumer must ignore unused bits in the final word. Mask generation must not change the logical state.
+`DefaultStateMachine` returns a ready future containing `Mask::AllowAll`.
+
+This standalone example uses token ID `11`:
+
+```text
+sm: DefaultStateMachine
+  |
+  +--try_apply(11)--> Allow
+  |
+  +--clone--> snapshot --fill_mask (takes ownership)--> future --await--> Mask::AllowAll
+  |
+  +--still owned by caller
+```
+
+The module has no activation controller, task pool, or runtime token cursor.
+Jump-forward completion is not supported. Applying one token must not append, replace, or promote other tokens.
+
 ## Stop and EOS handling
 
 Runtime core owns token-ID stop and EOS completion at the request commit boundary. The executor reports sampled tokens.

@@ -16,6 +16,7 @@ crossbeam-queue = { workspace = true }
 crossbeam-utils = { workspace = true }
 dashmap = { workspace = true }
 delegate = { workspace = true }
+dyn-clone = { workspace = true }
 event-listener = { workspace = true }
 futures-lite = { workspace = true }
 futures-util = { workspace = true }

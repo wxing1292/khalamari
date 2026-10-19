@@ -3,6 +3,7 @@ pub mod decoder;
 pub mod resource;
 pub mod scheduler;
 pub mod tasks;
+pub mod guided_decode;
 
 mod request;
 pub use request::AtomicRequestStatus;
