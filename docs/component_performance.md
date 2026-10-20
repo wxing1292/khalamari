@@ -9,18 +9,20 @@ Those serving results do not replace or remeasure this component dataset.
 
 ## Source and environment
 
-- Integrated MoE source: `0fd531cd6b0f49bf23c61dabb5e4020e42e72521`.
-- Measured source: `705aaf3c30ae20b622ec88d2041b326233009a5f` plus the uncommitted MoE candidate.
-- Hardware: Apple M3 Max, 40 GPU cores, 48 GiB unified memory, AC power. The desktop was active.
-- GQA/GDN/dense checkpoint: `Qwen3.8-27B-4bit`. Sparse MLP/MoE checkpoint: `Qwen3.6-35B-A3B-4bit`.
-- The TensorFold values describe its Python lane. They do not describe its native engine.
-- Each group ran PSI/oMLX/TF/TF/oMLX/PSI serially. Accepted groups have zero new swap and normal memory pressure.
-- Small-input runs used 3 warmup iterations, 5 measured iterations, and 3 runs. Full Prefill used 1 warmup iteration, 2 measured iterations, and 3 runs.
-- Latency is ordinary submission-and-wait wall time. Loading, compilation, and preparation are outside timing.
-- Each value is the mean of two per-pass medians. Drift is the largest same-engine change between passes.
+| Measurement identity | Value |
+| --- | --- |
+| Integrated source | `0fd531cd6b0f49bf23c61dabb5e4020e42e72521` |
+| Measured source | `705aaf3c30ae20b622ec88d2041b326233009a5f` plus uncommitted MoE candidate |
+| Machine | M3 Max, 40 GPU cores, 48 GiB, AC power, active desktop |
+| Checkpoints | GQA/GDN/dense `Qwen3.8-27B-4bit`, sparse/MoE `Qwen3.6-35B-A3B-4bit` |
+| Engine order | PSI/oMLX/TF/TF/oMLX/PSI, serial, accepted groups have zero new swap/normal pressure |
+| Warmup/iterations/runs | Small input `3/5/3`, full Prefill `1/2/3` |
+| Metric | Submission-and-wait wall time, excludes load/compile/preparation |
+| Aggregation | Mean of two per-pass medians, drift is largest same-engine pass difference |
 
-These framework versions apply to every shape table below.
-The JSON dataset retains the worker hashes and dependency versions.
+TensorFold values describe its Python lane. The dataset retains worker hashes and dependency versions.
+
+These framework versions apply to every table:
 
 | Table label | Framework and execution path | Measured version or source | Dependencies |
 | --- | --- | --- | --- |

@@ -8,13 +8,11 @@ See the [service guide](../../docs/service.md) for checkpoint downloads and serv
 
 ## Requirements
 
-Install these tools before you install the extension:
-
-- Pi `0.84.4` or later
-- Node.js and npm
-- A built psi-dec text-generation service
-
-The extension supports text input and text tool results. It does not support image content.
+| Dependency or content | Contract |
+| --- | --- |
+| Pi | `0.84.4` or later |
+| Runtime | Node.js/npm and a built psi-dec text service |
+| Input | Text and text tool results, no images |
 
 ## Install
 
@@ -38,12 +36,11 @@ sed 's#../../../crates/inference-runtime-proto/proto/inference_runtime.proto#../
 )
 ```
 
-By default, Pi discovers the extension under `~/.pi/agent/extensions/`.
-If you set `PI_CODING_AGENT_DIR`, the install uses that directory instead of `~/.pi/agent`.
-The install does not add a repository path to `~/.pi/agent/settings.json`.
-
-Repeat the detached install commands after an extension or protobuf change.
-After the copy completes, restart Pi or run `/reload`.
+| Installation | Location/lifecycle |
+| --- | --- |
+| Default | `~/.pi/agent/extensions/`, no repository path in `~/.pi/agent/settings.json` |
+| `PI_CODING_AGENT_DIR` set | Use that directory instead of `~/.pi/agent` |
+| Extension/protobuf update | Repeat the copy, then restart Pi or run `/reload` |
 
 ### Extension development
 

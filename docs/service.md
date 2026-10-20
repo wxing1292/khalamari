@@ -23,70 +23,38 @@ Use these sections for common tasks:
 
 ## Source ownership
 
-`crates/inference-runtime-service/src/api/` owns these functions:
+| Owner | Contract |
+| --- | --- |
+| `crates/inference-runtime-service/src/api/` | Token validation, local request IDs, stop merging, submission/streaming, cancellation on response drop |
+| `rpc/grpc/` | Protobuf conversion and tonic status mapping |
+| `rpc/http/` | Listener, JSON/multipart parsing, HTTP error mapping |
+| `tool/` | Transport/model-neutral tool domain, no storage, handlers, scheduling, rendering, or Qwen syntax |
+| `inference-runtime-core/src/chat_template/` | Checkpoint-authoritative template, compiled with `hf-chat-template` |
+| `codec/qwen.rs` | Qwen prompt composition and response grammar |
+| Qwen3-ASR service | Immutable `Qwen3ASRService` and checkpoint tokenizer |
 
-- Token-level validation
-- Process-local runtime request IDs
-- Stop-sequence merging
-- Submission and output streaming
-- Cancellation when a response is dropped
+Standalone `chat_template.jinja` takes priority over the tokenizer-config inline template.
+Text servers share one immutable `QwenCodec` and tokenizer.
 
-`rpc/grpc/` owns protobuf conversion and tonic status mapping. `rpc/http/` owns HTTP listener setup, JSON parsing, and
-HTTP error mapping.
+```text
+wire [User("hi")] + tools -> RPC domain -> QwenCodec::encode
+  -> template render -> UTF-8 prompt -> Hugging Face tokenizer -> token IDs
+output IDs -> incremental detokenizer -> Qwen grammar
+  -> reasoning / answer / tool call / terminal event
+```
 
-The text Qwen server loads one immutable `QwenCodec` from the model directory.
-It shares this codec with HTTP requests.
-The Qwen3-ASR server loads one immutable `Qwen3ASRService` and its checkpoint tokenizer.
+RPC does not implement prompt syntax, tokenization, or the Qwen tool dialect.
+Each response owns incremental detokenization/grammar state.
+Thinking consumes `</think>` without exposing model control tokens.
 
-RPC converts wire objects to the codec domain. It also maps codec events back to wire objects. RPC does not implement
-these functions:
+| Channel | Ownership and backpressure |
+| --- | --- |
+| Request events | `async_channel::unbounded`, preserves committed probabilities/turn events without blocking synchronous commit |
+| Cancellation | Unbounded, `ExternalRequest` -> existing `Sessions` loop, no new task or scheduler crossing |
+| Session commands | Unbounded, one command + oneshot response, `Sessions` alone owns the pending map |
 
-- Prompt syntax
-- Tokenization algorithms
-- The Qwen tool dialect
-
-`crates/inference-runtime-service/src/tool/` owns the transport-neutral and model-neutral tool domain. It does not own
-these functions:
-
-- Conversation storage
-- Tool handlers
-- Execution scheduling
-- Prompt rendering
-- Model-specific tool syntax
-
-`inference-runtime-core/src/chat_template/` loads the checkpoint-authoritative Hugging Face chat template. It compiles
-the template with `hf-chat-template`.
-
-A standalone `chat_template.jinja` takes priority over an inline tokenizer-config template. `codec/qwen.rs` owns the
-model-specific composition.
-
-`QwenCodec` contains the compiled template and shared Hugging Face tokenizer. Its `encode` method renders messages and
-tools before tokenization.
-
-The `decode` method transforms a token stream into these outputs:
-
-- Reasoning
-- Answer text
-- Tool calls
-- A terminal event
-
-When thinking is enabled, the codec consumes the Qwen `</think>` boundary. It never exposes model control tokens as
-content.
-
-Each response stream keeps its incremental detokenization and Qwen response-grammar state private.
-
-The runtime request-event channel is intentionally `async_channel::unbounded`. It preserves committed token
-probabilities and turn-completion events without blocking synchronous runtime commit. Dropping a `DecodeSession`
-drops its `ExternalRequest`. This action cancels only that request. A slow transport consumer does not terminate the
-request.
-
-The cancellation channel is also unbounded. It connects `ExternalRequest` to the existing `Sessions` async
-event loop. The same event loop receives completed turns. Cancellation does not create another async task and does not
-cross the scheduler boundary.
-
-The session-command channel is unbounded. A resume, single-request eviction, or idle GC call sends one command
-and waits on its oneshot response. The `Sessions` task owns the pending-session map. Service API tasks do not lock or
-access that map directly.
+Dropping `DecodeSession` drops/cancels only its `ExternalRequest`.
+A slow consumer does not terminate the request. API tasks do not access or lock the session map.
 
 ## Tool state
 
@@ -865,38 +833,22 @@ The adapter rejects `reasoning_effort` with `enable_thinking:false` because the 
 
 ## Operational notes
 
-Run one GPU service at a time. The first request includes these operations:
+Run one GPU service at a time.
+Measure initialization, Metal compilation, replay build, and cache warmup separately from steady-state throughput.
 
-- Model initialization
-- Metal pipeline compilation
-- Replay construction
-- Cache warmup
+```text
+MainTextEmbed -> MainResourceEmbed? -> Main -> GatherUnembed
+  +-- Off --> Sampling
+  `-- Spec -> RejectionSampling
+       +-- MTP: K dependent [MTPEmbed -> MTP -> GatherUnembed
+       |                    -> DraftSampling -> submit/wait -> CPU sample read]
+       `-- DFlash2: GPU Decode prepare -> history Prefill -> Embed/body/output
+                    -> proposals in the same ordered Main submission
+```
 
-Measure the first request separately from steady-state throughput.
-
-Normal sampling submits these replay programs in one ordered Metal command buffer:
-
-- MainTextEmbed
-- MainResourceEmbed when the batch contains resource placements
-- Main
-- GatherUnembed
-- Sampling
-
-Speculative Main verification replaces Sampling with RejectionSampling.
-
-An MTP proposal uses K ordered passes of MTPEmbed, MTP, GatherUnembed, and DraftSampling.
-The public MTP lifecycle remains one `submit_spec -> wait -> read_spec` transaction.
-The current implementation submits each dependent pass separately and reads its sampled token on the CPU before it
-prepares the next pass.
-All passes reuse the same recorded replay programs, weights, scratch, and bound workspaces.
-
-A DFlash2-enabled batch records Main, rejection sampling, and Spec work in one ordered GPU submission.
-DFlash2 Prefill creates persistent DFlash2 history K/V from the Main capture.
-A decode-ready batch records GPU Spec Decode prepare and DFlash2 Spec Decode after Prefill and before submission.
-DFlash2 Spec Decode contains DFlash2Embed, the DFlash2 body, and DFlash2Output.
-The body combines per-row sliding-history attention with bidirectional local-block attention and applies dynamic
-grouped convolution.
-DFlash2Output builds and samples the candidate lattice and writes sparse draft distributions.
+Ordinary and integrated DFlash2 work use one ordered GPU submission.
+MTP retains one public `submit_spec -> wait -> read_spec` transaction with dependent per-step submissions.
+See [MTP](mtp_design.md) and [DFlash2](dflash2_design.md) for component graphs and retained workspaces.
 
 `--logging debug` emits one DEBUG `phase="executor.batch.perf"` event after each non-empty executor batch. The event
 uses the same schema for Vanilla, MTP and DFlash2. It also uses the same schema for prefill and decode batches:
@@ -927,50 +879,42 @@ spec_gpu_ms=2.9200
 spec_passes=2
 ```
 
-`num_verified_tokens` is the number of returned `validated_tokens`. It does not include the final `sampled_token`.
-`acceptance_rate` is `num_verified_tokens / num_spec_tokens`.
+| Field | Boundary |
+| --- | --- |
+| `num_verified_tokens` | Returned `validated_tokens`, excludes final `sampled_token` |
+| `acceptance_rate` | `num_verified_tokens / num_spec_tokens` |
+| `num_spec_token_by_index[i]` | Eligible speculative index `i`, all earlier positions verified |
+| `num_verified_token_by_index[i]` | Verified count at that eligible index |
+| `acceptance_rate_by_index` | Ratio after summing matching counts across batches |
+| `main_cpu_ms` | Main embed/resource/forward/unembed/sampling-or-rejection, submit/wait/read, integrated DFlash2 work when configured |
+| `spec_cpu_ms` | Separate Spec lifecycle, MTP uses it, integrated DFlash2 reports zero |
+| `executor_cpu_ms` | `main_cpu_ms + spec_cpu_ms`, compare complete Main-to-Spec lifecycle |
+| `spec_passes` | Spec Decode forwards, can be zero for DFlash2 Prefill-only batches |
+| `*_cpu_ms` | CPU-observed wall latency, includes GPU waits |
+| `*_gpu_ms` | GPU-observed timestamp duration |
 
-The per-index rate is conditional. Index `i` is eligible only when the request contains speculative token `i` and
-all earlier speculative tokens passed verification. `num_spec_token_by_index[i]` is this eligible count.
-`num_verified_token_by_index[i]` is the verified count at the same index. The helper scripts sum these counts across
-batches before they calculate `acceptance_rate_by_index`.
+Relaxed Metal 4 timestamps are enabled by default and reuse one counter heap.
+No environment variable is required.
 
-`main_cpu_ms` covers
-`MainTextEmbed -> MainResourceEmbed? -> Main -> GatherUnembed -> Sampling/RejectionSampling -> submit/wait -> read`.
-For Qwen3.5 DFlash2, it also covers GPU Spec Decode prepare, Spec Prefill, Spec
-Decode, proposal sampling, and proposal read in the same ordered submission.
-`spec_cpu_ms` covers a separate Spec lifecycle. Qwen3.5 MTP uses this boundary. DFlash2 do not, so their
-`spec_cpu_ms` is zero.
-DFlash2 prefill-only batches can have nonzero `main_cpu_ms` and zero `spec_passes`.
-`executor_cpu_ms` is `main_cpu_ms + spec_cpu_ms`. Use `executor_cpu_ms` to compare the complete CPU-observed
-Main-to-Spec lifecycle across the old split DFlash2 lifecycle and the integrated lifecycle. Do not compare
-old `main_cpu_ms` directly with integrated `main_cpu_ms` because the integrated value includes fixed-block Spec work.
-`spec_passes` counts Spec Decode forwards. The `*_cpu_ms` fields are CPU-observed wall latencies. They include GPU
-wait time and do not measure CPU active execution. The `*_gpu_ms` fields are GPU-observed Metal timestamp durations.
+| GPU field | Included work |
+| --- | --- |
+| `main_gpu_ms` | Main before rejection, includes ordinary Sampling when rejection is absent |
+| `rejection_gpu_ms` | RejectionSampling |
+| `spec_prepare_gpu_ms` | GPU Spec Decode preparation |
+| `spec_prefill_gpu_ms` | DFlash2 history Prefill |
+| `spec_decode_gpu_ms` | Spec Decode and proposal sampling |
+| `spec_gpu_ms`, DFlash2 | Sum prepare + Prefill + Decode |
+| `spec_gpu_ms`, MTP | Sum logical submission intervals, excludes host recording/readback/gaps |
 
-`MetalRuntime` enables relaxed Metal 4 GPU timestamps for Main and MTP submissions by default.
-No environment variable is required. The runtime reuses its timestamp counter heap.
+DFlash2 stage fields are `unavailable` for MTP.
+One missing MTP interval makes its batch total unavailable.
+An absent integrated stage reports `0.0000`.
+Missing or invalid timestamp records report `unavailable` without changing completion/readback.
+A measured zero duration remains a valid sample.
 
-The GPU timing fields have these meanings:
-
-- `main_gpu_ms` covers Main work before RejectionSampling. It includes ordinary Sampling when no rejection stage
-  exists.
-- `rejection_gpu_ms` covers RejectionSampling only.
-- `spec_prepare_gpu_ms` covers Spec Decode prepare.
-- `spec_prefill_gpu_ms` covers DFlash2 Spec Prefill.
-- `spec_decode_gpu_ms` covers Spec Decode and proposal sampling.
-- `spec_gpu_ms` is `spec_prepare_gpu_ms + spec_prefill_gpu_ms + spec_decode_gpu_ms` for DFlash2.
-  For MTP, it sums all logical MTP submission durations. It excludes host recording, readback, and gaps between submissions.
-
-The Spec prepare, Prefill, and Decode fields apply to the integrated DFlash2 submission.
-They are `unavailable` for MTP. The MTP total is `unavailable` if any logical submission lacks valid GPU timestamps.
-An absent stage in an enabled integrated submission reports `0.0000`. All GPU fields report `unavailable` when the
-Metal timestamps are unavailable or Metal does not return a valid ordered timestamp sequence. This fallback does not change
-submission completion or output readback.
-
-`--logging info` does not emit the executor batch performance event. `--logging debug` also emits request and response
-diagnostics. The end-to-end performance helpers enable only the `inference-runtime-service::perf` DEBUG target when
-the selected server logging level is INFO.
+`--logging info` omits batch performance events.
+`--logging debug` also includes request/response diagnostics.
+At INFO server level, performance helpers enable only `inference-runtime-service::perf` at DEBUG.
 
 ### Numerical failure diagnostics
 
@@ -1011,7 +955,7 @@ Internal model `Start` and `Stop` commands emit INFO lifecycle events on the
 The events use `component="model"` with `start.begin`, `start.complete`, `stop.begin`, and `stop.complete` phases.
 Completion events include elapsed milliseconds.
 Failure events include the model name and error, and then trigger global shutdown.
-Runtime core issues these commands after the configured executor hibernation timeout.
+Runtime core sends Stop after the idle timeout and Start when stopped execution has work to flush.
 
 Executor profiling spans use the lifecycle hook names:
 
@@ -1154,97 +1098,61 @@ scripts/qwen35_e2e_decode_perf.sh \
   --runs 7
 ```
 
-Use `27b_mtp1` through `27b_mtp4` and `35b_mtp1` through `35b_mtp4` to select an MTP proposal count.
-The `*_mtp` aliases run MTP proposal counts 1, 2, 3, and 4.
-Use `*_dflash2_k1`, `*_dflash2_k2`, `*_dflash2_k3`, `*_dflash2_k4`, or `*_dflash2_k8` for DFlash2.
-The base `*_dflash2` cases use checkpoint defaults.
-The current DFlash2 checkpoint has `dflash_config.block_size=8`: one anchor and seven drafts.
-An explicit K=8 requests eight drafts. It is not the DFlash2 checkpoint's default eight-row query block.
-Pass `--block-spec-tokens K` to override K for every block-spec case.
-The default case matrix uses MTP counts 1 through 4 and checkpoint-default block-spec counts.
-Pass explicit `_k1`, `_k2`, `_k3`, `_k4`, or `_k8` case names to compare other block-spec counts.
+| Case/option | Contract |
+| --- | --- |
+| `27b_off`, `35b_off` | Main-only |
+| `27b_mtp1`..`27b_mtp4`, `35b_mtp1`..`35b_mtp4` | Fixed MTP proposal count, `*_mtp` expands all four |
+| `*_dflash2` | Checkpoint default, current `dflash_config.block_size=8` means one anchor + seven drafts |
+| `*_dflash2_k1`, `_k2`, `_k3`, `_k4`, `_k8` | Explicit proposal count, K8 means eight drafts, not eight query rows |
+| `--block-spec-tokens K` | Override all block-Spec counts before deduplication |
+| Default model matrix | Off + MTP1..4 + checkpoint-default DFlash2 for each model |
+| Default output limits | 256 and 1024 for both 27B/35B |
+| Default checkpoints | 27B Main/MTP Qwen3.8, 35B Main/MTP Qwen3.6 |
+| Tokenizer | Main checkpoint/case, `--tokenizer` overrides all cases |
+| Prompt set | `representative2`: fixed GSM8K and Chinese travel `chat`, summarized independently |
+| `--prompt <text>` | Replace prompt set with one custom prompt |
+| `--show-runs` | Machine-readable `CONFIG`, `RUN`, `SUMMARY`, stable prompt IDs and reference status |
+| `--no-reference` | Disable historical comparison |
+| Cooldown | Eight seconds/case, `--case-cooldown-secs 0` only for intentional sustained load |
+| Running requests | Four by default |
 
-1. Main-only `27b_off` and `35b_off`
-2. MTP counts 1, 2, 3, and 4 for each model
-3. Checkpoint-default DFlash2 for each model
+```text
+case + prompt + output limit -> fixed config/seed -> repeated output before perf footer
+  -> hash equality -> summary
+  -> differing hashes -> DETERMINISM_FAILED
+```
 
-The 27B cases use output limits 256 and 1024. The 35B cases use output limits 256 and 1024.
+The helper records prompt-set name/IDs/count/SHA-256, commit/dirty state, models, machine/OS, capacities, sampler/seed,
+trajectory, cooldown, and proposal/acceptance counts.
+Missing Spec checkpoints are skipped with a warning when no download repo is configured. Missing Main is an error.
+DFlash2 validates affine config/safetensors headers and rejects BF16 matrices before starting.
+Each case stops its server. The process guard covers release workers, service, and Cargo run/bench, without matching the `caffeinate` helper launcher.
 
-The default 27B Main and MTP checkpoints use Qwen3.8. The default 35B Main and MTP checkpoints use Qwen3.6.
-Each case uses its Main checkpoint for tokenization by default. Use `--tokenizer` to override all cases.
-The default `representative2` workload contains one fixed GSM8K prompt and the Chinese travel prompt (`chat`).
-The helper repeats and summarizes each prompt independently. The default output contains a configuration table,
-measurement progress, and a compact result table. The result table contains case, prompt, output limit, sampled tokens,
-decode throughput, tokens per chunk, and verified/proposed speculative tokens. Use `--show-runs` to also print
-machine-readable `CONFIG`, `RUN`, and `SUMMARY` rows. Each `RUN` and `SUMMARY` row contains the stable prompt ID. The
-configuration output contains the prompt-set name, prompt IDs, prompt count, and prompt-set SHA-256.
-For each case, prompt, and output limit, the helper hashes the generated output bytes before the performance footer.
-It stops with `DETERMINISM_FAILED` if repeated runs with the fixed sampling configuration and seed have different hashes.
-Use `--prompt <text>` to replace the set with one custom prompt.
-If an MTP or DFlash2 checkpoint is absent and no download repository is configured, the helper prints a
-warning and skips that case. A missing Main checkpoint remains an error.
-Before it starts a DFlash2 case, the helper validates the affine config and safetensors headers.
-It rejects a checkpoint that contains a BF16 matrix.
-The helper stops the server after each explicit case.
-Its process guard matches Qwen and Decode release-worker paths, the runtime service, and Cargo run/bench commands.
-The guard does not match the perf helper filename in a `caffeinate` launcher command.
-It applies the configured cooldown between runnable cases. The default cooldown is 8 seconds.
-Each Spec summary label includes its actual proposal count, including checkpoint defaults.
-Examples are `27b_mtp4` and `27b_dflash2_k8`.
-A global override replaces explicit case counts before deduplication.
+| Report | Meaning |
+| --- | --- |
+| Compact result | Case, prompt, output limit, sampled count, decode tok/s, tokens/chunk, verified/proposed |
+| Latency metrics | TTFT, prompt throughput, RPC inter-chunk p50/p95 |
+| Acceptance | Exact server-log-window verified/proposed rate and conditional per-index rate |
+| Main-only chunk | One token, inter-chunk time equals inter-token latency |
+| MTP chunk | Burst cadence, interpret with tokens/chunk and acceptance |
 
-Both helpers record these facts:
+### Historical comparison
 
-- Commit and dirty state
-- Model directories
-- Machine and operating system
-- Cache and request capacity
-- Scheduler capacities
-- Sampling configuration and seed
-- Prompt identity
-- Trajectory fields
+The [2026-10-14 Main-only summary](executor_benchmarks.md#main-only-serving-results-2026-10-14) is separate from the helper's 2026-09-19 reference.
 
-Both helpers also record cooldown and speculative-acceptance fields.
+| Historical reference | Provenance/limit |
+| --- | --- |
+| Source | Receipt tip `d6dc5da7`, tree `38f972e038150ee351c16dba6ae33bde7242670f`, before history cleanup/SlicedQ capacity fix |
+| Coverage | 44 rows, limits 256/1024, both Off/MTP1..4, 27B DFlash2 K7 |
+| Supplied | Throughput, output count, tokens/chunk, accepted/proposed |
+| Missing | Dirty state, raw CONFIG/SUMMARY, run count/variance, output hashes, TTFT/inter-chunk latency |
+| Matched config/work counts | `reference_status=summary-only`, descriptive `observed_decode_delta_pct` |
+| Mismatch or absent row | Suppress delta |
 
-The [latest Main-only serving summary](executor_benchmarks.md#main-only-serving-results-2026-10-14) records the user-supplied Off results received on 2026-10-14.
-The helper's checked-in comparison baseline remains the separate user-supplied table received on 2026-09-19.
-The user identified main tip at receipt: `d6dc5da7`, with source tree `38f972e038150ee351c16dba6ae33bde7242670f`.
-This reference precedes history cleanup and the SlicedQ pipeline-capacity fix. It does not measure that fix.
-Dirty state is unknown. The helper retains the existing machine and configuration profile.
-The table provides throughput, output counts, tokens per chunk, and accepted/proposed counts.
-It does not provide raw CONFIG/SUMMARY rows, run count, variance, output hashes, TTFT, or inter-chunk latency.
-The script does not invent these fields. Its configuration checks use the producing script's defaults.
-The reference contains 44 rows at output limits of 256 and 1024 tokens.
-It covers Main-only and MTP1 through MTP4 for both models, plus 27B DFlash2 K7.
+The script preserves unknown provenance and uses the producing script's defaults for configuration checks.
+This reference is not a threshold or controlled performance verdict.
+Qwen3 has no checked-in reference. Record new comparisons with [complete evidence](executor_benchmarks.md).
 
-A matching configuration and matching reported work counts produce `reference_status=summary-only`.
-The `observed_decode_delta_pct` field is a descriptive ratio, not a controlled performance verdict.
-A mismatch or missing row suppresses the delta. The reference is not a pass/fail threshold.
-The reference records unknown provenance explicitly. The summary-only comparison does not establish a controlled performance verdict.
-Use `--show-runs` for per-row deltas and mismatches. Use `--no-reference` to disable the comparison.
-Run `python3 scripts/qwen35_e2e_decode_perf_test.py` for CPU-only script contract tests.
-
-Use the [cross-engine serving matrix](executor_benchmarks.md#cross-engine-serving-matrix) for exact raw-token, retained-context, and request-count comparisons.
-The matrix records fixed proposal counts, actual cache reuse, output counts, and engine provenance.
-
-The Qwen3 helper does not contain a checked-in reference run. Record its comparison results outside the script with the
-complete provenance required by [`executor_benchmarks.md`](executor_benchmarks.md).
-
-The current default uses four running requests.
-
-Summaries report these metrics:
-
-- Decode throughput
-- TTFT and prompt throughput
-- RPC inter-chunk p50 and p95
-- Tokens for each chunk
-- Exact verified/proposed speculative-token rate for the matching server-log interval
-- Conditional speculative-token acceptance rate at each index
-
-For Main-only decoding, a chunk contains one token. Thus, inter-chunk time is inter-token latency.
-
-With MTP, inter-chunk time measures burst cadence. Interpret it with tokens for each chunk and the acceptance rate.
-
-Use `--case-cooldown-secs 0` only for an intentional sustained-load experiment.
-
-Follow [`executor_benchmarks.md`](executor_benchmarks.md) before you make a performance claim.
+Use the [cross-engine serving matrix](executor_benchmarks.md#cross-engine-serving-matrix) for fixed raw-token work, retained context,
+proposal counts, actual cache reuse, and engine provenance.
+Run `python3 scripts/qwen35_e2e_decode_perf_test.py` for CPU-only helper contracts.

@@ -58,6 +58,7 @@ Current behavior and completed designs belong in the [owning documents](README.m
 
 Complete the PP>1 request lifecycle before these changes. See [token-budget allocation](token_budget_allocator.md).
 
+- Compare FIFO and round-robin Phase-2 allocation for validated-input fairness.
 - Add shadow telemetry for proposal position, confidence bin, selected prefix, validation result, request, and model.
 - Add runtime-owned confidence calibration only when telemetry supports it. Do not select an absolute threshold without calibration.
 - Add measured cost estimates for fixed cost, Main rows, padding, replay transitions, acceptance, and admission.
@@ -85,10 +86,8 @@ Remaining work:
 - Include producer layout or repacking costs before changing token-major Q or paged K.
 - Inspect compiler register allocation before attributing resident-Q losses to spills. Source-level payload is not measured occupancy.
 
-The runner retains 29 score variants. Use a new output directory after measurement-source or environment changes.
-Plan and report modes do not use the GPU. GPU workers must run serially.
-The default has no time limit. Every worker validates scores and selected IDs against CPU math before timing.
-Any new system swap stops the run. Repeat the same command to retry the affected case and skip completed cases.
+Use the [indexer benchmark contract](executor_qsa_indexer.md#benchmarks) for source identity, validation, serial execution, swap rejection, and resume.
+Run the deferred suite with these commands:
 
 ```sh
 python3 scripts/qsa_indexer_score_matrix.py --mode plan --suite small-q
@@ -100,10 +99,6 @@ caffeinate -i python3 scripts/qsa_indexer_score_matrix.py --mode run --suite sma
 python3 scripts/qsa_indexer_score_matrix.py --mode report \
   --out target/perf/qsa-indexer-score-small-q
 ```
-
-`identity.json` records source hashes, Git state, device, package versions, and command.
-Each case retains raw samples, correctness records, generated shaders, memory observations, and completion status.
-The report excludes interrupted attempts. `summary.csv` and `selection.json` retain medians and fitted shape thresholds.
 
 ## N-gram embedding
 
@@ -123,25 +118,25 @@ The report excludes interrupted attempts. `summary.csv` and `selection.json` ret
 
 ## Replay Evolution
 
-- Revisit backend-neutral replay before adding another backend.
-  Keep shared execution lifecycle neutral and Metal replay/fusion backend-owned.
-- Add a bounded replay catalog only when measured memory growth requires it.
-  Eviction must cover all stage caches and retain in-flight resources through completion.
-- Design multi-command-buffer chains around MTP rejection readback, allocator-reset ownership, and proposal dependencies.
+| Trigger | Work and contract |
+| --- | --- |
+| Another backend | Revisit backend-neutral replay, retain Metal-owned recording/fusion |
+| Measured cache growth | Bounded catalog across stage caches, retain in-flight resources |
+| Multi-command-buffer chains | Define MTP readback, allocator reset, and proposal dependencies |
 
 ## Performance Investigations
 
 ### Benchmark coverage
 
-Extend the [existing component matrix](executor_benchmarks.md#component-latency-matrix) and benchmark owners rather than adding production benchmark paths.
+Extend the [existing component matrix](executor_benchmarks.md#component-latency-matrix), without adding production benchmark paths.
 
-- Extend real-weight coverage beyond the current fixtures. Add ragged GQA/GDN segments and controlled sparse expert occupancy.
-  Keep sparse-expert-only latency separate from complete MoE routing, layout, shared experts, and combine.
-  Keep measurement, reference checks, and dataset orchestration separate from policy fitting.
-- Compare oMLX/TensorFold only with matching inputs, weights, precision, state writes, and operation boundaries.
-  Separate sparse expert compute from complete router/layout/combine work.
-- Extend sparse-model E2E coverage separately from the current dense serving matrix.
-  Keep cold initialization, retained-prefix preparation, full Prefill, and steady-state Decode as separate metrics.
+| Work | Required evidence |
+| --- | --- |
+| More real-weight fixtures | Ragged GQA/GDN, controlled expert occupancy, separate measurement/reference/orchestration from fitting |
+| oMLX/TensorFold comparisons | Match inputs, weights, precision, state writes, operation boundaries |
+| Sparse-model E2E | Separate cold init, retained-prefix setup, full Prefill, steady Decode |
+
+Keep sparse expert compute separate from complete MoE routing/layout/shared/combine.
 
 ### GQA
 
@@ -216,8 +211,6 @@ Extend the [existing component matrix](executor_benchmarks.md#component-latency-
   Runtime core must initialize verified history and cache lanes before switching mode.
 - Isolate one-row/multi-row Qwen3 Main divergence through GQA, dense MLP, and unembedding.
   Keep exact batch-shape reproducibility separate from rejection correctness.
-- Integrate [gated residual](executor_gated_residual.md) through a supported model checkpoint contract.
-  Keep gate-neutral history/block/reducer/scratch contracts; preserve official target layers and proposal layouts.
 - Compare a DFlash2 ring cache with paged history for ephemeral requests, window overflow, prefix reuse, forks, eviction, and fragmentation.
   Measure retained bytes, page-table work, copies, and E2E latency before changing the owner-local default.
 - Evaluate grouped draft Prefill projections only for a measured bottleneck.
