@@ -10,13 +10,8 @@ Recommendation: Keep runtime core model-agnostic and separate from the model exe
 
 ## Selection
 
-Core may know requests, batches, token and block indices, page IDs, lifecycle state, and allocation ownership.
-
-Recommendation: Keep these details out of runtime core:
-
-- Model-specific tensor layouts
-- Checkpoint and Metal buffer shapes
-- GQA, Gated DeltaNet, and MLP internals
+Core may know requests, batches, token/block indices, page IDs, lifecycle state, and allocation ownership.
+Recommendation: Keep model-specific layout and computation behind the executor boundary.
 
 `RuntimeConfig::num_tokens_per_cache_block` is model-neutral cache metadata. It gives the token extent of one trie
 block and its attached opaque KV and state-page vectors.
@@ -31,27 +26,16 @@ its model layout. Core only allocates, shares, and reports the vector as one log
 ## Core-owned responsibilities
 
 ```text
-request lifecycle
-request-slot allocation/reset/drop
-batch scheduling
-prefill/decode/spec scheduling decisions
-token_index and block_index metadata
-accepted/rejected token metadata
-KV cache page allocation/free
-GDN state page allocation/free
-page ownership and reuse
-cache/state lifecycle notifications to executor
-executor input metadata construction
+request -> slot + lifecycle -> schedule batch -> executor metadata
+                    |                 |
+                    |                 +-> batch row: token_index / block_index / page IDs
+                    +-> trie block: opaque KV/state page vectors
+                              -> shared physical page allocator
+                              -> reuse, eviction, accepted/rejected state notifications
 ```
 
-Recommendation: Use explicit contracts:
-
-```text
-request slot -> active request metadata
-block_index -> kv_page_ids
-block_index -> linear_state_page_ids
-batch row -> token_index / block_index / page IDs
-```
+Core owns Prefill/Decode/Spec scheduling, slot reset/drop, page allocation/free, and cache lifecycle.
+The executor interprets payloads and component layouts.
 
 ## Scheduler and trie cache object model
 
@@ -474,33 +458,13 @@ Do not create a separate cache object hierarchy unless scheduling or placement p
 
 ## Managed objects
 
-Core-owned concepts include:
+| Owner domain | Objects |
+| --- | --- |
+| Scheduling | Request, request slot, lifecycle table, queue, batch, batch row |
+| Storage | KV/state page allocators, ownership table, accepted token/state metadata |
 
-```text
-request
-request slot
-batch
-batch row
-scheduler queue
-KV page allocator
-GDN state page allocator
-page ownership table
-request lifecycle table
-accepted token/state metadata
-```
-
-Recommendation: Give each object a small lifecycle surface:
-
-```text
-get / get_ref / get_mut
-set
-allocate / free
-push / pop
-reset
-```
-
-Recommendation: Do not use near-synonyms such as `clear`, `zero`, `reset`, `load`, `insert`, and `publish` on the same
-object. Use them together only when they operate on clearly different objects.
+Recommendation: Use small lifecycle APIs: `get / get_ref / get_mut`, `set`, `allocate / free`, `push / pop`, `reset`.
+Recommendation: Use distinct verbs such as `clear`, `zero`, `load`, `insert`, and `publish` together only for clearly different objects.
 
 ## Executor notification contract
 
@@ -826,16 +790,8 @@ Do not add executor-side recovery for impossible scheduler states unless there i
 
 ## Core exclusions
 
-Recommendation: Keep these details out of core:
-
-```text
-model-specific layer parsing
-checkpoint/Metal buffer shape interpretation
-GQA KV kernel semantics
-gated-delta-net recurrent-state layout
-MLP routing/fusion policy
-per-component benchmark/profiling details
-```
+Recommendation: Keep tensor/checkpoint/Metal layouts, GQA/GDN kernel semantics, MLP routing/fusion, and component profiling in the executor/backend.
+See the [ownership boundary](high_level.md#core-vs-executor).
 
 ## Verification
 

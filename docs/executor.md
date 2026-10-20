@@ -67,39 +67,30 @@ The arrows show use and lowering. They do not transfer semantic ownership to a l
 
 ## Shared component model
 
-GQA, GDN, dense MLP, MoE, and sampling use the same ownership pattern:
-
 ```text
-backend-neutral core/config and shape contract
-  -> backend component with immutable kernels/tuning
-  -> model-executor adapter with weights, state, metadata, and scratch
-  -> typed record input/output at the model boundary
-  -> CPU/reference oracle and focused production-owner tests
+backend-neutral core/config + shape
+  -> immutable backend kernels/tuning
+  -> executor adapter: weights + state + metadata + scratch
+  -> typed record input/output -> production-owner test + CPU reference
 ```
 
-Component-specific complexity stays behind that boundary. Backend APIs remain model-independent. Qwen adapters supply
-model dimensions, weights, and measured defaults.
+| Boundary | Validation |
+| --- | --- |
+| Config loading | Recoverable checkpoint parse/normalization errors |
+| Core/backend construction | Static geometry once |
+| Replay recording | Current shape, capacity, bindings |
+| Microbatch construction | Sample-mask extent once |
+| Repeated internal key/workspace comparison | `debug_assert!` / `debug_assert_eq!` |
 
-Validation follows the same ownership:
+Do not repeat immutable geometry checks in normalization or recording, or rescan a validated sample mask.
+Backend APIs remain model-independent. Qwen adapters supply dimensions, weights, and defaults.
+Types must own semantics, invariants, resources, or lifecycle, rather than only align names.
 
-- Config loading returns errors when it cannot parse or normalize checkpoint data.
-- Component `Core` and backend constructors assert their static geometry once.
-- Replay recording checks only current-batch shape, capacity, and binding contracts.
-
-Do not restate component geometry during model normalization. Do not revalidate immutable core and config state on each
-record.
-
-Microbatch construction validates the sample-mask extent. Executors gather indices from this validated mask without
-another range scan. Repeated comparisons of prepared and recorded replay keys or fixed hidden workspaces use
-`debug_assert!` or `debug_assert_eq!`. These comparisons check internal wiring.
-
-Do not add wrappers only to align names. A type is useful when it owns a semantic boundary, invariant, resource, or
-lifecycle.
-
-`GQAMetadataBuffers` and `GDNMetadataBuffers` own reusable GPU metadata buffers for one batch. `GQAInput` and `GDNInput`
-borrow the record-time tensors and component metadata.
-
-`GQAOutput` and `GDNOutput` name the corresponding component outputs. They do not introduce another allocation owner.
+| Entity | Owns or borrows |
+| --- | --- |
+| `GQAMetadataBuffers`, `GDNMetadataBuffers` | Reusable GPU batch metadata |
+| `GQAInput`, `GDNInput` | Borrowed record-time tensors/metadata |
+| `GQAOutput`, `GDNOutput` | Named outputs, no additional allocation owner |
 
 ## Common entities
 
@@ -663,51 +654,28 @@ See [`executor_hibernation.md`](executor_hibernation.md) for the current lifecyc
 
 ## Verification boundary
 
-Recommendation: Use the narrowest production owner that can express the invariant:
+```text
+CPU reference -> backend math/dispatch/ABI -> executor metadata/state/scratch
+  -> layer composition -> complete model lifecycle -> external caller
+```
 
-- CPU references prove math.
-- Backend tests prove shader build, dispatch, ABI, and parity.
-- Executor component tests prove real metadata, state, and scratch ownership.
-- Layer and end-to-end tests prove composition and lifecycle.
+Use the [shared test contracts](engineering_conventions.md#test-style) and [verification ladder](executor_benchmarks.md#verification-ladder).
+Component replay tests must execute the production owner, reuse one cached total/topology across active counts, and compare active outputs with an exact reference.
+Central replay tests do not replace these owner tests.
 
-Component unit tests use the same classification model across attention, MLP, sampling, and model I/O. They do not
-force the same lifecycle on components that have different ownership contracts.
+| Component | Additional contract |
+| --- | --- |
+| GDN | Persistent state, mixed chunk/replay commits, reconstruction, deferred publish/restore/reset |
+| GQA | SlicedKv/SlicedQ metadata, page-table selected I/O and reset |
+| MoE | Token/expert-major variants, shared/non-shared expert output |
+| Sampling/rejection | Mixed configurations, Target/Draft parameters, ragged and zero-draft requests |
+| Dense MLP, Embed, RowGather, affine, RMSNorm, Softmax, BF16 concat | Active-domain numerical replay |
+| MTPEmbed | Nonzero-weight previous-hidden gather and norm-concat-projection |
+| Unembed/GatherUnembed | Active-count gather plus affine-unembed parity |
 
-- GDN metadata tests exercise exact, bucketed, and caller-owned token-capacity APIs. The GDN numerical replay test
-  sweeps all active counts for a total capacity of `8` and checks persistent state.
-- GDN state tests exercise mixed chunkwise/replay commits, accepted-prefix reconstruction, deferred publish, restore, and selective reset.
-- GQA metadata tests exercise sliced-KV and sliced-Q paths with exact, bucketed, and caller-owned capacity APIs.
-- GQA page-table tests exercise selected state I/O and selective reset without reproducing KV-kernel math.
-- MoE component tests protect execution-variant selection. Isolated replay tests compare token-major, expert-major,
-  shared-expert, and non-shared-expert active outputs with CPU references.
-- Sampling tests sweep all active rows in one recorded capacity. They protect mixed request configurations and Target
-  and Draft runtime-parameter domains.
-- Rejection tests sweep all active requests in one recorded capacity. They protect mixed ragged requests, zero-draft
-  requests, prepared inputs, and result prefixes.
-- Dense MLP, Embed, and RowGather isolated replay tests sweep active counts and compare active outputs with CPU
-  references.
-- Quantized affine, RMSNorm, Softmax, and BF16 row-concat replay tests use caller-provided active parameters. They
-  compare only the active logical output with CPU references.
-- The Qwen3.5 MTPEmbed component test uses nonzero weights. It compares previous-hidden gather, token embedding, and
-  the complete norm-concat-projection output with CPU references.
-- The Unembed test protects numerical replay parity. Qwen3 and Qwen3.5 GatherUnembed tests compose gather and
-  affine-unembed CPU references across all active counts for one recorded capacity.
-
-Do not add a component test that only inspects replay keys, arguments, capacity identities, or record wiring. A replay
-contract test must execute the production owner, prove cache reuse across active counts, and compare the active logical
-result with an exact reference. The central replay infrastructure test does not replace this owner test.
-
-Keep CPU-reference tests in `inference-executor-core`. Keep Metal parity, ABI, padding, and canary tests in their Metal
-owner. Keep lifecycle scenarios independent of both layers.
-
-Do not reshape production source for test construction. Do not add naming-only tests. Run Metal tests serially.
-
-[`executor_benchmarks.md`](executor_benchmarks.md) defines these shared topics:
-
-- The full verification ladder
-- Benchmark targets
-- Profiling vocabulary
-- Performance-evidence rules
+Keep CPU references in `inference-executor-core`, Metal parity/ABI/padding/canaries at their Metal owner, and lifecycle scenarios separate.
+Do not add wiring-only tests or reshape production source only to simplify fixtures.
+Run Metal tests serially.
 
 ## Operational workflows
 

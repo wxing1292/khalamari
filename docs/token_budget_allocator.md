@@ -9,60 +9,45 @@ The public allocator API is in `runtime::scheduler`.
 
 ## Scope
 
-The runtime core owns request ordering and token-budget allocation.
-The model executor continues to return fixed-width proposal tokens, probabilities, and confidence values.
+| Constraint | Contract |
+| --- | --- |
+| Ownership | Runtime orders requests and allocates budgets, executor returns fixed-width proposals/probabilities/confidences |
+| Hard limits | Separate `max_requests`, `max_tokens`, `max_tokens_per_request` |
+| Page feasibility | Separate from token feasibility |
+| `prepare()` | Mutates state, not a planning API |
+| Output | `AHashMap<RawRequestID, usize>`, one absolute `token_budget` per request |
+| Decode trim | Only a request-local speculative suffix, all other input/anchor tokens mandatory |
+| Liveness | Every runnable sticky request receives its full minimum progress budget |
+| Ordering | Slot-local sticky order, duplicate IDs across slots permitted, never duplicate IDs within one device batch |
 
-The policy has these hard constraints:
-
-- `max_requests`, `max_tokens`, and `max_tokens_per_request` are separate limits.
-- `max_tokens_per_request` applies to every selected request.
-- KV-page feasibility is separate from token-budget feasibility.
-- `prepare()` is not a planning API because it changes request state.
-- The allocator returns an `AHashMap<RawRequestID, usize>` with one scalar `token_budget` for each request.
-- A Decode allocation can remove only a request-local speculative suffix.
-- The sampled-token anchor and the other Decode input tokens are mandatory.
-- Each runnable sticky request in the planning pass must receive its minimum progress budget.
-- Each compute slot owns its sticky request ID order.
-- Different compute slots can contain the same request ID.
-- One device batch must not contain the same request ID more than once.
-
-The first policy does not use an absolute confidence threshold.
-Confidence changes allocation only when the hard batch budget cannot contain every proposal row.
+Confidence ranks proposal prefixes only when the batch cannot fit all proposal rows.
+The policy has no absolute confidence threshold.
 
 ## Request token inventory
 
-Each user request produces an immutable `ReqTokenInventory` for the planning pass.
-The inventory contains the request ID, ready and queued token counts, speculative token count, and borrowed confidence values.
-The constructor derives `prefill_decode_threshold` from the validated-token count and compile-time cache-lane count `L`.
-The scheduler API does not expose the cache-lane count.
+```text
+slot sticky IDs -> schedule queue -> UserRequest::token_estimate
+  -> immutable ReqTokenInventory per present request
+  -> allocate_sticky_token_budgets(inventories, BatchBudget)
+  -> absolute request-ID-to-token-budget map
+```
 
-`num_spec_tokens` must equal `spec_confidences.len()`.
+| Inventory contract | Meaning |
+| --- | --- |
+| Input | Request ID, ready/queued/speculative counts, borrowed confidences |
+| Lane count `L` | Request-local implementation parameter, absent from scheduler API |
+| `num_spec_tokens` | Must equal `spec_confidences.len()` |
+| `prefill_decode_threshold` | Derived from validated tokens and `L` |
+| Min/max validated consumption | Request-local bounds, independent of the per-request hard limit |
+| `token_consumption()` with zero budget/validated count | Zero |
+| Budget covers validated tokens | Can include available speculative verification |
+| Smaller budget | Capped at `prefill_decode_threshold` |
+| Remaining global budget | Subtract `target_token_budget - current_token_budget` |
 
-The inventory calculates `min_validated_token_consumption()` and `max_validated_token_consumption()` from these
-fields.
-Both methods return request-local bounds without speculative verification.
-They do not replace the independent `max_tokens_per_request` hard limit.
-
-`ReqTokenInventory` owns the piecewise token-consumption curve.
-`token_consumption()` returns zero when the budget or validated-token count is zero.
-A budget that covers all validated tokens can also include speculative verification, up to the available speculative count.
-A smaller budget is capped at `prefill_decode_threshold`.
-
-The [allocator source](../crates/inference-runtime-core/src/runtime/scheduler/token_budget_allocator.rs) owns the exact fields, formulas, and boundary tests.
-The [scheduler source](../crates/inference-runtime-core/src/runtime/scheduler/simple_scheduler.rs) collects inventories in the compute slot's sticky request order.
-It resolves each ID through the schedule queue and calls `UserRequest::token_estimate` for each present request.
-It passes the inventories and `BatchBudget` to `allocate_sticky_token_budgets`.
-
-This flow does not require a new request trait.
-
-The request-local `L` remains an implementation parameter.
-The allocator supplies one total absolute `token_budget` for each query.
-The inventory query is stateless and always uses all currently available proposals.
-The allocator queries and returns absolute request token budgets.
-The output map owns request lookup. It does not preserve allocation order.
-It does not expose budget deltas as planning actions or outputs.
-
-The allocator subtracts `target_token_budget - current_token_budget` only to update the remaining global budget.
+Queries are stateless and use all available proposals.
+The output map preserves lookup, not allocation order or budget deltas.
+The [allocator](../crates/inference-runtime-core/src/runtime/scheduler/token_budget_allocator.rs) owns exact formulas and boundary tests.
+The [scheduler](../crates/inference-runtime-core/src/runtime/scheduler/simple_scheduler.rs) owns inventory collection.
 
 ## Minimum validated consumption
 
@@ -185,25 +170,15 @@ Every prefix trim must change all three vectors.
 
 ## Current policy status
 
-This policy is lexicographic.
-It is not a throughput optimum:
+```text
+sticky minimum progress -> sticky validated input -> causal proposal prefixes
+  -> FIFOBatcher admits FIFO work with remaining request/token budgets
+```
 
-1. Preserve sticky request progress.
-2. Increase sticky request validated-token consumption.
-3. Allocate sticky proposal prefixes by causal confidence.
-4. Let `FIFOBatcher` use the remaining request and token budgets for FIFO requests.
-
-`max_tokens_per_request` bounds the effect of a request with many validated tokens.
-The policy does not guarantee that each batch has capacity for speculative verification.
+This lexicographic policy is not a throughput optimum.
+`max_tokens_per_request` bounds each request. A batch need not leave room for speculative verification.
 
 ## Open decisions
 
-The first policy does not decide these items:
-
-- FIFO or round-robin order in Phase 2.
-- Measured cost for request count, rows, padding, and replay buckets.
-- The confidence calibration method and telemetry gate.
-- Page-feasibility feedback to the planning pass.
-
-The first version intentionally does not add a cost estimator.
-The required latency and padding data does not exist yet.
+[Confidence-aware scheduling](future_work.md#confidence-aware-scheduling) tracks Phase-2 fairness, measured allocation cost, calibration, and page feasibility.
+The current policy has no cost estimator.

@@ -92,14 +92,14 @@ ComponentKernelConstants
             └── simdgroup properties
 ```
 
-Use nesting to show scope. Do not repeat the scope in each nested field name.
+| Name | Meaning |
+| --- | --- |
+| `max_*` | Compile-time upper bound |
+| `num_*` | Exact count in its stated scope |
+| `required_threads` | Compile-time launch requirement |
+| `KernelExecutionConfiguration.thread_block_dimensions` | Actual dimensions, must match the required thread count |
 
-- `max_*` is a compile-time upper bound.
-- `num_*` is an exact count in its stated scope.
-- `required_threads` is a compile-time launch requirement.
-- `KernelExecutionConfiguration.thread_block_dimensions` contains the actual launch dimensions.
-
-The required and actual thread counts must match.
+Use nesting for scope. Do not repeat that scope in nested field names.
 
 Use `specialization` for the act or result of compiling an implementation for fixed constants. Use
 `KernelConstants` for the value that contains those constants. Do not name that value `KernelSpecialization`.
@@ -251,15 +251,17 @@ impl Invocation<'_> {
 }
 ```
 
-Use the same method names where these contracts match:
+```text
+initialization:
+  Registry::new(...) [private Registry::insert(...)] -> Selector::new(registry)
 
-- `Registry::new(...)`
-- `Registry::get(...)`
-- `Registry::insert(...)` for optional private construction
-- `Selector::new(...)`
-- `Selector::select(...)`
-- `Compute::invoke(...)`
-- `Invocation::record(...)`
+one invocation:
+  Compute::invoke(workload)
+    -> Selector::select(workload) -> Registry::get(selected key)
+    -> Invocation { frozen selection } -> Invocation::record(...)
+```
+
+Use these names when the contracts match.
 
 `Selector::select(...)` is the component's dynamic selection operation. It must evaluate only legal variants. It must
 use the dynamic workload, candidate costs, and selector-owned tuning data.
@@ -377,15 +379,12 @@ See these component documents:
 
 ## Review checklist
 
-For each new runtime-selectable component, document and review these items:
-
-1. Name the static configuration and legal capability checks.
-2. Name the complete Variant that the selector chooses.
-3. Name the dynamic Workload fields and their coordinate domains.
-4. Put all dynamic choice logic in `Selector::select(...)`.
-5. State whether the result is a tuple or a component-local `Selection`.
-6. Freeze the choice before recording, or repeat the same pure selector with equivalent inputs.
-7. Include each topology-changing choice in the replay identity.
-8. State the ThreadBlock-to-ThreadBlockTask relation for each kernel that has semantic tasks.
-9. Keep the Registry immutable after initialization.
-10. Update the matching component document with the source change.
+| Boundary | Check |
+| --- | --- |
+| Static configuration | Legal capabilities, complete Variant, immutable Registry |
+| Dynamic workload | Named fields and coordinate domains |
+| Selection | All choice logic in `Selector::select(...)`, tuple or local `Selection` |
+| Recording | Frozen choice, or same pure selector with equivalent inputs |
+| Replay | Every topology-changing choice in identity |
+| Semantic task | ThreadBlock-to-ThreadBlockTask relation for each applicable kernel |
+| Documentation | Matching component guide updated with source |

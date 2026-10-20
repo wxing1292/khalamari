@@ -9,12 +9,12 @@ request-mobility design.
 
 ## Lifecycle requirements
 
-The service must release model weights and backend state after an idle period.
-The service process and its RPC listeners must remain active.
-The first new request must load the model before model execution resumes.
-
-The implementation must preserve runtime cache identity across a successful stop and start.
-It must discard runtime cache metadata after any snapshot or restore failure.
+| Event | Required result |
+| --- | --- |
+| Idle timeout | Release weights/backend state, keep process and RPC listeners active |
+| Next executable request | Restore residency before execution |
+| Successful Stop/Start | Preserve runtime cache identity |
+| Snapshot/restore failure | Discard runtime cache metadata |
 
 ## Lifecycle flow
 
@@ -154,29 +154,15 @@ The [component interfaces](model_state_io.md#component-state-interfaces) define 
 
 ## Ownership boundary
 
-Runtime core owns these resources:
+| Owner | Resources and policy |
+| --- | --- |
+| Runtime core | Request/admission/slot identity, trie metadata, physical page allocation, logical cache IDs, idle detection/protocol state |
+| Service | Configured hibernation timeout |
+| Model executor | Weights, `PageArena` payload, GQA tables, GDN state/versions/future publications, replay resources |
+| Model event loop | Resource-operation order |
 
-- Request lifecycle and request admission.
-- Request-slot identity.
-- Trie cache metadata.
-- Physical page allocation and ownership.
-- Runtime page IDs and their logical cache identity.
-
-The model executor owns these resources:
-
-- Model weights.
-- `PageArena` payload data.
-- GQA request page tables.
-- GDN recurrent and convolution state.
-- GDN request state versions and future publish mappings.
-- Component-local state interpretation.
-- Replay programs and retained Metal resources.
-
-Runtime core owns idle detection and executor protocol state.
-The service owns the configured executor hibernation timeout.
-The model event loop owns the resource operation order.
-Runtime core must not parse model-specific state.
-The model executor must not allocate or free runtime-owned page IDs.
+Runtime core must not parse model state.
+The executor must not allocate/free runtime-owned page IDs.
 
 ## Runtime-to-device protocol
 
@@ -233,23 +219,15 @@ in flight        2             1                   1                       0    
 idle timer  disabled      disabled            disabled                  starts        Stop(plan)
 ```
 
-Future wiring may expose the tracked residency through a status API.
-
 ## Failure contract
 
-Snapshot and checkpoint I/O failures are recoverable operation errors.
-Lifecycle misuse is an internal invariant violation.
+| Failure | Behavior |
+| --- | --- |
+| Snapshot write/read, weight load, encoder start | Recoverable operation error, global shutdown, no success response |
+| Lifecycle misuse | Internal invariant violation |
 
-The event-loop wiring fails closed after these errors:
-
-- Snapshot write failure.
-- Snapshot read failure.
-- Weight load failure.
-- Encoder start failure.
-
-The current failure path invokes global shutdown and does not send a success response.
-Process shutdown discards the full runtime cache metadata.
-The service must not continue with runtime page IDs that refer to invalid executor state.
+Shutdown discards runtime cache metadata.
+The service must not continue with page IDs that refer to invalid executor state.
 
 ## Integration verification
 

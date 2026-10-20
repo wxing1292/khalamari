@@ -102,22 +102,17 @@ GPU intervals and preserves the normal completion path.
 
 ### Buffer I/O
 
-`BufferIO::create` creates a new output file.
-`BufferIO::open` opens an existing input file.
-Both methods require `BufferIOFileCacheMode::Cached` or `BufferIOFileCacheMode::Uncached`.
-The uncached mode applies `F_NOCACHE` for positional I/O and `F_GLOBAL_NOCACHE` for all handles of that file.
-Both methods return one `BufferIOFile` that owns the POSIX and Metal handles for the same file.
+| API | Contract |
+| --- | --- |
+| `BufferIO::create` / `BufferIO::open` | New output / existing input, explicit cached/uncached mode |
+| `BufferIOFile` | Owns POSIX and Metal handles for one file |
+| `BufferIO::file_to_buffer` | Serial `MTLIOCommandQueue`, ranges over 1 GiB split into serial commands |
+| `BufferIO::buffer_to_file` | Positional writes from shared `MTLBuffer` storage |
+| `Uncached` | `F_NOCACHE` positional I/O and `F_GLOBAL_NOCACHE` Metal file handle |
 
-`BufferIO::file_to_buffer` uses a serial Metal I/O queue (`MTLIOCommandQueue`).
-The queue follows the [synchronous concurrency contract](../../docs/model_state_io.md#bufferio).
-It divides ranges larger than 1 GiB into serial commands.
-On the supported Apple Silicon path, Metal I/O rejects a command when its size reaches 2 GiB.
-`BufferIO::buffer_to_file` writes directly from shared `MTLBuffer` storage with positional file I/O.
-Both methods are synchronous.
-Both methods list the source range before the destination range.
-
-The caller must complete earlier GPU access before it starts a transfer.
-The snapshot owner controls file synchronization and publication.
+Both transfers are synchronous and list source before destination.
+The caller must finish earlier GPU access. The snapshot owner controls sync/publication.
+See the [I/O concurrency and size limits](../../docs/model_state_io.md#bufferio).
 
 ## Add One
 
@@ -637,28 +632,14 @@ Each occurrence must use identical arguments because the replay owns its paramet
 
 ## Why Replay
 
-A conceptual direct path binds pipelines, buffers, constants, and the current grid for each submission:
+For the same operation and buffers:
 
 ```text
-conceptual direct submission
-  Operator metadata
-    -> bind resources again
-    -> encode current dispatch again
-    -> submit once
+build once:    pipeline + resource bindings + capacity grid -> ICB
+submit many:   runtime data + validated ReplayArguments -> execute ICB -> completion
 ```
 
-Replay moves the stable work to build time:
-
-```text
-implemented replay path
-  build once: pipeline + resources + capacity grid -> ICB
-  submit many: validate/write ReplayArguments -> execute ICB
-```
-
-The crate does not expose `DirectBatch` or direct operator variants. Production, benchmarks, and Metal correctness
-tests use the same replay and ICB path.
-
-CPU implementations remain the correctness oracles. This conceptual comparison shows the work that replay removes.
-It is not a second execution API.
-
+Production, benchmarks, and Metal correctness tests use this path.
+The crate has no `DirectBatch` or direct operator variants.
+CPU implementations provide correctness oracles.
 [`src/metal/stream/mod.rs`](src/metal/stream/mod.rs) contains executable add-one coverage.

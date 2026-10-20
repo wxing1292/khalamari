@@ -45,28 +45,11 @@ They differ in which state entries the snapshot contains.
 
 ## Ownership
 
-Runtime core owns these concepts:
-
-- Request lifecycle and request slots.
-- Trie metadata and logical cache blocks.
-- KV and state page allocation.
-- Physical page IDs and block placement.
-- Cache eviction policy.
-
-The model executor owns these concepts:
-
-- `PageArena` payload interpretation.
-- GQA page-table interpretation.
-- GDN recurrent and convolution state.
-- GDN request state and future-publish mappings.
-- Model-specific gather and scatter operations.
-
-The Metal backend owns these concepts:
-
-- `Buffer`, `Device`, and compute `Stream`.
-- The `BufferIO` Metal I/O queue.
-- The `BufferIOFile` POSIX and Metal file handles.
-- File-to-buffer and buffer-to-file byte-range transfers.
+| Owner | Contract |
+| --- | --- |
+| Runtime core | Request/slot lifecycle, trie identity, page allocation/placement, eviction |
+| Model executor | `PageArena`/GQA interpretation, GDN state and future publications, model gather/scatter |
+| Metal backend | `Buffer`, `Device`, compute `Stream`, `BufferIO` queue, `BufferIOFile` handles, byte transfers |
 
 ## Whole-model full state
 
@@ -488,28 +471,22 @@ The request enters the scheduler only after all selected blocks have Device plac
 
 ## Failure behavior
 
-A whole-model snapshot failure fails the Stop or Start operation.
-The current service can use global shutdown because it has no rollback response protocol.
-
-A failed Stop write leaves model state and weights resident.
-The executor releases state only after snapshot publication succeeds.
-
-A failed Start must release provisional allocations.
-It must not attach partial state.
-
-A request or block I/O failure must remain request-scoped or block-scoped.
-It must not publish a partial placement change.
+| Operation | Failure contract |
+| --- | --- |
+| Stop snapshot write | Leave state/weights resident, release only after publication |
+| Start restore | Release provisional allocations, never attach partial state |
+| Current whole-model service | Fail Stop/Start and shut down globally, no rollback response protocol |
+| Planned request/block I/O | Keep error local, never publish partial placement |
 
 ## Implementation order
 
-1. Measure standalone `BufferIO` file-to-buffer and buffer-to-file throughput. Complete.
-2. Add the v2 semantic-resource directory snapshot. Complete.
-3. Migrate full-state Stop/Start from v1 staging to `BufferIO`. Complete.
-4. Add `ExecutorHibernationPlan` and selected component I/O. Complete.
-5. Measure full-state and selected-state throughput and peak memory with production model layouts.
-6. Add per-request swap at the scheduler commit boundary.
-7. Add unified trie placement and `BlockIOTask`.
-8. Add cross-node transfer only after local I/O is correct.
+| Status | Work |
+| --- | --- |
+| Implemented | Standalone `BufferIO`, semantic-resource directory snapshots, full and selected Stop/Start |
+| Next | Measure full/selected throughput and peak memory with production layouts |
+| Planned order | Request swap at commit boundary -> unified trie placement/`BlockIOTask` -> cross-node transfer |
+
+See [active work](future_work.md#runtime-lifecycle).
 
 ## Deferred decisions
 
