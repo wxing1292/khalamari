@@ -561,6 +561,54 @@ from core lifecycle.
 If one forward must replace only executor-local state, use a specific set or update operation. Do not reset the whole
 slot.
 
+## Sync CPU task pool
+
+[`SyncTaskPool`](../crates/inference-runtime-core/src/runtime/tasks/sync_task_pool.rs) runs synchronous CPU tasks on a
+dedicated Rayon pool. It is standalone. Requests, scheduling, and guided decoding do not use it yet.
+
+`SyncTaskPool::new(shutdown, num_runners)` creates the worker threads. `num_runners` must be positive.
+Thread creation failures return `Error::Unavailable`. Cloned handles share the same workers.
+Rayon owns the task queue and worker lifecycle. This pool does not need an `event_loop`.
+
+`spawn` takes an owned `FnOnce() -> Result<T>` closure and submits it before returning.
+It returns a `tokio::sync::oneshot::Receiver<Result<T>>` directly, with one channel per task.
+The caller does not need to receive or poll for the task to run.
+The worker moves the result to the receiver. It does not clone task inputs or results.
+
+The receiver supports `try_recv(&mut self)`, `blocking_recv(self)`, and `.await`.
+`try_recv` returns `Empty` while the task is pending and `Closed` if the sender disappears without a result.
+`blocking_recv` must run outside asynchronous execution contexts. `.await` also works with non-Tokio executors.
+A successful receive returns the task's `Result<T>`. A disconnected sender produces an outer oneshot `RecvError`.
+The pool adds no boxed future or async wrapper around the receiver.
+
+This example submits a state snapshot after token ID `11`:
+
+```text
+caller owns SM after token 11
+  |
+  +--clone--> owned snapshot --> spawn closure --> Rayon worker
+  |                                                  |
+  |                                            compute mask
+  |                                                  |
+  +--retain oneshot receiver <---- send(mask) <-------+
+          |
+          +--try_recv / blocking_recv / .await --> owned mask
+```
+
+Dropping the receiver closes its channel. A worker skips the task if it observes the closed channel before execution.
+A running synchronous task continues. Its result is discarded when the receiver is gone.
+
+Shared shutdown rejects new tasks and skips queued tasks with `Error::Unavailable`.
+Running tasks finish normally. Queued tasks report their errors when workers reach them.
+Dropping the last pool handle lets Rayon finish submitted work and stop its threads.
+Dropping a handle does not join the workers.
+The queue has no admission limit. Callers must bound their outstanding tasks.
+
+A caught task panic returns `Error::Internal` with the panic message when available.
+It does not trigger shared shutdown or resume the panic in the caller. The pool can execute later tasks.
+A returned task error also leaves the pool running.
+The Rayon panic handler triggers shutdown for uncaught panics outside the task guard, such as a panicking destructor.
+
 ## Guided decode state machine
 
 [`GuidedDecodeSM`](../crates/inference-runtime-core/src/runtime/guided_decode.rs) defines a standalone CPU state machine.
@@ -576,7 +624,7 @@ Clones must share immutable data and keep mutable state inexpensive to copy or c
 `fill_mask(self: Box<Self>)` consumes an owned SM snapshot and returns one `MaskFuture`.
 The caller clones its SM before calling `fill_mask` when it needs to retain the original.
 An implementation must submit any background work before it returns. The task owns the consumed snapshot and the
-mask buffer. The future does not borrow the caller's SM. No CPU task pool is implemented yet.
+mask buffer. The future does not borrow the caller's SM. The state machine does not use `SyncTaskPool` yet.
 
 `Mask::AllowAll` permits every token without allocating a bitset. `Mask::Bitset` owns packed `u32` words.
 Bit `token_id % 32` in word `token_id / 32` permits that token when set. The bitset must cover the vocabulary.
@@ -595,7 +643,7 @@ sm: DefaultStateMachine
   +--still owned by caller
 ```
 
-The module has no activation controller, task pool, or runtime token cursor.
+The module has no activation controller or runtime token cursor.
 Jump-forward completion is not supported. Applying one token must not append, replace, or promote other tokens.
 
 ## Stop and EOS handling

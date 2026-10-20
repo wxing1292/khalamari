@@ -1,6 +1,9 @@
 mod async_task_pool;
 pub use async_task_pool::AsyncTaskPool;
 
+mod sync_task_pool;
+pub use sync_task_pool::SyncTaskPool;
+
 mod async_task;
 pub use async_task::AsyncTaskReq;
 pub use async_task::AsyncTaskResp;

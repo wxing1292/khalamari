@@ -1554,6 +1554,7 @@ dependencies = [
  "offset-allocator",
  "ordered-float",
  "rand 0.10.3",
+ "rayon",
  "serde_json",
  "slotmap",
  "smallvec",

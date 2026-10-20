@@ -30,6 +30,7 @@ nix = { workspace = true, features = ["fs", "mman", "process", "zerocopy"] }
 offset-allocator = { workspace = true }
 ordered-float = { workspace = true }
 rand = { workspace = true, features = ["std"] }
+rayon = { workspace = true }
 serde_json = { workspace = true }
 slotmap = { workspace = true }
 smallvec = { workspace = true }
