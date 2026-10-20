@@ -54,20 +54,16 @@ The Firecracker [setup](firecracker/setup.md) and [commands](firecracker/command
 
 ## Maintenance rules
 
-Give each document one primary purpose:
+| Content | Owner |
+| --- | --- |
+| Durable rules | [Engineering conventions](engineering_conventions.md) |
+| Current contracts, source paths, findings | Component guide |
+| Shared verification/benchmark commands | Workflow guide |
+| Active investigation or incomplete work | [Future work](future_work.md) |
+| English style | [Technical English](technical_english.md) |
+| Measurement validity | [Performance evidence](executor_benchmarks.md#performance-evidence) |
 
-- Put durable repository rules in `engineering_conventions.md`.
-- Put component contracts, source paths, and findings in the guide for that component.
-- Put shared verification and benchmark commands in the workflow that owns them.
-- Put active follow-up work in `future_work.md`. Link to a focused design document when an unresolved contract needs more detail.
-
-Recommendation: Link to the owner with a one-sentence description instead of duplicating its contract.
-Keep a component command only when it explains the production path or its flags.
-Keep headings navigable and source paths current.
-Consolidate or delete stale prose when a stable rule moves to an owning document.
-Do not describe desired future state as current API or source.
-Do not add broad historical note directories.
-Apply [technical English](technical_english.md) to new and revised English documentation.
-
-Follow the [performance evidence rules](executor_benchmarks.md#performance-evidence) for measurements.
-Run GPU and performance commands one at a time.
+Link to the owner. Delete stale duplication instead of creating historical note directories.
+Keep headings, source references, and commands current.
+Planned work must not appear as current API.
+Run GPU/performance commands one at a time.

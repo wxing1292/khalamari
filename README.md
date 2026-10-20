@@ -16,20 +16,15 @@ gRPC Decode ──────────────────────�
                                └──────── tokens + lifecycle ────────┘
 ```
 
-Each layer has a separate owner:
-
-- **Runtime core:** Owns scheduling, request lifecycle, and cache ownership.
-- **Qwen executor:** Owns model layout, components, sampling, speculative model roles, and replay order.
-- **Metal backend:** Owns devices, buffers, kernels, recording, and indirect command buffer (ICB) submission.
+| Layer | Owner |
+| --- | --- |
+| Runtime core | Scheduling, request/cache lifecycle |
+| Qwen executor | Model layout, components, sampling, Spec roles, replay order |
+| Metal backend | Devices, buffers, kernels, recording, indirect command buffer (ICB) submission |
 
 ## Quick start
 
-You need these items:
-
-- Apple Silicon Mac
-- Rust toolchain
-- Xcode command-line tools
-- Hugging Face CLI with access to the model
+Requirements: Apple Silicon Mac, Rust toolchain, Xcode command-line tools, and Hugging Face CLI with checkpoint access.
 
 Run the commands from the repository root. This example uses Qwen3.8 dense 27B with multi-token prediction (MTP).
 See [other service modes](#other-service-modes) for sparse, and DFlash2 examples.
@@ -175,27 +170,8 @@ The [performance record](docs/executor_benchmarks.md#main-only-serving-results-2
 The supplied summary does not include run count, variance, or memory telemetry.
 These observations are not performance thresholds.
 
-<details>
-<summary>Historical speculative reference, 2026-09-19</summary>
-
-These Spec results precede the current GQA and matmul changes. They are not measurements of current `main`.
-The producing profile was Apple M3 Max (40 GPU cores), macOS 27.0, arm64, with an output limit of 1024 tokens.
-
-| Mode      | 27B GSM8K | 27B Chat | 35B GSM8K | 35B Chat |
-| --------- | --------: | -------: | --------: | -------: |
-| MTP=1     |    39.110 |   33.988 |   148.439 |  135.227 |
-| MTP=2     |    39.618 |   30.503 |   154.959 |  128.282 |
-| MTP=3     |    38.399 |   22.353 |   163.067 |  117.661 |
-| MTP=4     |    36.361 |   18.693 |   148.795 |  105.720 |
-| DFlash2=7 |    47.769 |   21.303 |         — |        — |
-
-The historical source was `d6dc5da7`, before history cleanup.
-Output lengths and acceptance trajectories vary. Dirty state, run count, and variance were not supplied.
-A dash means no reference result.
-The [perf script](scripts/qwen35_e2e_decode_perf.sh) retains the original 48-case reference, including its historical Off values.
-Its comparison baseline remains dated 2026-09-19.
-
-</details>
+Historical Spec results use the helper's 2026-09-19 baseline and precede current GQA/matmul changes.
+See the [perf script](scripts/qwen35_e2e_decode_perf.sh) for its reference cases and provenance limits.
 
 See the [performance helper guide](docs/service.md#end-to-end-performance-helper) for commands, configuration, and comparison limits.
 

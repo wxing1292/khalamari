@@ -6,28 +6,21 @@ The [documentation index](README.md) routes readers to component and workflow do
 
 ## Doc style
 
-Use the [technical English style](technical_english.md) for repository prose.
+Use [ASD-STE100-informed English](technical_english.md). Prefer ASCII tables and data-flow diagrams over repeated prose.
 
-Recommendation: Keep the text concise, clear, useful, and aligned with the source.
+| Document | Owns |
+| --- | --- |
+| `AGENTS.md` | Agent workflow, repository map, verification entry points |
+| Root README | Project model and first request |
+| Documentation index | Task routing and current/planned status |
+| Architecture guide | Ownership and data flow |
+| Component guide | Current `src`, contracts, validation, findings |
+| Workflow guide | Shared commands and operations |
+| `future_work.md` | Active investigations and incomplete work |
+| `engineering_conventions.md` | Durable engineering rules |
 
-Current-component documents describe the current `src`. Update the owning component document when a source layout or default path changes.
-Use the documentation index to find that owner.
-
-Put active follow-up work in `docs/future_work.md`. Put durable repository rules in
-`docs/engineering_conventions.md`. Put component findings in the document that owns the component.
-
-Do not create broad directories for historical or performance archaeology.
-
-Give each document one primary purpose:
-
-- `AGENTS.md` gives agents the repository map, workflow, critical constraints, and verification entry points.
-- The top-level README gives the project model and first-run path.
-- The documentation index routes readers by task and distinguishes current behavior from planned work.
-- Architecture documents define ownership and data flow.
-- Component documents describe the current source and validation.
-- Workflow documents contain shared commands, verification rules, and operations.
-
-Link to the document that owns a contract. Do not copy the same contract into multiple documents.
+Link to each contract's owner. Do not copy it or create broad historical/performance archaeology directories.
+Update the owning component guide when source layout or default paths change.
 
 ## Core vs executor
 
@@ -42,364 +35,176 @@ model.
 
 ## Shared hard constraints
 
-Use `panic!`, `assert!`, or `debug_assert!` for internal invariant violations and impossible contract states.
-
-Use a release `assert!` only at these boundaries:
-
-- Initialization
-- A one-time structure or ownership check
-- A contract that release code must enforce
-
-Use `debug_assert!` for repeated internal checks that add noise to a release hot path. Tests and debug builds cover
-these checks. Classify each check by its lifecycle and cost. Do not convert checks mechanically.
-
-Use the shared typed `Error` for a recoverable failure. Select the variant from the result that the caller observes.
-Examples include `InvalidArgument`, `Unavailable`, and `Internal`. Use assertions or panics for internal invariant
-violations.
-
-Do not use `pub(crate)` or `pub(super)`. Keep items private by default. Use plain `pub` only for an intentional API.
-
-Run formatting as `cargo +nightly fmt`.
-
-Match the verification work to the change stage:
+| Boundary | Required behavior |
+| --- | --- |
+| Recoverable failure | Shared typed `Error`, variant selected by caller-visible semantics |
+| Internal invariant violation | `panic!`, `assert!`, or `debug_assert!` |
+| Release `assert!` | Initialization, one-time structure/ownership checks, or a release-enforced contract |
+| Repeated hot-path invariant | `debug_assert!`, without rechecking a fact the owner already proved |
+| Visibility | Private by default, plain `pub` for intentional APIs, no `pub(crate)` or `pub(super)` |
+| Rust formatting | `cargo +nightly fmt` |
+| Module roots | Normal `use` imports before module declarations |
 
 ```text
-development       focused unit tests at the production owner
-integration       relevant package tests plus repository compile gates
-final acceptance  the real production path through an external caller
+focused owner tests -> relevant package tests + compile gates -> external production caller
+                                                              -> expensive GPU acceptance
 ```
 
-Recommendation: For final acceptance, start a release server when a change affects a server or RPC path. Exercise the
-protocol from outside the process. Make sure that the server stops cleanly.
+Use the [verification commands](../AGENTS.md#verify-the-changed-contract) that match the changed contract.
+Run Metal/GPU commands one at a time. Parallel workspace tests are not a GPU gate.
+Run expensive GPU checks at final acceptance, or earlier to resolve a correctness question.
+Recommendation: For RPC acceptance, run a release service, exercise its protocol externally, and verify clean shutdown.
 
-Do expensive GPU checks during final acceptance. Do them earlier only when they answer a correctness question.
+Production source defines ownership and lifecycle. Tests and benchmarks must not add production state, compatibility branches, or abstractions only for convenience.
+Start from production contracts. Add boundary tests for real structural risks.
 
-Before handing off broad Rust changes, run the [repository compile gates](../AGENTS.md#verify-the-changed-contract).
-For documentation-only changes, check links, source references, command accuracy, and `git diff --check`.
-
-Run Metal and GPU commands one at a time. Coordinate these commands across processes. Do not use parallel workspace
-tests as a GPU verification gate.
-
-In a Rust module root, list normal `use` imports before module declarations.
-
-Recommendation: Expose a child module with `pub mod`. Do not re-export child items through the parent without a clear
-API need.
-
-A child directory can define public items. Recommendation: Do not make the parent a broad facade for the child API.
-
-```rust
-use some_crate::Thing;
-
-pub mod direct;
-pub mod replay;
-```
-
-Do not change production `src` only to make a benchmark easier.
-
-Production `src` defines the ownership, lifecycle, and API contract. Tests and benchmarks validate that contract
-through production paths. They must not add optional production state, compatibility branches, or test-only
-abstractions.
-
-Start with the production source. Add a boundary test when it identifies a structural risk or a production invariant.
-Do not add a test as a mechanical response to each edit.
-
-Keep production source and tests concise. Remove redundant derived state and one-use forwarding helpers. Remove
-one-field wrappers and repeated setup abstractions.
-
-Keep an item when it expresses one of these concepts:
-
-- A real owner
-- An invariant
-- A lifecycle
-- A reusable operation
-- The peer-component symmetry in this document
+Recommendation: Expose child modules with `pub mod`. Avoid parent re-exports without an API need.
 
 ## Delegated work
 
-When a child task owns work, the parent must not do the same work. The parent coordinates the tasks.
+| Owner | Responsibility |
+| --- | --- |
+| Parent | Scope, integration state, shared-resource serialization, conflicts, status, final verification |
+| Child | Its assigned work, progress, questions, and results |
 
-The parent owns these items:
-
-- Scope boundaries
-- Shared-checkout and integration state
-- GPU and resource serialization
-- Cross-task conflict prevention
-- Status collection
-- Final integration and verification
-
-The child reports progress, questions, and results. The parent remains available for these reports. The parent does not
-use block polling or busy waiting.
+The parent must not duplicate a child's work. Keep scopes separate and remain available for reports.
+Do not use busy waiting or block polling.
 
 ## Ownership style
 
-Name the managed objects before you add APIs.
-
-Add an entity only when it owns a distinct concept, invariant, resource, lifecycle, or reusable operation.
-An entity can also be necessary when it materially improves clarity.
-This rule applies to wrappers, structs, fields, enums, helpers, buffers, scratch owners, compatibility paths, validation layers, and tests.
-
-Recommendation: Use direct data flow. Do not minimize the number of entities mechanically.
-
-Use the peer-component symmetry guidance in [Design style](#design-style) when comparing owners.
-
-Keep stable identity and explicit data-type or tuning choices. Derive facts and capacities from the model or
-configuration dimensions that own them. Do not store duplicates, pass duplicates, or use convenient magic limits.
-
-When a backend component API owns shape validation, use the same structure across peer components:
-
-1. Validate positive dimensions and relationships.
-2. Calculate named derived counts with checked arithmetic.
-3. Assert the shader domain.
-4. Validate the invocation-buffer ranges.
-5. Dispatch with the same derived count.
-
-This validation establishes the trusted shape domain. An upstream input, constructor, or initialization boundary can
-establish the same domain before the backend call. In that case, the private backend path must use ordinary arithmetic.
-It must not repeat checked arithmetic or recoverable validation for the same shape. Peer components must select the
-same owning boundary when their contracts match.
-
-A `u32` shader count must reject `2^32`. A `u32` element-index domain can contain exactly `2^32` elements. Its maximum
-index is `u32::MAX`. Name each assertion and boundary test for its `count` or `index` domain.
-
-Recommendation: Use small, object-owned surfaces:
+Name the managed object before adding APIs.
+An entity must own a concept, invariant, resource, lifecycle, reusable operation, or material clarity.
+Remove redundant derived state and one-use forwarding helpers.
+Keep stable identity, explicit dtype/tuning choices, and meaningful resource views.
+Derive counts and capacities from the dimensions that own them.
+Recommendation: Use direct data flow. Do not minimize entity count mechanically.
 
 ```text
-get / get_ref / get_mut
-set
-push / pop
-reset
+external input/configuration
+  -> validate owning boundary once
+     positive dimensions -> checked derived counts -> shader domain -> buffer ranges
+  -> trusted private path: ordinary arithmetic + lossless casts -> dispatch
 ```
 
-`reset` changes the full managed object at that scope. If only one field changes, use `set_<field>`.
+An upstream initialization boundary can establish the same domain.
+The private backend path must not repeat its checks.
+Peer components must use the same owning boundary when their contracts match.
 
-The owner controls the lifecycle.
+| Domain | Boundary |
+| --- | --- |
+| `u32` shader count | Reject `2^32` |
+| `u32` element index | Exactly `2^32` elements are valid, maximum index `u32::MAX` |
 
-Recommendation: Do not use hot-path cleanup calls to compensate for unclear ownership.
+Name assertions/tests for the count or index domain they protect.
+Keep checked arithmetic at real allocation, file, snapshot, narrowing, shader, runtime, and state-version boundaries.
 
-Use lifecycle verbs for lifecycle APIs:
+| API | Meaning |
+| --- | --- |
+| `get / get_ref / get_mut`, `set`, `push / pop` | Small object-owned operations |
+| `reset` | Reset the full managed object at that scope |
+| `set_<field>` | Change only that field |
+| `new` | Construct an owner, external access only if its contract requires it |
+| `load` / `unload` | Acquire/release the same resource shape |
+| `load_all` / `unload_all` | Acquire/release every resource in the current domain |
 
-```text
-new         construct an owner without touching external resources unless that is the owner contract
-load        load the named object/resource at that API scope
-unload      release the same object/resource shape that load acquires
-load_all    load every resource in the owner's current domain
-unload_all  release every loaded resource in the owner's current domain
-```
+Recommendation: Keep lifecycle pairs symmetric within one owner.
+Do not add hot-path cleanup operations to compensate for unclear ownership.
 
-Keep lifecycle verbs symmetric in one owner.
+A mapping/index owns data relationships. The store owns path resolution, mapped-file caches, base directory, and resource lifetime.
+Use `load(model_dir)` or `from_model_dir(model_dir)` for fixed checkpoint layouts.
+Recommendation: Keep `new(model_dir, index)` when callers also need explicit composition.
+Do not hide another resource lifecycle behind the same load/unload pair.
 
-Recommendation: Do not let `load()` acquire one state type while `unload()` releases a different type.
-
-Recommendation: When an owner manages many resources, use these symmetric pairs:
-
-- `load(file_name)` and `unload(file_name)`
-- `load_all()` and `unload_all()`
-
-Do not make callers pass the same derived context many times. A model directory can have a fixed file layout. In this
-case, expose `load(model_dir)` or `from_model_dir(model_dir)`. Do not make each caller build a
-`model.safetensors.index.json` path.
-
-Keep data ownership separate from resource ownership.
-
-Recommendation: A mapping or index object represents only the mapping.
-
-The store owns path resolution, mapped-file caches, and resource release. The store also owns the base directory and
-the resource lifecycle.
-
-Recommendation: Use explicit composition when both constructors are useful:
-
-- `new(model_dir, index)`
-- `from_model_dir(model_dir)`
-
-Do not hide a second resource lifecycle behind the same `load` and `unload` pair.
-
-A core or executor contract can guarantee a condition. Check that condition at the boundary where a violation becomes
-visible. Do not add defensive recovery code that hides lifecycle bugs.
-
-Distinguish an invariant check from a data-flow bug. Existing data flow can already guarantee a condition. In this case,
-add the smallest useful check at the owning boundary.
-
-Select `assert!` or `debug_assert!` with the [shared hard constraints](#shared-hard-constraints). Do not add recovery state for an
-impossible case. This restriction also applies to types, branches, and grouping.
-
-Change the structure only in these cases:
-
-- Valid inputs can violate the current data flow.
-- The owner cannot guarantee the condition.
+An impossible lifecycle state is an invariant bug, not a recoverable error.
+Change the structure only when valid inputs can break the data flow or the owner cannot enforce the contract.
 
 ## Design style
 
-Recommendation: Use first-principles contracts instead of compatibility patches. First, define caller-visible inputs,
-outputs, ownership, and state transitions.
+```text
+caller inputs/outputs + ownership + state transitions
+  -> compare peer contracts -> select reusable backend implementation
+  -> verify intended default -> remove obsolete implementation
+```
 
-Then, select the backend implementation that satisfies the contract.
+Recommendation: Use established libraries when they reduce maintenance or correctness risk.
+Keep project semantics at their owner, such as Qwen response grammar above a generic incremental tokenizer.
 
-Remove a known incorrect implementation after you verify the correct default path. Do not keep it behind a feature
-flag, environment variable, or fallback.
+| Peer contracts match | Real semantic/lifecycle difference |
+| --- | --- |
+| Parallel names, APIs, ownership, replay and tests | Keep the difference explicit at its owner |
+| Small symmetric entity when it clarifies the contract | No entity only for visual symmetry |
 
-Recommendation: Use an established library when it reduces correctness or maintenance risk. Keep project-specific
-semantics local.
+Peer examples include GQA/GDN state tables, dense MLP/MoE, and sampling/rejection sampling.
 
-For example, a generic tokenizer can own incremental decoding. A Qwen codec owns the Qwen response grammar.
-
-Keep interfaces symmetric across related components. Examples include these component pairs:
-
-- Sampling and rejection sampling
-- GQA and GDN state tables
-- Dense MLP and MoE paths
-
-Use parallel names for shapes, inputs, outputs, scratch, kernels, and record methods. Use different names only when the
-semantics are different.
-
-Structural and API symmetry lets a reader transfer ownership, lifecycle, data-flow, test, and profiling knowledge between peer components.
-Preserve that clarity before reducing entity count mechanically.
-Use a small symmetric entity when it makes the peer contract clear.
-Do not add an entity only for visual symmetry.
-
-Use an asymmetric design only for a concrete semantic or resource-lifecycle difference. State the difference at the
-owning boundary.
-
-Keep backend details behind backend APIs. Metal components may own these details:
-
-- Kernels and dispatch parameters
-- Tile scratch
-- Runtime resource bindings
-
-Performance optimizations must belong to reusable operators or components, such as matmul, GQA, GDN, sampling, and rejection sampling.
-Kernel selection must use workload facts, such as dimensions, dtype, quantization layout, topology, and device capabilities.
-Kernel selection must not use model family names, checkpoint names, or checkpoint paths.
-Model implementations must compose components and supply their validated inputs.
-Model-specific semantic contracts and checkpoint adaptation remain at the owning model boundary.
-Model-specific benchmark fixtures may validate reusable optimizations. They do not justify model-specific kernel routing.
-
-Recommendation: Model executors own model semantics, persistent model or request buffers, and component connections.
-They do not expose backend tiling, temporary scratch, or kernel-local tables in model APIs.
+Reusable backend operators/components own performance optimizations.
+Selection uses dimensions, dtype, quantization, topology, and device capabilities.
+It must not use model family names, checkpoint names, or checkpoint paths.
+Model implementations adapt checkpoints and compose components from validated semantic inputs.
+Model-specific fixtures may validate an optimization but do not justify model-specific routing.
 
 ## Model / layer / operator boundary
 
-Recommendation: Model executor code preserves this ownership hierarchy:
-
 ```text
-Model
-  owns whole-model orchestration:
-    embedding
-    main layers
-    final norm / unembedding
-    sampling / rejection sampling
-    MTP graph and logical steps
-    DFlash2 Prefill and fixed-block proposal graph
-    request state, replay caches, and stage ordering
-
-Layer / Component
-  owns semantic model computation:
-    GQA, GDN, dense MLP, MoE
-    embedding, unembedding, sampling, rejection sampling
-    MTP physical-layer and logical-step semantics
-    DFlash2 sliding attention, dynamic convolution, and selector semantics
-    model-level shape/input/output contract
-    weights, request metadata, state/page metadata at that semantic boundary
-    record support for replay composition
-
-Operator
-  owns backend execution:
-    kernels and dispatch shapes
-    buffers, weights, scratch binding structs
-    resource read/write/read_write declarations
-    command barriers and backend dependency requirements
-    replay recording
-
-Backend Command
-  owns one backend dispatch:
-    exactly one backend pipeline or executable function
-    resource and parameter bindings
-    backend execution geometry
-    consumer-side barrier attribute
+Model                         Which whole-model stage runs next?
+  embedding -> Main layers -> final norm/unembedding -> sampling/rejection
+  MTP logical steps, DFlash2 proposal graph, request state, replay caches
+    |
+Layer / Component             Which semantic computation and state does this own?
+  GQA, GDN, MLP, MoE, embedding, sampling, MTP/DFlash2 layer semantics
+  typed weights, requests, pages, inputs, outputs, record support
+    |
+Operator                      How does this operation run on the backend?
+  kernels, scratch/bindings, resource access, barriers, replay recording
+    |
+Backend Command               One dispatch
+  one pipeline/function + bindings + geometry + consumer barrier
 ```
 
-The model answers, "Which whole-model stage runs next?" A layer or component answers, "Which model computation and state
-does this layer own?"
+Metal uses one compute-pipeline dispatch per ICB slot.
+One component can emit several operators. One operator can emit several commands.
+Model code must not bind backend resources when a semantic layer can own that boundary.
+Backend operators must not contain model request semantics that a component can translate.
 
-An operator answers, "How does this tensor operation run on this backend?" A backend command is one concrete dispatch
-from that operation.
+| Boundary trait | Contract |
+| --- | --- |
+| `ReplayLayer` | Typed model-executor semantic replay |
+| `Recorder` | Backend recording |
+| `Operator` | Backend-recordable execution |
 
-Metal uses one compute-pipeline dispatch in an ICB slot. A different backend can use a kernel launch or graph node. One
-component can emit multiple operators. One operator can emit multiple commands.
-
-Do not let model code bind backend resources directly when a semantic layer can own that boundary. A component is also
-a semantic layer.
-
-Do not let backend operators contain model-specific request semantics when a layer or component can translate them into
-backend buffers.
-
-Recommendation: Use traits to enforce this boundary where drift is likely:
-
-```text
-ReplayLayer                 model-executor semantic replay contract with typed input/output
-Recorder                    backend replay recording contract
-Operator                    backend recordable execution contract
-```
-
-Recommendation: Use concrete types for clear implementations.
-
-Use traits as boundary constraints. Do not use traits as general dynamic-dispatch abstractions.
-
-Recommendation: Semantic layers record through `inference-executor-core::backend::recorder::Recorder`. They do not
-depend directly on a concrete backend batch builder.
-
-The model replay-cache boundary can lower semantic records into the Metal recorder. It does this operation when it
-records a cached replay.
-
-Recommendation: Do not expose lower-level builder details in component inputs or public executor APIs.
-
-Recommendation: Use direct calls when the caller contains the related invariants.
-
+Recommendation: Use concrete types for clear implementations and traits where boundaries can drift.
+Recommendation: Semantic layers record through `inference-executor-core::backend::recorder::Recorder`.
+The model replay-cache owner lowers records into the Metal recorder when it builds a cached replay.
+Do not expose lower-level builders in component inputs or public executor APIs.
 Do not add a wrapper that only repackages arguments.
 
-An extent, state, or planner wrapper must add ownership or contract meaning.
+Recommendation: Separate initialization from runtime work:
 
-Reuse resources at the narrowest correct owner. Allocate immutable weights and stable kernels during initialization.
-Allocate component or model scratch one time.
+```text
+initialization/cache build                 runtime hot path
+weights + kernels + reusable scratch       current token/page/state metadata
+relayout + path resolution                 submit cached/recorded work
+kernel-selection tables                    read required small CPU outputs
+```
 
-The scratch owner must be able to share the scratch safely across time. Do not add a GPU-to-GPU copy when the producer
-can write directly into the consumer's persistent destination buffer.
-
-Recommendation: Runtime hot paths do only runtime work:
-
-- Write the current token, page, and state metadata.
-- Submit cached or recorded work.
-- Read the small CPU-visible outputs that the runtime contract requires.
-
-Do relayout and path resolution during initialization. Build kernel-selection tables and allocate reusable buffers
-during initialization or cache construction.
+Reuse resources at the narrowest safe owner.
+The producer must write directly to a consumer's persistent destination when an intermediate GPU copy is unnecessary.
 
 ## Engineering conventions
 
-[`engineering_conventions.md`](engineering_conventions.md) gives the detailed rules for these subjects:
-
-- Naming
-- Coordinate and numeric domains
-- GPU Tile and Task terms
-- Runtime shapes and persistent layouts
-- Public APIs
-- Test style
-
-Use that document for detailed source and test rules.
+[Engineering conventions](engineering_conventions.md) own naming, coordinate/numeric domains, Tile/Task vocabulary,
+shape/layout separation, public APIs, replay safety, and test style.
 
 ## Performance evidence
 
-Each performance claim must identify these facts:
+Use the [complete evidence contract](executor_benchmarks.md#performance-evidence):
 
-- The exact commit and dirty state
-- The machine and environment
-- The model and command
-- The baseline and current result
-- The verdict
+```text
+commit + dirty state + machine/environment + model/command
+  + baseline/current samples + workload/metric + verdict
+```
 
-Compare the same work. Do not compare throughput alone. For speculative decoding, also report sampled tokens, chunks or
-decisions, and acceptance efficiency.
-
-A throughput change can have a different deterministic acceptance trajectory. This change alone does not identify an
-executor or kernel regression.
+Compare the same work. For Spec, include sampled tokens, chunks/decisions, and acceptance efficiency.
+A changed acceptance trajectory alone does not establish an executor/kernel regression.
 
 ## Definition of done
 
@@ -420,19 +225,15 @@ current docs are updated if behavior/layout changes
 
 ## Common anti-patterns
 
-Recommendation: Do not use these patterns:
-
-```text
-scheduler logic inside executor components
-model-specific ownership of reusable component semantics
-runtime core parsing model tensor layout
-bench-driven production architecture changes
-defensive state machines that hide contract violations
-temporary workaround code behind polished APIs
-feature/env switches that keep obsolete production paths alive
-GPU copies between two buffers when the producer can write the final destination
-random helper buckets
-large inline test modules
-public exports of kernel/planning internals
-claiming completion before default path, tests, benches, and cleanup are verified
-```
+| Pattern | Correct owner or contract |
+| --- | --- |
+| Scheduler logic in executor components | Runtime core |
+| Model tensor-layout parsing in runtime core | Model executor |
+| Model-specific reusable kernel policy | Backend operator/component |
+| Bench-driven production abstractions | Production ownership and lifecycle |
+| Defensive recovery for impossible states | Owning invariant |
+| Obsolete paths behind feature/env switches | Verified intended default |
+| Extra GPU copies | Producer writes final destination |
+| Helper buckets, one-field forwarding wrappers, broad exports | Explicit owner with a real consumer |
+| Mechanical tests, large inline modules | Focused owner contracts and sibling test files |
+| Premature completion claims | [Definition of done](#definition-of-done) |

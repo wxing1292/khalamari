@@ -1,13 +1,6 @@
 # Engineering Conventions
 
-This document gives repository-wide engineering conventions:
-
-- Naming
-- Runtime shapes and storage layouts
-- Replay and resource safety
-- Optimization
-- Public APIs
-- Test style
+This guide owns naming, shapes/layouts, replay safety, optimization, public APIs, and test style.
 
 [`high_level.md`](high_level.md) defines architecture and ownership boundaries. Each component document defines its
 tensor terms, source owners, and execution paths. [`gpu_execution.md`](gpu_execution.md) defines the shared GPU launch,
@@ -15,36 +8,19 @@ specialization, task, tile, layout, registry, and selection vocabulary.
 
 ## Design decision order
 
-Use production ownership as the first design input. Do not start from a helper, branch, test fixture, or benchmark.
+```text
+owner + inputs/outputs + resources/lifecycle
+  -> invariant -> compare peer contracts -> smallest semantic entity
+  -> validate external boundary -> direct trusted data flow -> focused owner test
+```
 
-Use this order for a source or test design:
+Match APIs, source structure, replay policy, and test classification when peer contracts match.
+Keep real state/compute differences. Do not add lifecycle operations for visual symmetry.
+Peer groups include GQA/GDN, dense MLP/sparse MLP/MoE, and Main/MTP/DFlash2 shared role boundaries.
 
-1. Identify the owner, caller-visible inputs, outputs, resources, and lifecycle.
-2. Identify the invariant that the owner must enforce.
-3. Compare peer components that have the same contract.
-4. Apply the same owner boundary, API vocabulary, and structure where the contracts match.
-5. Keep a real contract difference. Do not add a lifecycle operation only to complete a symmetric API.
-6. Add an entity only when it owns a concept, invariant, resource, lifecycle, or reusable operation.
-7. Validate external input and configuration at the owning boundary.
-8. Use direct data flow and ordinary arithmetic in the same owner's private path after validation proves the result.
-9. Select the narrowest test layer that can express the contract.
-
-Transferable symmetry is a goal. Zero duplication is not a goal. Visual identity is not a goal.
-
-Apply strong symmetry to these peer groups when their contracts match:
-
-- GQA and GDN
-- dense MLP, sparse MLP, and MoE
-- Main, MTP, and DFlash2 model roles at shared role boundaries
-
-Compare public APIs, owner structure, source layout, replay policy, and test classification. Keep component-specific
-state transitions and compute paths when the contracts differ.
-
-Production source may change when the change clarifies a real owner, API, resource, or lifecycle. Production source
-must not change only to reduce test setup or expose an implementation detail.
-
-Runtime core must not own model-specific GQA, GDN, MLP, MoE, sampling, MTP, or DFlash2 policy. The model executor owns
-these semantics. The Metal backend owns their reusable kernels and dispatch implementation.
+Production source may change for real ownership, API, resource, or lifecycle needs.
+It must not change only for test setup or private-detail access.
+[High-level guidance](high_level.md#core-vs-executor) owns the runtime/executor/backend boundary.
 
 ## Rust semantic workflow
 
@@ -211,51 +187,31 @@ Use `q_*` only for the Q tensor and its dimensions.
 
 ## GPU work vocabulary
 
-Keep mathematical decomposition separate from launch topology:
+| Term | Contract |
+| --- | --- |
+| `*Tile` | Smallest named matmul-like unit at the component boundary, not a launch object |
+| `*Task` | Full logical work for one threadblock, 1:1 with that threadblock |
+| `*TaskTemplate` | Stored Task fields that regular grid coordinates cannot derive |
+| Threadblock | Cooperating threads, Metal threadgroup |
+| Warp | Hardware execution subgroup, Metal SIMDgroup |
+| Grid | All threadblocks in one dispatch |
+| `*PartialOutput` | Map result before reduction |
+| `*Output` | Fully reduced result |
 
-- A `*Tile` is the smallest named matmul-like unit at that component boundary. It is not a launch object.
-- A `*Task` is the full logical work for one threadblock. A Task and a threadblock have a 1:1 relationship.
-- A `*TaskTemplate` is an optional stored subset of Task fields. Regular grid coordinates reuse this subset.
-- A threadblock is one cooperating group of GPU threads. Metal calls it a threadgroup.
-- A warp is a hardware execution subgroup within one threadblock. Metal calls it a SIMDgroup.
-- A grid is all threadblocks launched by one kernel dispatch.
+```text
+TaskTemplate + regular grid coordinates -> one Task/threadblock -> one or more Tile steps
+selected PartialOutputs -> Reduce -> Output
+```
 
-`Task` and `TaskTemplate` identify logical work. They are not CUDA or Metal launch primitives.
+Use `threadblock`, `warp`, and `shared memory` in backend-independent text.
+Keep exact backend API terms, shader attributes, intrinsics, and identifiers.
+Examples include `threadgroup_barrier`, `simdgroup_index_in_threadgroup`, and `thread_index_in_simdgroup`.
 
-Use the CUDA execution terms in backend-independent documentation and source:
-
-| Project term    | CUDA term      | Metal term         |
-| --------------- | -------------- | ------------------ |
-| `threadblock`   | thread block   | threadgroup        |
-| `warp`          | warp           | SIMDgroup          |
-| `shared memory` | shared memory  | threadgroup memory |
-
-Keep the exact backend term in a backend API, shader attribute, intrinsic, identifier, or quotation. Examples include
-`threadgroup_barrier`, `simdgroup_index_in_threadgroup`, and `thread_index_in_simdgroup`.
-
-A Task can run one or more Tile steps. It can move one tensor tile repeatedly along an ordered axis.
-
-Put each path-specific Tile, Task, and Grid contract beside its Rust recorder or source owner. Do not put this contract
-on generic model metadata that multiple paths share.
-
-Do not add Rust or MSL items only to represent a threadblock, grid, or fully derived Task. This rule applies to structs
-and variables.
-
-At the owning Rust or MSL boundary, comments list each logical Task coordinate and its source. Identify grid-derived
-coordinates explicitly. Do not store a Task, TaskTemplate, or ABI buffer when all fields are derived.
-
-Name a Task only when a threadblock owns one semantic work unit. Some flat elementwise or map dispatches use
-threadblock grouping only for tuning.
-
-For these dispatches, describe the tensor map and grid. Do not add a `*Task` name.
-
-For irregular work, store only fields that regular rules cannot derive. One TaskTemplate and its grid coordinates must
-produce one Task for one threadblock.
-
-For a map/reduce pipeline, use `*PartialOutput` for the map result. Use `*Output` for the fully reduced result.
-
-Reduce metadata identifies its selected partial outputs. It does not identify the TaskTemplate that produced them.
-Put component coordinates, ABI records, and cumulative-offset examples in the owning component document and source.
+Put Tile/Task/Grid contracts beside their path's Rust recorder or source owner.
+Name each coordinate and its source. Do not store fully derived Tasks or add launch-only structs/variables.
+Flat elementwise/map dispatches need a tensor map and grid, not an artificial Task name.
+Reduce metadata identifies selected partial outputs, not their producer TaskTemplate.
+Component guides own ABI records and cumulative-offset examples.
 
 ## Runtime shapes and persistent layouts
 
@@ -468,45 +424,21 @@ A passing test on one GPU does not establish the storage layout of another GPU.
 
 ## Optimization correctness
 
-An optimization must preserve the semantic boundary that it replaces:
+| Must preserve | Validation |
+| --- | --- |
+| Tensor outputs, routes, probabilities, state versions, lifecycle effects | Exact owning component contract |
+| Verified state publication | Spec must not publish unverified future state |
+| Sampling distribution | Same transformed production distribution |
+| Small and large shapes | Keep strong shape-dependent paths |
+| Composition | Metadata/barriers, scratch lifetime, output ownership |
 
-- Tensor outputs
-- Routing decisions
-- Probability distributions
-- State versions
-- Lifecycle effects
+Establish parity before performance claims.
+For Spec, keep the deterministic trajectory fixed or report proposals, sampled/accepted tokens, chunks, and acceptance efficiency.
+Different trajectories are not like-for-like executor/kernel comparisons.
+Use [verification and evidence rules](executor_benchmarks.md).
 
-A speculative path must not publish unverified future state. An alternative sampler must use the same transformed
-distribution as the production path.
-
-Each current component document defines its exact sampling, state, and component-path contracts.
-
-Kernel and composition policies depend on shape. Keep strong paths for small and large shapes. Do not replace all paths
-with one locally faster specialization.
-
-A primitive microbenchmark is not sufficient evidence for a model-layer or end-to-end change. At representative
-shapes, validate these items:
-
-- Production composition
-- Metadata updates and barriers
-- Scratch lifetime
-- Output ownership
-
-Establish output, route, probability, or state parity before you make a performance claim. For speculative execution,
-keep the deterministic workload trajectory fixed.
-
-If the trajectory changes, report these values:
-
-- Proposals
-- Sampled tokens
-- Accepted tokens and chunks
-- Acceptance efficiency
-
-Throughput from a different trajectory is not a like-for-like executor or kernel comparison. See
-[`executor_benchmarks.md`](executor_benchmarks.md) for the verification and performance-evidence rules.
-
-Keep the README performance summary limited to PSI results. Identify each measurement date and mode.
-Keep historical results separate from current results. Put cross-framework comparisons in the owning performance report.
+README summaries contain dated PSI results by mode.
+Keep historical results separate and cross-framework comparisons in the owning performance report.
 
 ## Public API
 
@@ -614,117 +546,71 @@ Delivered history must be self-consistent.
 
 ## Test style
 
-Each Rust test function starts with `test_`. It protects one behavior, correctness, ownership, or lifecycle contract.
+| Item | Rule |
+| --- | --- |
+| Entry name | `test_<api>_<case>` or `test_<api_sequence>_<case>`, starts with `test_` |
+| Case names | Short contract terms: `success`, `fail`, `invalid_shape`, `bucketing` |
+| Subject | Module/target identifies component, avoid internal mechanism names |
+| Coverage | One behavior/ownership/lifecycle contract per test, compact fixed/mixed cases or tables |
+| Fixture/oracle | `fixture_*` / `reference_*` |
+| Small mock constructor | `new_<noun>`, such as `new_task` |
+| Placement | Small inline unit module, longer sibling `*_test.rs` under `cfg(test)` |
+| Integration / benchmark | Crate `tests/` / `benches/` |
+| Module order | Test entries before local helpers |
+| Setup/coordination failure | `unwrap()`, not verbose `expect(...)` |
 
-Use runtime-core unit tests as the primary naming and case-design reference. Name tests `test_<api>_<case>` or
-`test_<api_sequence>_<case>`. Use short case names such as `success`, `fail`, `invalid_shape`, and `bucketing`. Examples
-include `test_replay_success`, `test_replay_invalid_shape`, and `test_replay_bucketing`.
+Use runtime-core tests as the naming/case-design reference.
+An actual named production/reference API may appear in a test name.
+Do not name tests after backend, `matches_reference`, poison, canary, fixture, or other internal mechanisms.
+Do not add one test per branch, assertion, or helper.
+Match peer test classification without inventing a stateless transaction lifecycle.
 
-Let the module path identify the component. Do not put backend, `matches_reference`, poison value, canary, fixture,
-capacity, or another internal mechanism in a test name. An actual named production or reference API can appear. Use one
-representative fixed case, mixed case, or compact table for one contract. Do not add one test for each branch,
-assertion, or helper.
+| Test layer | Proves |
+| --- | --- |
+| Fixed CPU reference | Reference implementation |
+| Metal parity | Math, dispatch, ABI, padding, aliasing, canaries |
+| Executor component | Metadata, resources, component lifecycle |
+| Integration | Model composition, weight residency, full executor lifecycle |
+| Central replay | Lookup, parameter transport/ranges, small deterministic exact reference |
 
-Organize component tests by owner API set and lifecycle scenario. Do not create one test for each internal helper or
-branch. One mixed-request scenario may assign a different case to each request when one owner prepares the full group.
+Keep CPU oracle, Metal parity, and lifecycle scenarios separate.
+Exercise the real owner API. Keep helper-only tests only for reusable semantics that owner tests cannot express clearly.
+Do not use output inequality as a replay correctness oracle.
 
-Use the same test classification across peer components. Do not give a stateless component a transaction lifecycle
-only to match a stateful component.
+Each replayable component must test every independently variable active domain through its production record API:
 
-Keep these test responsibilities separate:
+```text
+isolated test cache: record total=4 + one topology
+  -> active 1 -> active 4 -> active 3 -> active 2
+     exact reference each time, same cache entry
+  -> change total/topology/static fact -> different entry
+```
 
-- A fixed CPU-reference test proves the reference implementation.
-- A Metal parity test proves kernel math, dispatch, ABI, padding, aliasing, and canaries.
-- An executor component test proves metadata, resource ownership, and component-local lifecycle.
-- An integration test proves model composition, weight residency, and full executor lifecycle.
+Test peer components independently. A model wiring test proves the composite key, reuse, and shared parameter binding.
+Test-only orchestration must not add production owners, wrappers, traits, or lifecycle operations.
+Keep the component reference and active-domain projection local. Centralize only repeated replay orchestration.
 
-Central replay infrastructure tests prove cache lookup, parameter transport, and parameter-range validation. A central
-test uses a small deterministic component and an exact reference. It must not use output inequality as a correctness
-oracle.
+Ordinary inactive output/scratch tails may be ignored. Do not poison them with NaN.
+For persistent/scatter semantic destinations, snapshot inactive destinations before each partial replay and verify they remain unchanged.
+An earlier full replay can change those destinations.
 
-Each replayable component must have an execution test for each independently variable active work domain. The test must
-use the production component record API through an isolated test replay cache. It must record one total capacity and
-topology, then replay a non-monotonic sequence of legal active counts. Use a recorded total capacity of `4` and the
-representative active sequence `[1, 4, 3, 2]` for a true active/total bucketing contract.
+Delete constructor-only coverage superseded by execution tests and tests of derived Rust behavior such as `PartialEq`.
+Do not test only derived constants, threadblock fields, or unimplemented future branches.
+Keep selector-boundary tests for topology changes or measured production policy.
+Tests/benchmarks must not introduce production-only-for-test abstractions.
 
-Test peer components independently even when a production model owner records them in one replay program and stores
-that program in one cache. The component test cache is test-only orchestration. It must not add a production replay
-owner, wrapper, trait, or lifecycle operation. A separate model wiring test must prove the composite cache key, cache
-reuse, and shared replay-parameter binding.
+| Mockall method | Meaning |
+| --- | --- |
+| `.once()` / `.times(n)` / `.never()` | Exactly one / repeated / forbidden calls |
+| No count | Intentionally unrestricted |
+| `return_const` | Cloneable fixed result |
+| `return_once` | One-use or move-capturing result |
+| `returning` | Repeatable computed result |
 
-The owner test must prove these contracts:
-
-- The first use of the isolated test cache records one program. Later submissions with the same total capacity,
-  topology, and static facts hit the same cache entry.
-- Each submission produces the exact reference result for its active logical domain.
-- A change to total capacity, topology, or another record-time static fact selects or records a different entry.
-
-The test can ignore an ordinary inactive output or scratch tail. It must not fill that tail with NaN as poison. If the
-component writes persistent or scatter-addressed semantic destinations, the test must also prove that one submission
-does not change its inactive destinations. Snapshot the current inactive destinations before each partial submission
-when an earlier full replay can have changed them.
-
-Keep the component reference and active-domain projection in the component test. Centralize only repeated replay
-orchestration. Do not add a production trait, wrapper, or lifecycle operation for test reuse.
-
-Do not combine a CPU oracle, Metal parity, and a lifecycle scenario in one test.
-
-Let the test target and module path identify the subject. Use the shortest unambiguous case name.
-
-Exercise the production owner API and its real contract boundary. A helper-only test does not protect owner wiring for
-setters, recording, or submission.
-
-Keep a helper-only test only when the helper owns reusable semantics that production tests cannot cover clearly.
-
-Use `fixture_*` for structured test data or builders. Use `reference_*` for slow or CPU oracles.
-
-Use a simple `new_<noun>` name for a small test-local mock constructor. For example, use `new_task`. Use `test_*` only
-for test entry points.
-
-List test entries before local helper functions. Keep the helpers at the end of the test module.
-
-Do not keep constructor-only tests when stronger execution tests cover them. Do not test derived Rust behavior such as
-`PartialEq`.
-
-Do not keep a test that only inspects derived kernel constants, thread-block fields, or an unimplemented future-work
-branch. Prove a supported kernel configuration through execution. Keep a selector-boundary test when the selection
-changes replay topology or preserves a measured production policy.
-
-Keep unit tests beside the production logic that they validate. Keep a small and focused test module inline. Put longer
-unit-test coverage in a sibling `*_test.rs` file and declare it under `cfg(test)`.
-
-Put integration tests in the crate `tests/` directory. Put benchmarks and benchmark-only support in the crate
-`benches/` directory.
-
-Tests and benchmarks exercise production APIs. Do not add test-only or benchmark-only abstractions to production code.
-
-Use `unwrap()` for test setup and coordination failures that are not the tested behavior. Do not use verbose
-`expect(...)` messages for these failures.
-
-Use these Mockall call counts:
-
-- `.once()` for exactly one call
-- `.times(n)` for repeated calls
-- `.never()` for forbidden calls
-
-Omit the call count only when it is intentionally unrestricted. Use `return_const` for a cloneable fixed result. Use
-`return_once` for a one-use or move-capturing result.
-
-Use `returning` for a repeatable computed result.
-
-Recommendation: Optimized numerical paths have concise fixed-input and random-input tests against a CPU or slow
-reference.
-
-Recommendation: Reference implementations make correctness clear and keep Clippy output clean.
-
-Use a named input struct instead of a long argument list.
-
-Recommendation: Use iterators and `enumerate` unless index arithmetic is the tested behavior.
-
-Test-only constructors and fixtures may remain simple when production construction enforces the contract. Do not change
-them only to mirror production.
-
-Put backend execution constraints in the matching backend or executor document. Serial Metal testing is one example.
+Recommendation: Use concise fixed/random numerical tests against a CPU/slow reference, named input structs, and clear Clippy-clean oracles.
+Recommendation: Use iterators and `enumerate` unless index arithmetic is the tested contract.
+Test fixtures may remain simple when production construction enforces the domain.
+Put backend execution constraints in the owning backend/executor guide.
 
 ## General source clarity
 
