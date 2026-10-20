@@ -89,11 +89,20 @@ impl CombineFixture {
         let num_total_tokens = self.shape.num_total_tokens as usize;
         let hidden_dim = self.config.hidden_dim as usize;
         let num_experts_per_token = self.config.num_experts_per_token as usize;
-        let routed_hidden = bf16_values(&generated_values(
+        let mut routed_hidden = bf16_values(&generated_values(
             num_total_tokens * num_experts_per_token * hidden_dim,
             seed,
         ));
-        let routed_probs = generated_probs(num_total_tokens, num_experts_per_token, seed.wrapping_add(1));
+        let mut routed_probs = generated_probs(num_total_tokens, num_experts_per_token, seed.wrapping_add(1));
+        // Fixed coordinates isolate accumulation and product rounding. Other values remain seeded random.
+        routed_hidden[0] = 4.0;
+        routed_hidden[hidden_dim] = 1.0 / 128.0;
+        routed_hidden[2 * hidden_dim] = -4.0;
+        routed_probs[..3].copy_from_slice(&[0.25, 0.5, 0.25]); // 1 + 1/256 - 1 = 1/256.
+        routed_hidden[3 * hidden_dim] = 1.007_812_5;
+        routed_hidden[4 * hidden_dim] = -0.601_562_5;
+        routed_hidden[5 * hidden_dim] = 0.0;
+        routed_probs[3..6].copy_from_slice(&[0.375, 0.625, 0.0]); // Exact weighted sum: 1/512.
         let shared_hidden = bf16_values(&generated_values(num_total_tokens * hidden_dim, seed.wrapping_add(2)));
         let shared_expert_gate_logits = bf16_values(&generated_values(num_total_tokens, seed.wrapping_add(3)));
         self.routed_hidden.write_typed(0, &bf16_bits(&routed_hidden));

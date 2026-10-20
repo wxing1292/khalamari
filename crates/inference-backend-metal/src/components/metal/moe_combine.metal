@@ -23,8 +23,7 @@ static inline float combine_topk(
     for (uint slot = 0; slot < num_experts_per_token; ++slot) {
         const uint route = token * num_experts_per_token + slot;
         const float route_weight = float(bfloat16_t(routed_probs[route]));
-        const float weighted = float(bfloat16_t(route_weight * read_bf16(routed_hidden, route * hidden_dim + dim)));
-        acc = float(bfloat16_t(acc + weighted));
+        acc = fma(route_weight, read_bf16(routed_hidden, route * hidden_dim + dim), acc);
     }
     return acc;
 }

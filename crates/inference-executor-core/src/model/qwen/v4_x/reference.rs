@@ -376,11 +376,11 @@ fn moe<'a>(
             let value: Vec<_> = gate.iter().zip(up).map(|(&g, u)| round(silu(g) * u)).collect();
             let value = linear(&value, w(&b.experts.down.weight, n, h), 1, n, h);
             for d in 0..h {
-                output[token * h + d] =
-                    round(output[token * h + d] + round(round(routes.expert_probs[route]) * value[d]));
+                output[token * h + d] += round(routes.expert_probs[route]) * value[d];
             }
         }
     }
+    output.iter_mut().for_each(|value| *value = round(*value));
     if let Some(shared) = &b.shared_expert {
         let n = t.shared_expert_intermediate_size;
         let gate = linear(input, get(&shared.gate.weight), tokens, h, n);

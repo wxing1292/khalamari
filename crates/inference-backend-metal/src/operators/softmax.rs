@@ -171,7 +171,9 @@ fn softmax_source() -> &'static str {
     })
 }
 
-// This kernel is the MLX single-row softmax with one fixed-capacity replay guard.
+// BF16 is the storage boundary. Exponentials and reductions use F32 to preserve
+// small router probabilities before the final BF16 rounding.
+// This kernel adds one fixed-capacity replay guard to MLX single-row softmax.
 // The guard is uniform across the whole threadgroup and occurs before all input
 // reads and threadgroup barriers.
 const PARAMETERIZED_SOFTMAX_SOURCE: &str = r#"
@@ -265,8 +267,8 @@ template <typename T, typename AccT = T, int N_READS = SOFTMAX_N_READS>
 }
 
 template [[host_name("block_softmax_bfloat16")]] [[kernel]]
-decltype(softmax_single_row_bucketed<bfloat16_t, bfloat16_t>)
-softmax_single_row_bucketed<bfloat16_t, bfloat16_t>;
+decltype(softmax_single_row_bucketed<bfloat16_t, float>)
+softmax_single_row_bucketed<bfloat16_t, float>;
 "#;
 
 fn mlx_metal_header_root() -> PathBuf {
@@ -293,46 +295,54 @@ mod tests {
 
     #[test]
     fn test_replay_matches_reference_across_active_counts() {
-        let config = Config {
-            num_values_per_row: 4,
-            dtype: Dtype::Bfloat16,
-        };
-        let shape = Shape { num_total_rows: 8 };
-        let (device, kernel) = create_softmax_kernel(config);
-        let stream = Stream::new(&device);
-        let input_values = (0..shape.num_total_rows as usize * config.num_values_per_row as usize)
-            .map(|index| ((index * 11 + 3) % 29) as f32 * 0.25 - 3.0)
-            .collect::<Vec<_>>();
-        let input = bf16_buffer(&device, &input_values);
-        let output = Buffer::new_zeroed(&device, shape.bytes(config));
-        let replay = {
-            let mut recorder = stream.create_replay_program();
-            recorder.record(kernel.invoke(
-                shape,
-                ReplayU32::Parameter(NUM_ACTIVE_ROWS),
-                Buffers {
-                    input: &input,
-                    output: &output,
-                },
-            ));
-            recorder.build()
-        };
+        for num_values_per_row in [4, 512] {
+            let config = Config {
+                num_values_per_row,
+                dtype: Dtype::Bfloat16,
+            };
+            let shape = Shape { num_total_rows: 8 };
+            let (device, kernel) = create_softmax_kernel(config);
+            let stream = Stream::new(&device);
+            let input_values = (0..shape.num_total_rows as usize * config.num_values_per_row as usize)
+                .map(|index| {
+                    if index < num_values_per_row as usize {
+                        0.0
+                    } else {
+                        ((index * 11 + 3) % 29) as f32 * 0.25 - 3.0
+                    }
+                })
+                .collect::<Vec<_>>();
+            let input = bf16_buffer(&device, &input_values);
+            let output = Buffer::new_zeroed(&device, shape.bytes(config));
+            let replay = {
+                let mut recorder = stream.create_replay_program();
+                recorder.record(kernel.invoke(
+                    shape,
+                    ReplayU32::Parameter(NUM_ACTIVE_ROWS),
+                    Buffers {
+                        input: &input,
+                        output: &output,
+                    },
+                ));
+                recorder.build()
+            };
 
-        for num_active_rows in [1_usize, 8, 3, 7, 2, 6, 4, 5] {
-            stream
-                .submit_replay_with_arguments(
-                    &replay,
-                    &ReplayArguments::new().with_u32(NUM_ACTIVE_ROWS, num_active_rows as u32),
-                )
-                .wait();
-            let num_active_values = num_active_rows * config.num_values_per_row as usize;
-            let actual = read_bf16_values(&output, num_active_values);
-            let expected = cpu_softmax_bf16_rows(
-                &input_values[..num_active_values],
-                num_active_rows,
-                config.num_values_per_row as usize,
-            );
-            assert_close(&actual, &expected, 0.01);
+            for num_active_rows in [1_usize, 8, 3, 7, 2, 6, 4, 5] {
+                stream
+                    .submit_replay_with_arguments(
+                        &replay,
+                        &ReplayArguments::new().with_u32(NUM_ACTIVE_ROWS, num_active_rows as u32),
+                    )
+                    .wait();
+                let num_active_values = num_active_rows * config.num_values_per_row as usize;
+                let actual = read_bf16_values(&output, num_active_values);
+                let expected = cpu_softmax_bf16_rows(
+                    &input_values[..num_active_values],
+                    num_active_rows,
+                    config.num_values_per_row as usize,
+                );
+                assert_close(&actual, &expected, 0.01);
+            }
         }
     }
 
@@ -372,7 +382,7 @@ mod tests {
         assert_eq!(actual.len(), expected.len());
         for (index, (actual, expected)) in actual.iter().zip(expected).enumerate() {
             assert!(
-                (*actual - *expected).abs() <= tolerance,
+                (*actual - *expected).abs() <= 1.0e-7 + tolerance * expected.abs(),
                 "value mismatch at {index}: actual={actual} expected={expected} tolerance={tolerance}"
             );
         }

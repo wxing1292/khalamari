@@ -188,6 +188,7 @@ hidden_state
 MoE routing is a two-stage contract.
 The router projection writes bf16 logits.
 The softmax operator writes a bf16 `router_probs` buffer over all experts.
+It computes exponentials and reductions in FP32 and rounds the final probabilities to BF16.
 `moe::routing::Compute` selects top-k experts from `router_probs`.
 The routing kernel does not read router logits.
 Only the softmax operator reads the logits.
@@ -721,6 +722,36 @@ next_hidden[token, dim] =
   routed_sum[token, dim] + sigmoid(shared_expert_gate[token]) * shared_hidden[token, dim]
 ```
 
+Both layouts use FP32 FMA for the routed weighted sum. They convert the routed subtotal to BF16 after the route loop.
+Route weights retain their BF16 value boundary in F32 storage. Expert outputs and final hidden states remain BF16.
+The shared gate uses an FP32 sigmoid. The final shared multiply/add uses FP32 before the BF16 output store.
+
+```text
+Example: T=2 tokens, K=10 routes/token, D=64 hidden dimensions
+GMEM: probabilities [T,K] F32, expert outputs [T*K,D] BF16
+Grid: ceil(T*D / 256) threadblocks, 256 threads each
+One thread: gid=67 -> token=1, dim=3. No SMEM or cross-thread reduction.
+
+register acc F32 = 0
+for slot in 0..10:
+    route = 10 + slot
+    TokenMajor:  row = route
+    ExpertMajor: row = routes_by_token[route]  // e.g. slot=2: route=12 -> row=9
+    GMEM probabilities[1,slot] -> BF16 weight -> register F32
+    GMEM expert_outputs[row,3] BF16          -> register F32
+    acc = fma(weight, expert_output, acc)    // no intermediate BF16 rounding
+register routed = BF16(acc)
+
+without shared: GMEM output[1,3] BF16 = routed
+with shared:   GMEM gate_logits[1], shared_hidden[1,3] BF16 -> registers
+               register gate F32 = sigmoid(gate_logits[1])
+               GMEM output[1,3] BF16 = BF16(routed + gate * shared_hidden[1,3])
+```
+
+The BF16 CPU oracle sums represented operands in FP64 and rounds the routed subtotal once.
+The existing combine fixture includes fixed product cancellation and `1 + 1/256 - 1 = 1/256` coordinates alongside seeded random values.
+Rounding each running sum to BF16 would lose the small contribution in the latter case.
+
 The branches read the same normalized hidden input and write disjoint scratch.
 Recommendation: Add replay barriers only at these actual dependencies:
 
@@ -798,7 +829,7 @@ The routing test covers normalized and non-normalized top-k probabilities, inclu
 It also covers non-power-of-two expert counts, top-1, top-k equal to expert count, and high expert IDs.
 Explicit fixtures check cross-group ties, zero probabilities, and unchanged inactive output rows.
 The sparse MLP test covers token-major and expert-major layouts, including the token-major fast-down topology.
-The combine test covers paths with and without shared experts.
+The combine test covers paths with and without shared experts, including fixed precision-sensitive coordinates and seeded random values.
 The expert-major layout test compares expert counts, expert offsets, route-map invariants, packed input, and both
 scatter paths with CPU references.
 It does not require a stable route order inside one expert group.
@@ -811,6 +842,8 @@ The full-output check uses `1e-6 + 0.02 * abs(reference)` tolerance for BF16 rou
 It also verifies that experts in the upper half of the configured range participate.
 A separate routing replay test uses non-uniform router weights and checks active logits,
 probabilities, expert indices, and expert probabilities against the CPU routing reference.
+The existing softmax replay test includes 512-value uniform and varied rows against an FP32 CPU oracle.
+It constrains relative error because a loose absolute tolerance does not constrain small expert probabilities.
 Replay infrastructure tests own generic replay-parameter validation.
 
 ## Tests and benchmarks

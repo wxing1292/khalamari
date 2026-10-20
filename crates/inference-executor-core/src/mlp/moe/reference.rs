@@ -299,6 +299,7 @@ pub fn moe_combine_with_shared_experts_reference(
     output
 }
 
+/// Sums represented BF16 operands in FP64, then rounds the routed output once.
 pub fn moe_combine_without_shared_experts_bf16_reference(
     routed_hidden: &[f32],
     routed_probs: &[f32],
@@ -311,15 +312,14 @@ pub fn moe_combine_without_shared_experts_bf16_reference(
     let mut output = Vec::with_capacity(num_tokens * hidden_dim);
     for token_index in 0..num_tokens {
         for hidden_index in 0..hidden_dim {
-            let mut combined = 0.0f32;
+            let mut combined = 0.0f64;
             for route_offset in 0..num_experts_per_token {
                 let route_index = token_index * num_experts_per_token + route_offset;
                 let route_weight = bf16::from_f32(routed_probs[route_index]).to_f32();
                 let hidden = bf16::from_f32(routed_hidden[route_index * hidden_dim + hidden_index]).to_f32();
-                let weighted = bf16::from_f32(route_weight * hidden).to_f32();
-                combined = bf16::from_f32(combined + weighted).to_f32();
+                combined += f64::from(route_weight) * f64::from(hidden);
             }
-            output.push(bf16::from_f32(combined).to_bits());
+            output.push(bf16::from_f64(combined).to_bits());
         }
     }
     output

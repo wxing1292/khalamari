@@ -108,8 +108,7 @@ static inline float scatter_topk(
         const uint original_route = token * num_experts_per_token + slot;
         const uint packed_route = routes_by_token[original_route];
         const float route_weight = float(bfloat16_t(routed_probs[original_route]));
-        const float weighted = float(bfloat16_t(route_weight * read_bf16(packed_output, packed_route * hidden_dim + dim)));
-        acc = float(bfloat16_t(acc + weighted));
+        acc = fma(route_weight, read_bf16(packed_output, packed_route * hidden_dim + dim), acc);
     }
     return acc;
 }
