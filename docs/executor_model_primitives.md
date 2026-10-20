@@ -5,35 +5,13 @@ components. It defines their component-specific GPU tasks and selection owners.
 
 ## Source layout
 
-Model owners live in:
+| Root under `crates/` | Owners |
+| --- | --- |
+| `inference-executor-metal/src/model/` | `embedding.rs`, `unembedding.rs`, `gather.rs`, `rms_norm.rs`, `residual_add.rs` |
+| `inference-backend-metal/src/components/` | `embedding.rs`, `rms_norm.rs`, `residual_add.rs`, `residual_add_rms_norm.rs`, `rms_norm_rope.rs` |
+| `inference-backend-metal/src/operators/` | `affine_quantized.rs`, `bf16_concat_rows.rs`, `row_gather.rs`, `softmax.rs` |
 
-```text
-crates/inference-executor-metal/src/model/
-  embedding.rs
-  unembedding.rs
-  gather.rs
-  rms_norm.rs
-  residual_add.rs
-```
-
-Reusable backend components live in:
-
-```text
-crates/inference-backend-metal/src/components/
-  embedding.rs
-  rms_norm.rs
-  residual_add.rs
-  residual_add_rms_norm.rs
-  rms_norm_rope.rs
-
-crates/inference-backend-metal/src/operators/
-  affine_quantized.rs
-  bf16_concat_rows.rs
-  row_gather.rs
-  softmax.rs
-```
-
-These components use the vocabulary in [GPU Execution](gpu_execution.md).
+Use [GPU execution vocabulary](gpu_execution.md).
 
 ## Embedding
 
@@ -92,16 +70,9 @@ MLX QMV kernel constructors also reject output widths from five through seven.
 The MLX small-output branch exceeds its four-entry result array for these widths.
 This limit applies to same-dtype identity BN8/BK32 QMV and gather QMV. Other kernel families keep their own domains.
 
-For BF16 vocabulary projections with at least 65,536 outputs, QMM starts at five rows when `hidden_dim <= 2048`.
-It starts at six rows for larger hidden dimensions.
-Once QMM is selected, it uses BM8 through eight rows, BM16 through 16 rows, and BM32 above 16 rows.
-Vocabulary width does not bypass BM8. The replay bucket policy preserves these topology boundaries.
-The backend selects the reduction tile at initialization. Wide projections use BK32 for BM8 and BM16.
-BM32 keeps `BK=min(group_size, 64)` for BF16 operands.
-The smaller reduction tile limits operand staging for wide outputs without adding runtime selection.
-
-Embedding and unembedding share weight lifecycle and replay-capacity conventions. They do not share one GPU selector.
-Embedding is a row lookup. Unembedding is a matrix multiplication.
+The [shared affine policy](executor_dense_mlp.md#backend-selection) owns small-row sliced-K, QMV, Steel QMM, and topology boundaries.
+`Unembed` must preserve those boundaries in replay buckets instead of duplicating thresholds.
+Embedding remains a row lookup with independent initialization-time dtype specialization.
 
 ## Row gather
 

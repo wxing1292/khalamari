@@ -17,15 +17,16 @@ The two operations record through the executor `Recorder`. They do not submit wo
 | Small-row shaders | `crates/inference-backend-metal/src/components/metal/gated_residual_small.metal` | Fused norm/down and gated read for up to four recorded token rows. |
 | Matrix shaders | `crates/inference-backend-metal/src/components/metal/gated_residual_matrix.metal` | BF16 matrix projections with weight reuse across token rows. |
 
-The module is independent of model layer order, runtime scheduling, page allocation, and cache lifecycle.
-Qwen3.8 model integration remains in [future work](future_work.md).
+[Qwen4x](executor_qwen4x.md) owns model composition.
+GR remains independent of layer order, scheduling, page allocation, and cache lifecycle.
+[Future work](future_work.md) tracks remaining model acceptance.
 
 ## Computation
 
 Let `T` be the token count, `C` the residual channel count, `H` the hidden dimension, and `r` the low-rank dimension.
 `C` corresponds to `num_branches` in the current API. Each channel contains one `H`-dimensional hidden row.
 `GatedResidualCore` configures `C`, `H`, `r`, and the RMSNorm epsilon during initialization.
-The current Qwen3.8 reference configuration uses `C=4`, `H=2560`, and `r=320`.
+The worked example uses `C=4`, `H=2560`, and `r=320`.
 The module also supports other positive dimensions, including unaligned dimensions.
 
 All matrices use contiguous row-major storage. Weight shapes follow checkpoint output-by-input order.
@@ -295,21 +296,16 @@ All weights and referenced buffers remain resident through replay completion und
 
 ## Verification and measurement
 
-CPU tests use hand-derived read and write examples.
-Metal tests use seeded fixtures and compare F32 and BF16 results with the CPU reference.
-The generator and maximum/mean error checks follow the existing dense-MLP and GDN tests.
-F32 uses a maximum absolute tolerance of `2e-5`. BF16 uses `0.03125`.
-Mean absolute error must remain below one tenth of the maximum tolerance.
-This accounts for intermediate BF16 rounding and cancellation while limiting aggregate error.
-They cover non-aligned dimensions, checkpoint geometry, in-place write, and inactive residual preservation.
-Fusion tests compare fused and separate commands, then check the next read against the CPU reference.
-They cover different next-read rank and epsilon.
-Two separate-operation execution cases cover different active counts and reuse of the component-output buffer as normalized scratch.
-A separate test reuses both scratch buffers before the paired write.
-Tiled tests cover token capacities `1`, `4`, `5`, `16`, `17`, `128`, and `129`, plus partial active rows.
-They compare small-row and matrix paths with the CPU reference and check fused versus separate execution.
-Replay tests use total capacity four and active counts `[1,4,3,2]`.
-The executor test composes read, write, and a final read with shared scratch through the production recorder.
+| Check | Coverage |
+| --- | --- |
+| CPU | Hand-derived read/write examples |
+| Metal parity | Seeded F32/BF16, unaligned/checkpoint geometry, in-place write, inactive residuals |
+| Error bounds | F32 max `2e-5`, BF16 max `0.03125`, mean below one tenth of max tolerance |
+| Fusion | Same arithmetic/output, next-read CPU parity, different rank/epsilon |
+| Scratch lifetime | Different active counts, output-buffer reuse as norm scratch, both buffers reused before write |
+| Tiled kernels | Capacities `1`, `4`, `5`, `16`, `17`, `128`, `129`, partial active rows |
+| Replay | Total four, active `[1,4,3,2]` |
+| Executor | Read -> write -> final read, shared scratch, production recorder |
 
 Run focused checks from the repository root:
 
@@ -327,10 +323,13 @@ The composition benchmark uses the read output directly as the write input and e
 The `read_write` case measures 32 independent pairs and retains the pre-fusion comparison workload.
 The chain cases record 32 dependent pairs and one final read, with shared scratch and a shared gate buffer.
 The first pair reads an immutable residual, so each submission starts from the same input.
-Small-row chains use 98 commands before fusion and 66 after fusion.
-Scalar and matrix chains use 131 commands before fusion and 99 after fusion.
-`chain_unfused` and `chain_fused` compare identical arithmetic and outputs.
-Their amortized times include one thirty-second of the final read.
+| Chain | Unfused commands | Fused commands |
+| --- | ---: | ---: |
+| Small rows | 98 | 66 |
+| Scalar/matrix | 131 | 99 |
+
+`chain_unfused` and `chain_fused` have identical arithmetic/outputs.
+Amortized time includes one thirty-second of the final read.
 Follow the shared [verification and performance rules](executor_benchmarks.md).
 
 ```sh

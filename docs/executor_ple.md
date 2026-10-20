@@ -82,18 +82,18 @@ Z [2,4,2560] --+--> grouped RMSNorm -> normalized Z [2,4,2560] --+
 X [2,4,2560] ---------------------------> add -> X' [2,4,2560] BF16
 ```
 
-The key projection produces a different key for each residual channel.
-The value projection produces one hidden vector shared across channels.
-PLE updates the complete residual before the next GR read. It does not call GR write.
+PLE updates the complete residual before the next GR read, without calling GR write.
 
 ## Preparation and scheduling
 
-`PLE::prepare` reads token IDs, source token history, hash parameters, and weights.
-It writes embedding rows, projected values, and normalized projected keys.
-It does not read the layer residual or convolution state.
-`PLE::apply` reads those prepared outputs after the layer residual is ready.
-`PLE::commit` writes only the accepted prefix's convolution state.
-`PLE::project` also accepts decoded embeddings and uses the same projections and key norm.
+| API | Reads -> writes |
+| --- | --- |
+| `PLE::prepare` | Token IDs/history, hash parameters, weights -> embeddings, values, normalized keys |
+| `PLE::project` | Decoded embeddings -> same projected values/normalized keys |
+| `PLE::apply` | Prepared outputs + ready residual + convolution state -> updated residual |
+| `PLE::commit` | Accepted normalized-Z prefix + source history -> convolution state |
+
+Preparation does not read residual or convolution state.
 
 ```text
 batch token metadata

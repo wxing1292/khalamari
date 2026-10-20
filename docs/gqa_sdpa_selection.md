@@ -399,20 +399,16 @@ The replay topology also identifies direct output. Recording consumes both facts
 `GQAMetadataBuffers::update(...)` uploads the selection. It does not select another variant or recompute KV
 partitioning.
 
-The materialized selection is necessary because the selected variant, Q-token ranges, Map task templates,
-partial-state offsets, replay shape, and metrics are one coupled result. A kernel-kind enum or threshold helper cannot
-represent this result. Moving candidate construction into `GQAMetadataBuffers` would mix selection with GPU ABI upload.
-Returning unrelated parallel values would weaken the boundary and permit mismatched variant and task metadata.
+| Owner | Responsibility |
+| --- | --- |
+| `gqa::sdpa::Selector` | Legal registry, allocation limits, Q-range/head rules, complete candidate materialization |
+| `Selection` | Coupled variant, ranges, templates, offsets, replay shape, metrics |
+| `GQAMetadataBuffers` | ABI upload only |
 
-`gqa::sdpa::Selector` is not a stateless wrapper. It owns the legal variant registry and the allocation limits.
-For explicit and composite registries, it applies the Q-range density and Q-head rules before materialization.
-These rules need only request lengths and variant constants. Most profiles then construct one complete candidate.
-The D=256 page-16 cost comparison still constructs both SlicedKv and the selected SlicedQ candidate.
-Each constructed candidate includes KV splits, metadata, replay capacities, and complete metrics.
-This work allocates and fills request-local vectors. Callers must not repeat it only to recover one field.
-
-The selector includes candidate materialization. GQA does not have a separate `Planner` type or a `Plan` type. The
-`Selection` name describes the returned value and does not introduce a second decision layer.
+Most profiles construct one complete candidate from request geometry and variant constants.
+D=256 page-16 compares both SlicedKv and the selected SlicedQ candidate.
+Materialization fills request-local vectors. Do not repeat it to recover one field or split its coupled values.
+GQA has no separate `Planner` or `Plan` layer.
 
 ### Metrics and selection
 
@@ -465,27 +461,25 @@ A possible future ABI can store `max`, `denom`, and `numerator`. The current imp
 
 ### Replay and resource contracts
 
-The current implementation uses these contracts:
+| Contract | Owner |
+| --- | --- |
+| Count domains, active parameters, replay extents | [GQA replay](executor_gqa.md#replay-contract) |
+| Scratch, page tables, Map-before-Reduce dependency | [GQA resources](executor_gqa.md#ownership) |
+| Natural-log partial state | Shared SlicedKv/SlicedQ/bidirectional Map and reducers |
 
-- `GQAReplayShape` count domains and exact or bucketed meanings.
-- Replay parameter keys.
-- Partial-state scratch allocation and layout.
-- Page-table layout and KV-cache ownership.
-- Map-before-Reduce dependency.
-- SlicedKv, SlicedQ, bidirectional block SDPA, and their reducers share one natural-log partial-state ABI.
-
-Replay padding can change the recorded Map grid. Therefore, the selector includes the selected replay capacity when it
-materializes and compares candidates.
+The selector must include recorded replay capacity when it materializes and compares candidates.
+Padding can change the Map grid.
 
 ## Design boundary
 
-`gqa::sdpa::Selector` owns dynamic selection and complete-candidate construction.
-One `backend_sdpa::ExecutionVariant` identifies the selected Map and Reduce pair.
-Q-token ranges, Map task templates, and kernel constant fields remain distinct concepts.
+| Concept | Meaning |
+| --- | --- |
+| `gqa::sdpa::Selector` | Dynamic complete-candidate construction and selection |
+| `backend_sdpa::ExecutionVariant` | Selected Map/Reduce pair |
+| Q-token ranges, Map templates, constants | Distinct metadata/compile-time domains |
 
-The selector consumes the existing partial-state ABI, replay key, resource contract, KV-segment allocation policy, and
-Metal numerical kernels.
-See the [selector source](../crates/inference-executor-metal/src/attn/gqa/sdpa.rs) for the implemented policy.
+The [selector](../crates/inference-executor-metal/src/attn/gqa/sdpa.rs) consumes the existing partial-state ABI, replay/resource contracts,
+KV-segment policy, and numerical kernels.
 
 ## Validation
 

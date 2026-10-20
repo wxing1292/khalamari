@@ -757,26 +757,20 @@ Both fused paths retain storage-dtype projection rounding before F32 SwiGLU.
 
 ## Tests and benchmarks
 
-The focused backend test records one replay for each dense MLP capacity and topology.
-It replays non-monotonic active-token sequences and compares each active output prefix with the CPU quantized
-dense-MLP reference.
-The reference covers the gate/up projection, `SiLU(gate) * up`, and the down projection as one numerical contract.
-It accepts separate group sizes and bit widths for the gate/up and down projections.
-The test covers the production Q4/Q4 BF16-affine layout and a mixed Q4/Q6 F32-affine layout.
-It records capacities on each side of the affine topology boundaries.
-It does not use inactive output or scratch rows as an oracle.
-Affine operator tests own kernel selection and topology-boundary contracts.
-Register-QMM tests cover FP16 and BF16, all supported group sizes, representative row/column geometries, ordinary and fused epilogues,
-and changing active rows on cached replay. Inactive output rows must remain unchanged.
-Steel and register-QMM replay tests use fixed inputs and seeded random inputs, codes, scales, and biases.
-The random generator follows the existing dense-MLP test style. The seed makes failures reproducible.
-Each fixture computes its full CPU reference once. Non-monotonic active counts compare prefixes of that reference.
-The CPU oracle uses scalar F64 accumulation and does not use shader fragments or K partitions.
-For same-dtype Steel, it materializes each dequantized weight at the operand dtype before the dot product.
-For mixed-dtype Steel and register QMM, it uses F32 dequantized weights without low-precision materialization.
-Both fused references round gate and up before F32 SwiGLU and round the final output.
-Absolute and relative error budgets account for operand precision, output rounding, and F32 group correction.
-Host selector tests own topology-boundary coverage. Numerical tests do not repeat that selector sweep.
+| Test owner | Numerical/replay contract |
+| --- | --- |
+| Dense MLP | Gate/up -> `SiLU(gate) * up` -> down, production Q4/Q4 BF16-affine and mixed Q4/Q6 F32-affine |
+| Cached replay | One total/topology, non-monotonic active prefixes, both sides of affine topology boundaries |
+| Register QMM | FP16/BF16, supported groups, row/column geometries, ordinary/fused epilogues, unchanged inactive outputs |
+| Steel/register references | Fixed/seeded random codes, scales, biases, scalar F64 accumulation, no shader fragments/K partitions |
+| Same-dtype Steel | Materialize dequantized weights at operand dtype before dot product |
+| Mixed Steel/register QMM | F32 dequantized weights |
+| Fused reference | Round gate/up, F32 SwiGLU, round output |
+| Host selector | Selection/topology sweep, separate from numerical tests |
+
+Each fixture computes its CPU reference once and compares active prefixes.
+Error budgets cover operand precision, output rounding, and F32 group correction.
+Dense MLP tests do not use inactive scratch/output rows as an oracle.
 
 Current Metal component bench:
 
@@ -833,22 +827,8 @@ Each stage-specific `qmm` case includes its complete BM/BN tile.
 A `full_qmm_bm*` case uses that BM with BN16 for fused gate/up/SwiGLU and BN32 for down.
 Forced qmv/qmm cases are benchmark-only operator-policy probes.
 
-They help select the correct production threshold.
-They are not separate production paths.
-The full production path uses the fused gate/up/SwiGLU operator.
-
-The real-weight bench prints replay metadata with each perf row:
-
-```text
-backend
-command_count
-retained_buffers
-retained_pipelines
-constant_bytes
-```
-
-The Metal stream backend name supplies `backend`.
-The expected value is `backend=metal`.
+Forced probes measure crossover policy. Production uses fused gate/up/SwiGLU.
+Each row reports `backend=metal`, `command_count`, `retained_buffers`, `retained_pipelines`, and `constant_bytes`.
 
 Recommendation: Compare the backend component bench first.
 Then compare the real-weight dense MLP wrapper and the layer/layer-ladder bench.

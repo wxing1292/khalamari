@@ -15,136 +15,41 @@ Use these sections for common tasks:
 
 ## Source layout
 
+| Root | Owner files |
+| --- | --- |
+| `inference-executor-core/src/attn/gqa/` | `core.rs`, `ungated_core.rs`, `bidi_block_gqa_core.rs`, `reference.rs` |
+| `inference-executor-metal/src/attn/gqa/` | `sdpa.rs` selection, `batch_metadata.rs` uploads, `backend.rs` / `ungated_backend.rs` replay |
+| Same GQA directory | `scratch.rs` / `ungated_scratch.rs`, `request_page_table.rs`, `request_page_table/file_io.rs` |
+| `inference-executor-metal/src/attn/bidi_block_gqa/` | Paged history, block SDPA, capacity, metadata, scratch, state/I/O |
+| `inference-executor-metal/src/attn/qsa/` | Dense/sparse SDPA, batch metadata, parity/replay tests |
+| `inference-executor-metal/src/model/qwen/` | `v3/`, `v3_5/`, and shared `v3_x/` checkpoint/role bindings |
+| `inference-backend-metal/src/components/gqa/` | Splits, gate, page write, SDPA registry, `sdpa/sliced_kv.rs`, `sdpa/sliced_q.rs` |
+| `inference-backend-metal/src/components/` | `qsa_sparse_gqa.rs`, `qsa_sdpa.rs`, `rms_norm_rope.rs` |
+| Same backend `metal/` directory | GQA/QSA shaders and shared `gqa_fp8.metal` conversion |
+
+All roots above are under `crates/`.
+Core owns semantic geometry. The executor owns replay wiring, request tables, and local page interpretation.
+Runtime core owns physical page allocation/release.
+`request_page_table.rs` accumulates runtime IDs between reset notifications.
+
 ```text
-crates/inference-executor-core/src/attn/
-  mod.rs                    MLX-free attention module exports
-  gqa/
-    mod.rs                  GQA module root
-    core.rs                 gated QGKV GQACore metadata and projection shapes
-    ungated_core.rs         ungated QKV UngatedGQACore metadata and projection shapes
-    bidi_block_gqa_core.rs  backend-neutral BiDiBlockGQA geometry and per-query history ranges
-    reference.rs            CPU projected-GQA correctness oracle
-
-crates/inference-executor-metal/src/attn/
-  mod.rs                    Metal attention module exports
-  gqa/
-    mod.rs                  GQA Metal module root
-    sdpa.rs                 executor-owned candidate construction and execution selection
-    sdpa_test.rs            host selection, partition coverage, and replay-envelope contracts
-    batch_metadata.rs       capacity-sized GPU upload target for one SDPA selection
-    backend.rs              gated QGKV Metal replay wiring
-    backend_full_test.rs    gated GQA owner replay and CPU parity
-    scratch.rs              gated QGKV scratch allocation and borrowed replay bindings
-    ungated_backend.rs      ungated QKV Metal replay wiring
-    ungated_scratch.rs      ungated QKV scratch allocation and borrowed replay bindings
-    request_page_table.rs   per-request, per-layer KV page table for runtime-supplied page IDs
-    request_page_table/
-      file_io.rs            symmetric full and selected state file I/O
-  qsa/
-    sdpa.rs                 prepared-Q dense/sparse owner and shared partial reduction
-    batch_metadata.rs       request-local dense/sparse partition and original Q-token maps
-    sdpa_test.rs            fixed/random CPU parity, mixed requests, and padded replay
-  bidi_block_gqa/
-    mod.rs                  paged-history plus bidirectional local-block GQA module root
-    backend.rs              ungated paged-history plus bidirectional local-block replay graph
-    capacity.rs             Metal BiDiBlockGQA partial-output capacity
-    kv_cache_write.rs       Main-feature projection and persistent history K/V cache write
-    metadata.rs             per-query history ranges and block metadata
-    sdpa.rs                 fixed-proposal history execution selection
-    scratch.rs              fixed-capacity local Q/K/V and attention partials
-    state.rs                page-table and proposal metadata lifecycle
-    state/
-      file_io.rs            full and selected state file I/O
-
-crates/inference-executor-metal/src/model/qwen/
-  v3_x/
-    dflash2/                Qwen3x DFlash2 attention, layer, and model
-    layer/bidi_block_gqa_weights.rs
-                            independent Q/K/V/output affine layouts and borrowed offsets
-    layer/gqa.rs            Qwen3xGQA, private checkpoint weights, load, and record
-    state/gqa.rs            Qwen3xGQAState page/metadata/reset lifecycle grouping
-    state/gqa/file_io.rs    Qwen3xGQAState full and selected state file I/O
-  v3/
-    main/gqa.rs             Qwen3 Main ungated GQA weights, state, load, and record
-    main/gqa/file_io.rs     Qwen3 Main GQA full and selected state file I/O
-    main/layer.rs           fixed QKV Qwen3MainLayer composition
-    main/component_config.rs
-                            Qwen3 Main QKV GQA geometry/config builder
-  v3_5/
-    main/layer.rs           Qwen3.5 Main QGKV-GQA/GDN layer variants
-    mtp/layer.rs            Qwen3.5 MTP GQA layer composition
-    component_config.rs     Qwen3.5 QGKV GQA geometry/config builder
-
-crates/inference-backend-metal/src/components/
-  gqa/
-    mod.rs                  backend GQA component module root
-    activation_gate.rs      attention-output gate component
-    bidi_block_sdpa.rs      dense bidirectional local-block SDPA partial component
-    bidi_block_sdpa_test.rs bidirectional local-block SDPA Metal parity contracts
-    kv_page_write.rs        KV page-write component
-    qgkv_split.rs           gated QGKV split component
-    qkv_split.rs            ungated QKV split component
-    sdpa.rs                 backend-owned SDPA variant registry, constants, and capability checks
-    sdpa/
-      sliced_kv.rs           SplitKV SlicedKv Map/Reduce component
-      sliced_kv_test.rs      SplitKV SlicedKv Metal parity and replay contracts
-      sliced_q.rs            Q-token/head Map/Reduce and unsplit direct-output component
-      sliced_q_test.rs       SplitKV SlicedQ Metal parity and padded replay contracts
-  qsa_sparse_gqa.rs         indexed FP8 SIMD/MMA selector and Map recording
-  qsa_sparse_gqa_test.rs    replay-topology and packed FP8 conversion tests
-  qsa_sdpa.rs               disjoint dense/sparse recording and dependency scope
-  rms_norm_rope.rs          reusable Metal token/head RMSNorm/RoPE component
-  metal/
-    qsa_sparse_gqa_simd.metal  indexed FP8 register loads and local SIMDgroup reduction
-    qsa_sparse_gqa.metal       register-Q Steel MMA with shared K/V tiles
-    gqa_qgkv_split.metal       gated QGKV split source
-    gqa_qkv_split.metal        ungated QKV split source
-    rms_norm_rope.metal         Metal token/head RMSNorm/RoPE source
-    gqa_kv_page_write.metal     Metal KV page-write source
-    gqa_fp8.metal                      shared packed FP8-to-BF16 decode
-    gqa_sdpa_sliced_kv_map.metal     Metal SplitKV SlicedKv map source
-    gqa_sdpa_sliced_kv_reduce.metal  Metal SplitKV SlicedKv reduce source
-    gqa_sdpa_sliced_q_per_head_map.metal      Steel SplitKV SlicedQ map source
-    gqa_sdpa_sliced_q_map.metal   generic Q-token/head map source
-    gqa_sdpa_sliced_q_reduce.metal   Metal SplitKV SlicedQ reduce source
-    gqa_bidi_block_sdpa.metal         Metal bidirectional local-block SDPA partial-output source
-    gqa_activation_gate.metal    Metal attention-output gate source
+Qwen semantic inputs -> ReplayLayer input/output -> caller-owned Recorder
+  -> adaptive affine projections -> selected SDPA execution -> output projection
 ```
 
-`crates/inference-executor-core` owns the backend-neutral GQA semantic metadata and replay shape.
-`crates/inference-executor-metal` owns the Metal replay wiring and request page table.
+Each projection delegates QMV/QMM and sliced-K tiling to the [affine owner](executor_dense_mlp.md#backend-selection).
+GQA supplies dimensions, quantization, dtype, recorded capacity, and active count.
+It does not store projection thresholds or separate QMV/QMM kernels.
+BiDiBlockGQA accepts independent Q/K/V/output layouts, buffers, or explicit shared-buffer offsets for mixed bit widths.
+The backend registry defines legal SDPA variants. The executor selector chooses from the prepared batch.
+Model plans do not specify Metal tiles/threadblocks. Exact backend probes may force geometry.
 
-The Metal GQA executor backend implements the executor `ReplayLayer` contract. Qwen model and layer code can use this
-contract to append GQA work to a larger replay. A semantic layer input and output connect the work to a caller-owned
-`Recorder`.
-
-`request_page_table.rs` owns the executor request-slot KV page table. This table accumulates page IDs between reset
-notifications. The runtime core owns physical page allocation and release. The model executor converts runtime cache
-lanes into model-role and GQA-layer coordinates before it writes the table.
-
-The gated, ungated, and BiDiBlockGQA backends give each quantized projection to one adaptive affine operator.
-The caller provides the fixed projection dimensions, quantization layout, and dtype when it creates the operator.
-It provides the recorded token capacity and the submission-time active token count.
-The affine operator selects QMV or a QMM tile.
-The shared [affine selection policy](executor_dense_mlp.md#backend-selection) also owns sliced-K MMA token and output-feature tiling.
-GQA code does not store separate QMV/QMM kernels or a projection threshold.
-This contract applies to fused Main QGKV/QKV projections and output projections.
-BiDiBlockGQA gives Q, K, V, and output independent affine layouts.
-Its checkpoint owner may store Q/K/V in one physical buffer and supply explicit byte offsets.
-It may also supply independent buffers.
-This layout supports mixed projection bit widths without a transpose or aggregation copy.
-The Metal backend registry derives legal SDPA execution variants from the static attention and KV-cache shape.
-The Metal executor selector chooses a complete execution from the prepared batch shape.
-Model plans do not specify Metal SDPA tiles or threadblock sizes.
-An exact backend microbenchmark may construct a low-level SDPA component with explicit geometry.
-
-SplitKV is the local KV-range map/reduce computation on one Metal device. It partitions each visible KV range into KV
-segments. It maps the segments and reduces the partial outputs on the same device. This document does not call this
-computation ContextParallel. ContextParallel is reserved for KV or context sharding across devices or ranks.
-
-`SlicedKv` and `SlicedQ` describe the current concrete kernel families and Q tiling. These names are orthogonal to
-SplitKV. The selector identifies the selected execution by its complete variant.
-`MapKernelKind` identifies the algorithm and Q-token/head assignment independently of token capacity.
+| Term | Meaning |
+| --- | --- |
+| SplitKV | Local KV-range Map/Reduce on one device |
+| ContextParallel | KV/context sharding across devices or ranks |
+| `SlicedKv`, `SlicedQ` | Concrete kernel families/Q tiling, independent of SplitKV |
+| `MapKernelKind` | Algorithm/Q-token-head assignment, independent of token capacity |
 
 ## Ownership
 
@@ -1234,104 +1139,33 @@ See [explicit route materialization](gqa_sdpa_selection.md#explicit-and-composit
 
 ## Tests and benches
 
-The [component latency matrix](executor_benchmarks.md#component-latency-matrix) measures real-weight GQA through the production lookup.
-`qwen35_gqa --gqa-split-kv-variants auto` uses backend-owned metadata, scratch, and replay selection.
-The existing `sliced_kv` and `sliced_q` options remain explicit comparison probes.
+| Owner | Contract |
+| --- | --- |
+| Executor selector | Ragged causal slices, direct-output padding, partition/replay envelopes |
+| Gated full replay | Direct and Map/Reduce CPU parity across active counts, separate cached output modes |
+| Ungated SDPA | Six Q heads, causal output, unchanged inactive destinations |
+| `sliced_kv_test.rs` | CPU projected-GQA parity, capacity `8`, ragged multi-page blocks, BF16/F32, head dimensions through 256 |
+| `sliced_q_test.rs` | FP8/BF16 parity, capacity `4`, active `1, 4, 3, 2`, fixed Q/Map capacities, unchanged inactive Q |
+| Generic Q-token/head Map | All five `(D, tokens_per_page)` profiles, ratios 6/8/12, staging 8/16/32/64/128, tails, sliding/empty masks, direct output |
+| `bidi_block_sdpa_test.rs` | CPU partial/output parity, range capacity `8`, active `1, 8, 3, 7, 2, 6, 4, 5` |
+| QKV/QGKV split and gate | Exact active-domain CPU replay, non-monotonic counts |
+| KV page write | Complete affected persistent arena against page/offset/E4M3FN reference |
+| `backend_full_test.rs` | Production gated owner, independent affine/split/norm/RoPE/SDPA/gate/output reconstruction |
 
-Focused backend and component tests provide part of the correctness coverage. Qwen wiring and model tests provide the
-remaining coverage.
+The [component latency matrix](executor_benchmarks.md#component-latency-matrix) measures real-weight production lookup.
+`qwen35_gqa --gqa-split-kv-variants auto` uses backend-owned metadata, scratch, and selection.
+`sliced_kv` and `sliced_q` remain explicit comparison probes.
+The [generic matrix](executor_benchmarks.md#generic-gqa-matrix) measures forced kernels and exports calibration, without changing production routing.
 
-The executor selector tests cover fixed slices across ragged causal requests and independent direct replay padding.
-The gated full-replay test compares direct and Map/Reduce output with the CPU reference across changing active counts.
-It verifies separate cached replays for both output modes with equal recorded extents.
-The ungated SDPA-stage test covers six logical query heads, causal output, and unchanged inactive Q tokens for both modes.
+Run representative replay probes:
 
-`gqa/sdpa/sliced_kv_test.rs` compares SplitKV SlicedKv with the CPU projected-GQA reference. Its main replay test uses
-one recorded replay and the complete active-count sequence for capacity `8`. Focused cases cover a ragged batch and a
-logical cache block that spans multiple physical page IDs, BF16 and F32 activations, and head dimensions up to 256.
-The cases validate compact KV-split indexing,
-online-softmax iteration merging, request slots, page-table lookup, and causal visibility.
-
-The SlicedQ tests exercise the Steel Map with 8-, 16-, and 32-token KV iterations.
-The generic Q-token/head test also checks 64- and 128-token staging, head-dimension chunking,
-6/8/12 GQA ratios, request tails, sliding masks, empty visibility, and direct final output.
-It verifies the padded-head and joint `4 x 6` mappings against the CPU reference.
-They use the production recorder and preserve one partial-state ABI.
-They cover all five supported `(D, tokens_per_page)` profiles, non-contiguous pages, a cached prefix, multiple KV
-heads, Q-head tails, multiple Q fragments, sliding visibility, fully masked Q tokens, and padded replay capacity.
-
-`gqa/sdpa/sliced_q_test.rs` compares the BF16-output SplitKV SlicedQ map and reduce variant, with an FP8 E4M3FN KV
-cache, against the same CPU reference. The test reuses one recorded replay with a total token capacity
-of `4` and the active-count sequence `1, 4, 3, 2`. The Q-token-tile and map-task capacities stay fixed.
-The paged-range case also verifies that inactive output Q tokens retain their sentinel values.
-
-`gqa/bidi_block_sdpa_test.rs` records one total Q-token-range capacity of `8` and replays
-`1, 8, 3, 7, 2, 6, 4, 5` active ranges. It compares each active partial state and output with a CPU softmax reference.
-This test protects the BiDiBlockGQA total-dispatch and active-guard contract.
-
-`gqa/qkv_split.rs` records one total token capacity of `8` and uses the same non-monotonic active-count sequence.
-It compares active Q, K, and V tokens with the exact CPU split reference.
-
-`gqa/qgkv_split.rs` and `gqa/activation_gate.rs` reuse recorded programs with changing active counts.
-They compare the active Q/G/K/V
-tokens and gated attention values with exact CPU references. `gqa/kv_page_write.rs` compares the complete affected FP8
-page arena with a CPU page-table, page-offset, and E4M3FN conversion reference because page writes update persistent
-state.
-
-`attn/gqa/backend_full_test.rs` records the real gated `GQA` owner. It replays the non-monotonic active-token sequence
-through the production multi-domain cache keys. It compares the active output and the persistent KV page with an
-independent CPU reconstruction of QGKV affine, split, RMSNorm/RoPE, causal GQA, activation gate, and output affine.
-The test ignores stateless scratch and output tails.
-
-Metal backend component replay sanity lives in:
-
-```text
+```sh
 cargo bench --bench gqa_split_kv -- --profile-time 1 --noplot
-
 cargo bench --bench gqa_bidi_block_sdpa -- \
   --block-sizes 7 --num-requests 1,4 \
   --max-q-tokens 8 \
   --iters 1 --warmup-iters 0 --runs 1
-```
 
-`gqa-sdpa-bench` compares generic SlicedKv, QTokensPerHead, QHeadsPerToken, and QTokensAndHeads candidates.
-It uses forced KV slices and tests split and unsplit output through the same backend APIs.
-It generates coverage reports and calibration lookup tables. The production selector does not consume these tables.
-[`executor_benchmarks.md`](executor_benchmarks.md#generic-gqa-matrix) contains the serial scan commands.
-
-The `gqa_split_kv` backend bench records SplitKV SlicedKv building blocks only in Metal replay/ICB paths. GQA Metal code does not
-benchmark or expose direct-submit component or forward wiring.
-
-`gqa_bidi_block_sdpa` records only `gqa::bidi_block_sdpa::Compute`.
-It measures the dense bidirectional local-block map contribution used by DFlash2.
-It does not measure history attention, partial reduction, projections, or a DFlash2 layer.
-Its default `max_q_tokens = 8` uses the production SlicedQ partial-state layout. The option can select a different legal
-partial-state width for an exact comparison.
-
-One bidirectional local-block SDPA Task owns one Q token and one Q head. The grid supplies the Q-head index,
-Q-token-range index, and
-range-local Q-token offset. `q_token_ranges` derives the flat Q-token index. The end of the matching
-`cu_sdpa_partial_outputs` range derives the block partial-output slot.
-The backend uses one 32-thread SIMDgroup for the Task.
-The private `gqa::bidi_block_sdpa::KernelConstants` contains the stable SDPA config and its thread-block constants. The
-constants require 32
-threads and a 32-thread SIMDgroup. The generated source no longer declares an unused
-`num_threads_per_threadblock` constant.
-For `head_dim=128`, each thread keeps four F32 Q values and one dot-product accumulator.
-The logical Q register payload is 16 bytes per thread.
-The SIMDgroup computes each Q/K dot product across the head dimension.
-It then computes four output dimensions per thread.
-
-For a seven-token query block, the kernel uses 28 bytes of static shared memory for seven F32 logits.
-It does not allocate a shared reduction array.
-Kernel construction checks the pipeline SIMD width, the pipeline thread limit, and the device shared-memory limit.
-Metal does not expose the compiler register allocation.
-The backend therefore uses the source-level live-value count and the production-shape benchmark to validate register
-pressure.
-
-Metal backend real full-forward replay bench lives in:
-
-```text
 cargo bench --bench qwen3_gqa -- \
   --model-dir <qwen3-model-dir> --tokens-per-req 16 --contexts 0,128,1024 \
   --iters 1 --warmup-iters 0 --runs 1
@@ -1342,126 +1176,66 @@ cargo bench --bench qwen35_gqa -- \
   --iters 1 --warmup-iters 0 --runs 1
 ```
 
-These benches use CLI arguments instead of environment variables.
+| Target/control | Scope |
+| --- | --- |
+| `gqa_split_kv` | SlicedKv building blocks through replay/ICB |
+| `gqa_bidi_block_sdpa` | Local-block Map only, excludes history, Reduce, projections, layer composition |
+| `qwen3_gqa` | Ungated full/SDPA replay, exact QKV/output QMV and QMM probes, `--validate` parity |
+| `qwen35_gqa` | Full QGKV -> split -> Q/K norm+RoPE -> page write -> SDPA -> gate -> output |
+| `--gqa-model 27b\|35b` | Matching real-weight profile, FP8 page tokens 16/32 from 32 KiB pages |
+| `--tokens`, `--num-reqs`, `--contexts` | Total flat tokens, request segments, prior context/request |
+| `--gqa-tokens-per-req`, `--gqa-contexts-per-req` | Ragged counts/contexts, incompatible with `--contexts` |
+| `--max-tokens` | Recorded token/Map capacity, default 128, candidate-specific partial width |
+| `--print-limits` | Device/shared-memory limits and derived SlicedKv footprint |
 
-`qwen3_gqa` loads the Qwen3 model config and first-layer ungated weights. It accepts explicit per-request token counts
-and context lengths. It reports full-replay and SplitKV-only measurements.
-It also reports exact QKV and output-projection measurements for QMV, QMM BM8/BN32, and QMM BM16/BN32.
-These forced projection paths are benchmark-only.
-Production GQA continues to use `affine_quantized::Matmul` selection from the complete shape and dtype.
+Without explicit ragged counts, tokens divide as evenly as possible among requests.
+Without a context list, existing context is zero.
+Recommendation: Use `--tokens 1 --num-reqs 1` for decode-style context sweeps.
+Each case reports Q ranges, Map templates, active/reserved partial groups, replay slots, and KV iterations.
+Use each CLI's `--help` for exact forced geometry options.
+Subcomponent page-write probes must pass the true `num_req_slots` through `gqa::kv_page_write::Shape`.
 
-Its SplitKV SlicedKv and SlicedQ constant arguments are configurable. `--validate` compares full SlicedKv and
-SlicedQ outputs for a workload where production selects the SlicedQ variant.
+Example: one seven-token block, BF16 Q `[7,40,128]`, local K/V `[7,8,128]`, and `max_q_tokens=8`:
 
-Use `--sdpa-sliced-kv-kv-tokens-per-iteration`, `--sdpa-sliced-kv-required-threads`, and
-`--sdpa-sliced-kv-max-q-heads` to configure SlicedKv. Use `--sdpa-sliced-q-max-q-tokens`,
-`--sdpa-sliced-q-kv-tokens-per-iteration`, and `--sdpa-sliced-q-max-q-heads` to configure SlicedQ.
+```text
+grid [Q-head=40, Q-range=1, Q-offset=8], 32 threads = one SIMDgroup/threadgroup
+q_token_ranges = [[0,7]], cu_sdpa_partial_outputs = [0,1]
 
-The validation also prints threadgroup memory and logical accumulator counts. These counts do not measure compiler register allocation.
+threadgroup (9,0,2): Q token 2, Q head 9 -> KV head 9 / (40/8) = 1
+  lane l owns dimensions {l, l+32, l+64, l+96}
+  lane 3: Q[2,9,{3,35,67,99}] -> four F32 registers, reused for all seven keys
+    for k in [0,7):
+      Q registers * K[k,1,{3,35,67,99}] -> lane sum
+      -> SIMDgroup sum -> scaled logit[k] in SMEM
+  SIMDgroup SMEM barrier
+  lane 0: max/exp/sum over seven logits -> weights[7] in SMEM
+    -> partial_max_logits/partial_exp_sums[0,9,2]
+  broadcast exp_sum + SIMDgroup SMEM barrier
+  lane 3: sum_k(weights[k] * V[k,1,{3,35,67,99}]) / exp_sum
+    -> BF16 partial_output[slot=0, head=9, Q-offset=2, {3,35,67,99}]
+  local partial values + max/sum + any history partials
+    -> shared reducer -> O[2,9,:]
 
-For `qwen35_gqa`, `--gqa-model 27b|35b` selects the real-weight layer profile. Pass the matching model directory with
-`--model-dir`.
+z=7 is inactive: return before Q/K/V reads
+SMEM = seven F32 logits = 28 bytes; Q payload/lane = four F32 = 16 bytes
+```
 
-The bench uses the production 32 KiB physical page size. It derives the KV tokens per page from the selected model
-profile and the one-byte FP8 K/V element size. The 27B profile uses 16 tokens per page. The 35B profile uses 32 tokens
-per page.
+Construction checks SIMD width, pipeline thread limit, and device shared memory.
+Source live-value counts do not measure compiler register allocation.
 
-For GQA, `--tokens` is the total current flat-token count. `--num-reqs` is the number of request segments in that
-microbatch. `--contexts` is the existing context length for each request before its measured tokens.
+| Resource boundary | Contract |
+| --- | --- |
+| Hidden/projection scratch | BF16, shared across compatible layers |
+| Persistent KV | FP8 E4M3FN, shared gated/ungated/BiDiBlockGQA/DFlash2 format |
+| State unload | Drop layer references before model releases final backend/scratch/table owners |
+| State restore | Rebuild transient resources, then restore `GQARequestPageTable`, unique mutable `Rc` required |
+| Attention scale | Core `scale`, never silently substitute `1 / sqrt(head_dim)` |
+| Q/K norm+RoPE | Separate specializations for distinct stable head counts |
+| Bindings | Typed offsets for typed buffers, bytes for raw bindings, 64-bit large-stride Metal addresses |
+| Replay | Exact resource usage/barriers, dynamic threadgroup memory, key distinguishes stride/variant/extents |
 
-The bench distributes tokens as evenly as possible across requests. It builds `req_slots`, `flat_token_indices`,
-`visible_kv_token_ranges`, and a fixed-stride request page table from these options.
-
-Recommendation: For a single-request decode-style context sweep, use `--tokens 1 --num-reqs 1` and vary `--contexts`.
-
-For a multi-request decode batch, you may use `--tokens 8 --num-reqs 8`.
-
-For a prefill/suffix sweep, you may use `--tokens 64 --num-reqs 1 --contexts 0,2048,4096`.
-
-Without an explicit context list, the bench uses existing context length zero. `--gqa-tokens-per-req` supplies explicit
-ragged per-request token counts.
-
-`--gqa-contexts-per-req` supplies the matching existing context length for each ragged request. It requires
-`--gqa-tokens-per-req` and cannot be combined with `--contexts`.
-
-`--max-tokens` fixes the token and Map task-template capacities for both forced SplitKV candidates.
-Each candidate derives its partial-state capacity from its registered Q-range width.
-The default is 128, which matches the server default. Each case reports Q-token
-ranges, Map task templates, active and reserved partial-state groups, replay slots, and KV iterations per Map
-task template.
-
-The comparison replay reports `split_kv_variant=sliced_kv` or `split_kv_variant=sliced_q`. Model execution uses the
-automatic selector policy described above.
-
-`--gqa-sdpa-sliced-kv-kv-tokens-per-iteration`, `--gqa-sdpa-sliced-kv-required-threads`, and
-`--gqa-sdpa-sliced-kv-max-q-heads` override the `SlicedKv` defaults.
-
-`--gqa-sdpa-sliced-q-max-q-tokens`, `--gqa-sdpa-sliced-q-kv-tokens-per-iteration`, and
-`--gqa-sdpa-sliced-q-max-q-heads` configure the `SlicedQ` comparison variant.
-
-When the Q-head override is absent, the bench uses the production half/full Q/KV-group rule. The benchmark CLI and
-output use the production constant terms `max_q_tokens`, `kv_tokens_per_iteration`, `max_q_heads`, and
-`required_threads`.
-
-`--print-limits` prints the device threadblock-memory limit. It also prints the derived `SlicedKv`
-threadblock-memory footprint.
-
-The current backend records explicit data-dependency barriers. The replay layer also infers hazards from declared
-buffer usage. It does not add a conservative every-command fallback.
-
-This bench loads real Qwen3.6 layer weights. It measures the full replay path: qgkv projection, projection split, q/k
-norm+RoPE, KV page write, SplitKV, activation gate, and output projection.
-
-Do not compare component-only SplitKV timings with full-forward numbers.
-
-Subcomponent probes use the same request-slot/page-table capacity contract as full-forward replay. Multi-request
-`kv-page-write` probes must pass the true `num_req_slots` through the page-table layout in
-`gqa::kv_page_write::Shape`.
-
-Do not hard-code one request slot. That value under-validates the page-table contract, even if the kernel reads the
-larger backing buffer.
-
-Production Qwen GQA keeps Q, gate, projected K/V, attention output, and projection scratch in BF16. Its persistent KV
-pages use FP8 E4M3FN. The page writer converts projected BF16 K/V into those pages. Gated, ungated, BiDiBlockGQA,
-DFlash2 history reads use the same page format and lifecycle.
-
-The Metal executor keeps forward wiring out of `components/`. Gated `GQA` composes QGKV projection, the gate, and the
-shared attention building blocks.
-
-`UngatedGQA` composes the fixed QKV graph without gate resources.
-
-`ReplayLayer::record(...)` appends to a caller-owned whole-layer/model replay recorder. Focused tests and benches build
-replay programs through the same recorder path.
-
-Each model state binds one shared scratch allocation for compatible layers. Therefore, decode replay reuse does not
-multiply scratch by the layer count.
-
-During `unload_state`, each layer first drops its shared GQA backend, scratch, and request-page-table references.
-The model state owner then releases the final references and its batch metadata.
-State load rebuilds these transient resources before it restores the full `GQARequestPageTable` payload.
-Each GQA state owner implements `FullStateIO` with `GQAStateSnapshotFiles`. `read_full_state` requires mutable state and
-a unique `Rc<GQARequestPageTable>`. This contract prevents restore from overwriting a page table that is still attached
-to an execution graph.
-
-The core `scale` is part of both attention contracts. The executor passes it to SplitKV kernels. Kernels must not
-silently substitute `1 / sqrt(head_dim)`.
-
-Q and K norm/RoPE use separately specialized commands because their stable head counts differ.
-
-Use typed indices for typed buffer offsets. Use byte offsets for raw Metal buffer bindings.
-
-Use 64-bit Metal address math when page or stride arithmetic multiplies large strides. Resource usage marks must cover
-KV page writes and reads exactly.
-
-Record dynamic threadblock memory in both direct and ICB paths. Replay-cache shape keys must distinguish fixed
-page-table stride, execution variant, and replay extents.
-
-Debug in this order:
-
-1. Component primitive
-2. Real-weight GQA wrapper
-3. Attention slice in a layer
-4. Layer ladder
+Debug from primitive -> real-weight wrapper -> attention in one layer -> layer ladder.
+Keep SDPA-only and full-forward timings separate.
 
 ## QSA SDPA
 

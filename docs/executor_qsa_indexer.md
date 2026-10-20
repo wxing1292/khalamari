@@ -89,13 +89,13 @@ Both read the unchanged source slot and projected batch, not another candidate.
 ## Shape selection
 
 Selection uses workload facts rather than model names or prefill/decode labels.
-The five `Shape` fields are record-time capacities:
-
-- `num_total_tokens`: flattened query capacity.
-- `num_total_sparse_queries`: sparse-query capacity.
-- `num_total_request_sparse_queries`: maximum sparse-query count in one request segment.
-- `num_total_groups`: score columns relative to each query's `group_start`.
-- `num_total_score_task_templates`: request-local score worklist capacity.
+| Record-time `Shape` field | Capacity |
+| --- | --- |
+| `num_total_tokens` | Flattened query tokens |
+| `num_total_sparse_queries` | Sparse queries |
+| `num_total_request_sparse_queries` | Maximum sparse queries in one request segment |
+| `num_total_groups` | Score columns relative to each query's `group_start` |
+| `num_total_score_task_templates` | Request-local score worklist |
 
 For a request with history 2048 and eight input tokens that crosses the dense budget:
 
@@ -123,7 +123,7 @@ Let `N` be sparse-query capacity and `Q` be per-request sparse-query capacity.
 
 | Condition | Score path |
 | --- | --- |
-| `Q == 1`, or `N <= 4`, or `G < 2048 && (N <= 8 || Q <= 2)` | Vector SIMD; up to 8 queries per template |
+| `Q == 1`, or `N <= 4`, or `G < 2048 && (N <= 8 \|\| Q <= 2)` | Vector SIMD; up to 8 queries per template |
 | Other optimized shapes, request has fewer than 32 sparse queries | Steel flat; 8 queries × 4 heads per template |
 | Other optimized shapes, request has at least 32 sparse queries | Steel head-loop; up to 32 queries per template |
 
@@ -373,20 +373,23 @@ Both: loop over four heads, stage Q/K slices in SMEM, retain C/S in registers
       -> common exact radix -> IDs [64,512]
 ```
 
-BM32 halves persistent C/S storage per thread and exposes more blocks.
-These facts support a register-pressure and parallelism explanation. The study does not measure compiler register allocation or occupancy.
-The resident-K/Q alternatives lose in this matrix. Fewer explicit K reads alone do not establish lower total latency.
-The oMLX native control masks future groups at store time. Our scorer skips wholly future tiles before loading operands.
-This difference helps explain the larger one-shot gain. It does not isolate the effect of BM32.
-The deferred Q=1..16 suite remains unmeasured. Current SIMD/flat choices for those shapes remain in place.
-Production mixed-tail composition requires its own performance measurement.
+| Interpretation | Limit |
+| --- | --- |
+| Reduced C/S storage and more blocks | Compiler register allocation/occupancy unmeasured |
+| PSI skips wholly future tiles before loads, oMLX masks at store | One-shot differences do not isolate BM32 |
+| Resident-K/Q alternatives lose | Fewer explicit reads alone do not establish lower latency |
+| Q=1..16 and mixed-tail production composition | Remain unmeasured, existing choices unchanged |
+
 
 ## Benchmarks
 
-The production Criterion benchmark records `Compute::select` through Metal replay.
-It includes scoring and the production full/sampled selector. It excludes preparation and main QSA SDPA.
-It covers requests `1/2/4/8`, Q tokens `1/8/32/128/256`, histories `4096/16384/65536`, and one-shot `4096/16384`.
-Each timed replay contains 32 invocations. Divide its latency by 32 for per-invocation latency.
+| Production Criterion replay | Contract |
+| --- | --- |
+| Timed | `Compute::select`, scoring and full/sampled selector |
+| Excluded | Preparation and main QSA SDPA |
+| Requests / Q tokens | `1/2/4/8` / `1/8/32/128/256` |
+| History / one-shot | `4096/16384/65536` / `4096/16384` |
+| Invocations | 32/replay, divide latency by 32 for per-invocation latency |
 
 ```sh
 cargo bench -p inference-backend-metal --bench qsa_indexer

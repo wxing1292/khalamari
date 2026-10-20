@@ -153,21 +153,7 @@ Only their true matrix axes retain `n` and `k`.
 ## Replay contract
 
 `GatedMoE` records one MoE MLP forward through `ReplayLayer::record(...)` and a caller-owned `Recorder`.
-The full MoE path is the component boundary.
-The sparse expert MLP kernel alone is not that boundary.
-
-The semantic replay input is:
-
-```text
-GatedMoEInput
-  num_total_tokens   recorded token capacity
-  num_active_tokens active-token replay parameter or fixed count
-  hidden_state      &Buffer
-  next_hidden_state &Buffer
-  scratch  MoEScratchBindings
-  weights  GatedMoEWeights
-  shared_experts optional GatedMoESharedExpertsInput
-```
+The boundary includes routing, expert computation, optional shared experts, and combine.
 
 Replay returns `next_hidden_state` directly.
 It does not wrap the caller-owned buffer in a one-field output object.
@@ -836,16 +822,14 @@ cargo bench --bench moe
 cargo bench --bench sparse_mlp
 ```
 
-The benches include Metal replay/ICB cases for MoE routing/combine.
-`route_replay128` records 128 routing invocations in one submission to amortize host submission and wait overhead.
-Its reported time covers the full submission. Divide by 128 for the mean time per routing invocation.
-This diagnostic does not represent complete model throughput.
-They include token-major sparse expert forward paths.
-Synthetic forward cases record router projection, routing, sparse expert MLP, shared expert MLP, shared gate, and
-scatter/combine.
-They record these operations in one batch.
-Token-major and expert-major implementations remain explicit replay cases.
-They use the 35B-A3B MoE profile:
+| Replay case | Timed work |
+| --- | --- |
+| `route_replay128` | 128 routing invocations/submission, divide wall time by 128 for per-invocation latency |
+| Synthetic full forward | Router/softmax/routing, sparse experts, optional shared branch, combine/scatter in one batch |
+| Token-major/expert-major | Explicit implementation comparisons |
+
+Routing amortization is a diagnostic, not model throughput.
+The synthetic fixture uses the 35B-A3B profile:
 
 ```text
 hidden_dim=2048
@@ -886,19 +870,16 @@ New sparse/MoE Metal code does not keep direct-submit component or forward paths
 The 27B dense checkpoint has no MoE routing, combine, or sparse-MLP path.
 Thus, there is no meaningful 27B MoE bench.
 
-Recommendation: Bisect MoE performance by contract boundary in this order:
+Recommendation: Bisect performance through these boundaries:
 
-1. Router projection, softmax, and routing.
-2. Sparse expert MLP.
-3. Combine.
-4. Shared branch.
-5. Full MoE wrapper.
+```text
+diagnostic order (the execution graph has parallel branches):
+  1 router/softmax/routing -> 2 sparse MLP -> 3 combine -> 4 shared -> 5 full MoE
+  |<--- MoE owner ---->|    sparse_mlp::Compute       |<---- MoE owner ---->|
+```
 
-Routing and combine belong to MoE.
-`sparse_mlp::Compute` owns only expert inner compute.
-Top-k ordering differences alone are not a performance target.
-Route probability semantics must identify logits or already-softmaxed probabilities.
-They must also identify whether routing renormalizes selected top-k probabilities.
+Top-k ordering alone is not a performance target.
+State whether route inputs are logits or probabilities and whether selected top-k probabilities are renormalized.
 
 Token-major QMV and expert-major Steel QMM must match the sparse CPU reference within its numerical tolerance.
 Expert QMM rounds dequantized weights to the configured input dtype. It accumulates products in F32.

@@ -18,12 +18,13 @@ inference-backend-metal/src/components/
     metal/ngram_embedding_resident.metal  H1/H4 resident lookup
 ```
 
-The caller owns the table buffers, metadata, output, stream, and replay cache.
-`HashParameters::new` validates geometry and constructs per-layer multipliers, prime vocabulary sizes, and row offsets.
-`Compute::new` validates kernel geometry and initializes its immutable legal kernels.
-The hash and lookup entry points validate record-time capacities and buffer ranges.
-Lookup also validates the contiguous shard partition and each storage layout.
-Submission does not repeat those checks.
+| Boundary | Owner/validation |
+| --- | --- |
+| Caller | Table buffers, metadata, output, stream, replay cache |
+| `HashParameters::new` | Geometry, layer multipliers, prime vocabularies, row offsets |
+| `Compute::new` | Kernel geometry and immutable legal kernels |
+| Hash/lookup recording | Capacities/ranges, lookup shard partition/storage layout |
+| Submission | No repeated construction/recording checks |
 
 The caller must supply valid token IDs, source history slots, request boundaries, and hash parameters.
 Lookup IDs must address the supplied table partition. The kernel does not repair invalid IDs or metadata.
@@ -127,10 +128,13 @@ cargo test -p inference-backend-metal ngram_embedding -- --test-threads=1
 cargo bench -p inference-backend-metal --bench ngram_embedding
 ```
 
-The benchmark uses production hashing, lookup, and selection with eight resident groups.
-It uses a reduced-capacity synthetic Q4 table with vocabulary base 65536 per head, approximately 100 MiB in total.
-It records 32 invocations per replay for `lookup` and `hash_lookup`.
-This replay-amortized microbenchmark does not equal single-submission latency or end-to-end model throughput.
+| Benchmark fixture | Value |
+| --- | --- |
+| Path | Production hashing, lookup, selection, eight resident groups |
+| Table | Synthetic Q4, vocabulary base 65536/head, approximately 100 MiB |
+| Timed replay | 32 `lookup` or `hash_lookup` invocations |
+
+The metric is replay-amortized component latency, separate from single-submission or model throughput.
 
 ## Selection evidence
 
@@ -141,7 +145,8 @@ Peers were oMLX `64bf5d1ba6336b45955c00f7fe0e46acd5c85095` and TensorFold `cb2eb
 The TensorFold adapter measured its native Python hash/lookup kernels, not its complete serving engine.
 The reduced-capacity resident table contained 16001906 rows and 1600190600 bytes, approximately 1.49 GiB.
 
-The crossover command was `scripts/ple_compare.py --suite crossover --mode run`, with the peer and table paths in the snapshot.
+Historical runner (not retained): `scripts/ple_compare.py --suite crossover --mode run`.
+The snapshot records peer and table paths.
 It measured 34 token counts from 1 through 2048, with 10 warm-ups and 100 iterations per worker.
 The first eight rounds fitted one cutoff. The last eight rounds scored that frozen policy.
 All 144 arm validations matched exactly. All 2176 timing workers had zero swap delta.
@@ -158,7 +163,7 @@ Validation-round median `hash_lookup` wall latency in microseconds:
 
 The fitted cutoff was 288. Cutoff 256 increased the training objective by only 0.0252%.
 A post-fit audit found approximately 0.003% paired policy difference on the held-out rounds.
-The integration uses 256 as an engineering cutoff. These measurements do not identify an exact hardware transition.
+The integrated cutoff 256 is an engineering choice, not an exact hardware transition.
 The cutoff-256 policy took approximately 1.0107 times TensorFold latency across the measured small-token matrix.
 The earlier long-input comparison found H4 approximately 3.75%/4.08% slower than TensorFold at 32K/64K.
 H8, H16, and the Z token axis added no material combined-path gain there.

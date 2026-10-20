@@ -6,42 +6,15 @@ This document owns the current top-k/top-p sampling and sparse rejection-samplin
 
 ## Source layout
 
-```text
-crates/inference-executor-core/src/sampling/
-  config.rs          sampler validation and optional request seed
-  domain.rs          independent Main, Spec, accept, and resample RNG domains
-  reference.rs       CPU top-k/top-p and rejection correctness oracle
-  rejection_sampling.rs
-                     backend-neutral sparse rejection bounds, shape, request, and microbatch-view contracts
-  request_state.rs   executor-owned request-slot seed lifecycle
-  top_k_sampling.rs  backend-neutral sampling shape and request parameters
+| Root under `crates/` | Owners |
+| --- | --- |
+| `inference-executor-core/src/sampling/` | `config.rs`, `domain.rs`, `reference.rs`, `request_state.rs`, `top_k_sampling.rs`, `rejection_sampling.rs` |
+| `inference-backend-metal/src/components/sampling/` | `top_k.rs`, `rejection.rs`, `failure.rs`, `dflash2_selector.rs`, `spec_decode_input.rs` |
+| Backend `components/metal/` | `sampling.metal`, `spec_decode_input.metal`, `dflash2_selector.metal` |
+| `inference-executor-metal/src/sampling/` | `sampling_params.rs`, `top_k_sampling.rs`, `top_k_replay.rs`, `rejection_replay.rs`, `spec_probs.rs` |
 
-crates/inference-backend-metal/src/components/
-  sampling/top_k.rs           generic Metal top-k sampling components
-  sampling/top_k_test.rs      focused Top-K Metal parity and replay contracts
-  sampling/failure.rs         sampling-owned GPU failure record and CPU diagnostics
-  sampling/dflash2_selector.rs
-                              DFlash2 edge scoring and sequential path walk
-  sampling/rejection.rs       sparse rejection component
-  sampling/spec_decode_input.rs
-                              rejection-output to fixed-block Decode-input transform
-  metal/sampling.metal
-  metal/spec_decode_input.metal
-  metal/dflash2_selector.metal
-
-crates/inference-executor-metal/src/sampling/
-  sampling_params.rs      SamplingParamsStore request-slot parameter owner
-  top_k_sampling.rs       TopKSampling row inputs, scratch, and TopKSamplingOutputBuffers
-  top_k_replay.rs         Sampling and DraftSampling replay components
-  rejection_replay.rs     sparse rejection replay owner, batch preparation, and bindings
-  spec_probs.rs           SpecProbsStore sparse draft/target probability workspace
-
-```
-
-Runtime core transports sampler configuration and sampled decisions.
-It does not own RNG state, sparse distributions, or replay geometry.
-The executor resolves one root seed for each live request slot.
-It keeps that seed stable until the slot resets.
+Runtime core transports sampler config and decisions.
+The executor owns RNG, sparse distributions, replay geometry, and one root seed per live request slot until reset.
 
 ## Normal sampling
 
@@ -329,19 +302,16 @@ Each sparse distribution contains the exact probabilities that the walk uses.
 
 ## Correctness and benchmarks
 
-CPU references define sampling, rejection, math.
-Each Top-K API records one replay with a total row capacity of `4`.
-The Merge, Sample, WriteDistribution, and SampleAndWriteDistribution tests replay
-`1, 4, 3, 2` active rows and compare each active logical output with a CPU reference.
-The Merge and Sample tests cover F32 and BF16 logits with reduction and bitonic Map topologies.
-The distribution tests cover F32 and BF16 bitonic Map topologies, mapped distribution slots, mixed per-row runtime
-parameters, deterministic sample positions, and Target and Draft domains.
-All Top-K tests use a nonzero logits row offset.
-One sparse rejection replay uses the same active-request sequence. It compares active accepted counts, sampled tokens,
-sampled probabilities, and accepted-token prefixes with the CPU rejection reference. The fixture covers rejection,
-all-accept, zero-draft, and non-contiguous draft-distribution mapping.
-These tests do not use inactive output tails as an oracle.
-GPU tests run serially under the repository Metal reservation/lock rules.
+| Replay test | Contract |
+| --- | --- |
+| Merge/Sample | F32/BF16, reduction/bitonic Map |
+| WriteDistribution/SampleAndWriteDistribution | F32/BF16 bitonic Map, mapped slots, mixed row parameters, deterministic positions, Target/Draft RNG domains |
+| All Top-K APIs | Total rows `4`, active `1, 4, 3, 2`, nonzero logits offset, exact active CPU reference |
+| Sparse rejection | Same active-request sequence, accepted counts, sampled tokens/probabilities/prefixes |
+| Rejection fixtures | Reject, all-accept, zero-draft, non-contiguous distribution mapping |
+
+Inactive output tails are not correctness oracles.
+Run GPU tests serially under [executor verification](executor_benchmarks.md).
 Synthetic backend modes:
 
 ```text

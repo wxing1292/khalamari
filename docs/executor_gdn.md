@@ -336,16 +336,13 @@ Other speculator modes submit GDN commit at the existing model response boundary
 
 ## Profile keys
 
-The full-forward GDN benchmark reports `mixed_replay`. Its subcomponent keys are:
+| Key | Scope |
+| --- | --- |
+| `mixed_replay` | Full forward |
+| `qkvabz`, `compute_mixed_replay`, `output` | Forward subcomponents |
+| `gdn_commit_wait` | Pending reconstruction and publication |
 
-```text
-qkvabz
-compute_mixed_replay
-output
-```
-
-The executor state wait trace uses `gdn_commit_wait`. It includes pending reconstruction and publication.
-Do not add dynamic values to profile paths.
+Keep dynamic values out of profile paths.
 
 ## GDN kernel family
 
@@ -359,19 +356,15 @@ An empty job set records no commit operation. A publish-only batch still submits
 
 ## Tests and benches
 
-Focused correctness coverage includes:
-
-- CPU parity for recurrence, convolution, output gating, and both quantized projections.
-- Mixed recurrent/replay outputs with independent active request, token, and prefix counts.
-- Default kernel selection for padded V rows, multiple V blocks, and wider Q/K heads.
-  Tests use the production recorder and cover sixteen-token chunks, ragged tails, boundary snapshots,
-  serial/concurrent parity, and selected-prefix commits across layers.
-- Per-layer logs with grouped K heads, disjoint state slots, and inactive capacity.
-- Reconstructed states for selected prefixes, including zero and complete acceptance.
-- Recurrent final/boundary maps and deferred replay allocation.
-- No-spec replay commits, accepted boundary publication, and rejected page canaries.
-- Vectorized commit against an F64 recurrence, including zero and long accepted prefixes, scalar and vector storage, and replayed active job counts.
-- Restore/reset isolation and full/selected state snapshots.
+| Test domain | Coverage |
+| --- | --- |
+| Math | CPU recurrence, convolution, gating, both quantized projections |
+| Mixed replay | Independent active request/token/prefix counts, sixteen-token chunks, ragged tails, boundary snapshots |
+| Selection | Padded V rows, multiple V blocks, wider Q/K heads, serial/concurrent parity |
+| State lifetime | Per-layer logs, grouped K heads, disjoint slots, inactive capacity |
+| Commit | Zero/full acceptance, final/boundary maps, deferred allocation, publication and rejected-page canaries |
+| Vectorized commit | F64 recurrence, zero/long prefixes, scalar/vector storage, replayed active jobs |
+| State I/O | Restore/reset isolation, full/selected snapshots |
 
 Run Metal tests serially:
 
@@ -380,19 +373,15 @@ cargo test -p inference-backend-metal --all-features --lib components::gdn -- --
 cargo test -p inference-executor-metal --all-features --lib attn::gdn -- --test-threads=1
 ```
 
-`qwen35_gdn` measures one GDN forward with real 27B or 35B-A3B weights.
-It excludes accepted-state commit and cache publication.
-`--gdn-model 27b|35b` selects the fixture geometry. The default is `35b`.
-`--tokens-per-req` sets ragged input lengths. `--prefill-requests` selects the chunkwise request prefix.
-The prefix writes final snapshots. The suffix writes replay logs. `--subcomponents` uses the same forward contract.
+| Benchmark control | Contract |
+| --- | --- |
+| `qwen35_gdn` | One real-weight forward, excludes accepted-state commit/publication |
+| `--gdn-model 27b\|35b` | Fixture geometry, default `35b` |
+| `--tokens-per-req` | Ragged lengths |
+| `--prefill-requests` | Chunkwise prefix writes final snapshots, suffix writes replay logs |
+| `--subcomponents` | Same forward contract |
+| `--compare-recurrent` | All-recurrent reference with same state-write map, no replay log/full decode states |
 
-`--compare-recurrent` compares that forward with all-recurrent computation using the same state-write map.
-The reference does not write a replay log or full decode states. It is not a comparison with the previous complete model lifecycle.
-Its untimed checks compare outputs, source preservation, and requested snapshots.
-
-Use the production service and external caller for model-level acceptance checks. Follow
-[`executor_benchmarks.md`](executor_benchmarks.md) and [`service.md`](service.md).
-Do not compare component forward timings with complete forward/commit timings.
-
-The [component latency matrix](executor_benchmarks.md#component-latency-matrix) provides request/input axes, resume, and grouped reports.
-All positive ctx values reuse one fixed nonzero GDN state fixture. They do not measure prefix construction.
+Untimed recurrent comparison checks outputs, source preservation, and requested snapshots.
+The [component matrix](executor_benchmarks.md#component-latency-matrix) reuses one fixed nonzero state for all positive ctx values.
+Use the [service](service.md) and [external acceptance workflow](executor_benchmarks.md) for complete forward/commit lifecycle measurements.
