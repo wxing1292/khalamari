@@ -207,48 +207,27 @@ After state restoration, `load_state` restores the bindings and shares the model
 
 ## Checkpoint contract
 
-`Qwen3xDFlash2Config` adapts `DFlash2DraftModel` to the flat canonical schema.
-It validates Main compatibility, selected layers, block and window sizes, attention and convolution geometry, selector
-rank, and candidate count.
-The checkpoint boundary rejects unknown architectures and nested fields.
+| Boundary | Contract |
+| --- | --- |
+| `Qwen3xDFlash2Config` | Adapt `DFlash2DraftModel` to canonical flat schema, reject unknown/nested fields |
+| Validation | Main compatibility, selected layers, block/window, attention/convolution geometry, selector rank/count |
+| `Qwen3xDFlash2WeightBindings` | Exact source/affine manifest, cannot replace shared Main Embed/Unembed |
+| Projection | Independent exact affine layouts |
+| Converted storage | Packed `U32` matrices, BF16 affine parameters, BF16 RMSNorm/base convolution |
+| Loader | Also accepts uniform F32 affine scales/biases |
+| Conversion default | Group size 64, 4-bit matrices, layer 2/4 `v_proj` and `down_proj` use 6 bits |
 
-`Qwen3xDFlash2WeightBindings` accepts only the exact source or affine manifest.
-The manifest cannot replace reused Main embedding or unembedding.
-Each projection resolves its exact affine layout.
-
-The shared Spec converter writes packed `U32` matrices and BF16 affine parameters.
-It keeps RMSNorm weights and convolution base kernels as BF16.
-The loader also accepts uniform F32 affine scales and biases.
-The default conversion uses group size 64 and 4-bit matrices.
-Layer 2 and layer 4 `v_proj` and `down_proj` use 6-bit matrices.
-Use [`service.md`](service.md) for conversion commands.
+See [service conversion commands](service.md).
 
 ## Key source layout
 
-```text
-crates/inference-executor-core/src/model/qwen/v3_x/dflash2/
-  config.rs                  checkpoint schema and validation
-  weight_layout.rs           exact source and affine manifests
-
-crates/inference-executor-core/src/bin/qwen3x_spec_quantize/
-  dflash2.rs                 DFlash2 conversion policy
-
-crates/inference-executor-metal/src/model/qwen/v3_x/dflash2/
-  execution.rs               Prefill and Decode orchestration
-  main_feature.rs            all-row projection from selected Main layers
-  attention.rs               history-plus-block attention
-  conv.rs                    dynamic grouped convolution
-  layer.rs                   DFlash2 layer composition
-  model.rs                   model and replay owners
-  output.rs                  Top-K, selector, and draft distributions
-
-crates/inference-executor-metal/src/model/qwen/v3_5/executor/
-  dflash2.rs                 Qwen3.5 outer integration
-
-crates/inference-backend-metal/src/components/
-  dynamic_grouped_conv.rs
-  sampling/dflash2_selector.rs
-```
+| Root under `crates/` | Owner |
+| --- | --- |
+| `inference-executor-core/src/model/qwen/v3_x/dflash2/` | `config.rs`, `weight_layout.rs` |
+| `inference-executor-core/src/bin/qwen3x_spec_quantize/` | `dflash2.rs`, conversion policy |
+| `inference-executor-metal/src/model/qwen/v3_x/dflash2/` | `execution.rs`, `main_feature.rs`, `attention.rs`, `conv.rs`, `layer.rs`, `model.rs`, `output.rs` |
+| `inference-executor-metal/src/model/qwen/v3_5/executor/` | `dflash2.rs`, outer integration |
+| `inference-backend-metal/src/components/` | `dynamic_grouped_conv.rs`, `sampling/dflash2_selector.rs` |
 
 ## Verification
 

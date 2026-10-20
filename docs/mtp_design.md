@@ -19,14 +19,15 @@ Use these sections for specific questions:
 
 ## GPU timing
 
-Each logical MTP submission has one GPU interval. `MetalRuntime` enables relaxed timestamps by default.
-The interval includes hidden-state transfer, embed, all module layers, gather/unembed, and sampling.
-`Qwen35MTPExecution` sums these intervals after the existing submission waits. It adds no synchronization.
-Host recording, proposal readback, and gaps between submissions do not enter the total.
-If any interval is unavailable, the complete batch total is unavailable.
-`ModelOutputTiming::spec_replay_gpu_elapsed` carries this total to the existing `spec_gpu_ms` metric.
-The scheduler reports one `mtp` row in `GPU Execution Latency`.
-[Service logging](service.md) defines the controls, histogram windows, and Main boundaries.
+| Timing field/boundary | Contract |
+| --- | --- |
+| Logical MTP interval | Hidden transfer, embed/body layers, gather/unembed, sampling |
+| `Qwen35MTPExecution` | Sum valid intervals after existing waits, no added synchronization |
+| Excluded | Host recording, proposal readback, submission gaps |
+| Missing interval | Complete batch total unavailable |
+| `ModelOutputTiming::spec_replay_gpu_elapsed` | Existing `spec_gpu_ms` metric, scheduler `mtp` GPU latency row |
+
+`MetalRuntime` enables relaxed timestamps by default. [Service logging](service.md) owns controls and Main boundaries.
 
 After Main completes, rejection decisions fix the accepted GDN prefix.
 Before MTP embedding, the executor submits [GDN state commit](executor_gdn.md#state-data-flow) on a separate Metal stream.
@@ -774,43 +775,18 @@ Earlier input rows update MTP context and provide hidden inputs to the next modu
 
 ## Source and verification
 
-The paths below are relative to `crates/`:
+| Root under `crates/` | Owner files |
+| --- | --- |
+| `inference-runtime-core/src/compute/request/decoder/` | `query_tokens.rs`, query fields/lane slices |
+| `inference-runtime-core/src/runtime/decoder/trie_cache/blocks/trie/` | `api.rs`, MTP/collision tests, token-window/placeholder sanity |
+| `inference-executor-core/src/model/qwen/v3_5/` | `config.rs`, `weight_layout.rs` |
+| `inference-executor-metal/src/model/qwen/v3_5/` | `component_config.rs`, `executor/mtp.rs` |
+| `inference-executor-metal/src/model/qwen/v3_5/mtp/` | `decode_plan.rs`, `hidden_state_cache.rs`, `hidden_state_transfer.rs`, `embed.rs`, `layer.rs`, `mod.rs` |
+| `inference-backend-metal/src/operators/` | `row_route.rs`, `row_scatter.rs` |
+| `inference-executor-metal/src/sampling/` | `top_k_replay.rs`, `spec_probs.rs` |
 
-```text
-inference-runtime-core/src/
-  compute/request/decoder/query_tokens.rs       query fields and lane slices
-  runtime/decoder/trie_cache/blocks/trie/
-    api.rs                                     prepare, commit, mutable overwrite, publish
-    api_test_w_mtp.rs                           prepare/cancel/commit, token states, cache collisions
-    mod.rs                                     runtime sanity checks
-    sanity_check_test.rs                        token windows, tail identity, placeholders
-
-inference-executor-metal/src/model/qwen/v3_5/
-  component_config.rs                          Main/MTP validation
-  executor/mtp.rs                              request preparation and proposal loop
-  mtp/
-    decode_plan.rs                             per-module token/index formulas and tests
-    hidden_state_cache.rs                      BF16 layout, metadata, prefix checks and tests
-    hidden_state_transfer.rs                   hidden routing, read-before-write and tests
-    embed.rs                                   norms, concatenation, projection
-    layer.rs                                   physical GQA/MLP layer
-    mod.rs                                     body, final norm, replay key
-
-inference-executor-core/src/model/qwen/v3_5/
-  config.rs                                    checkpoint configuration
-  weight_layout.rs                             exact tensor bindings
-
-inference-backend-metal/src/operators/
-  row_route.rs                                 gather hidden rows
-  row_scatter.rs                               write retained hidden rows
-
-inference-executor-metal/src/sampling/
-  top_k_replay.rs                               DraftSampling replay
-  spec_probs.rs                                sparse draft distributions
-```
-
-See [`service.md`](service.md) for end-to-end commands, [`executor_sampling.md`](executor_sampling.md) for sampling,
-[`executor_gqa.md`](executor_gqa.md) for GQA, and [`executor_benchmarks.md`](executor_benchmarks.md) for performance evidence.
+[Service](service.md) owns external commands.
+[Sampling](executor_sampling.md), [GQA](executor_gqa.md), and [verification](executor_benchmarks.md) own component checks and measurement rules.
 
 ## Scheduler cache commit
 

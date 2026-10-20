@@ -11,98 +11,41 @@ Unresolved work is in [`future_work.md`](future_work.md).
 
 ## Supported scope
 
-The current path supports the `mlx-community/Qwen3-ASR-1.7B-8bit` checkpoint contract on Apple Silicon.
-The text decoder uses the shared Qwen3 executor.
-The audio path uses one model-owned Audio encoder executor and one model-owned audio processor.
+| Boundary | Supported contract |
+| --- | --- |
+| Checkpoint | `mlx-community/Qwen3-ASR-1.7B-8bit`, Apple Silicon |
+| Decoder/encoder | Shared Qwen3 decoder, model-owned Audio executor and processor |
+| Input | One WAV/resource/request, integer or F32 -> mono F32 at 16 kHz |
+| Duration | At most 30 seconds after resampling |
+| Output | Greedy, collected HTTP response, no streaming transcription |
+| Resource lifetime | Private/request, common async-task/resource lifecycle, no cross-request materialization sharing |
 
-The first version has these limits:
-
-- One WAV file supplies one audio resource for each request.
-- Audio preparation accepts integer or F32 WAV input and converts it to mono F32 at 16 kHz.
-- The service accepts at most 30 seconds after resampling.
-- Decoding is greedy.
-- The HTTP response is collected. Streaming transcription is not supported.
-- The resource is private to the request. The current implementation does not share materialized audio across requests.
-
-The current implementation does not add audio-specific states to the runtime scheduler.
-It uses the common async-task and resource contracts.
+Runtime scheduling has no audio-specific states.
 
 ## Source layout
 
-```text
-crates/inference-executor-core/src/model/qwen/v3_asr/
-  config.rs                 strict checkpoint, generation, and preprocessor contract
-  input.rs                  prepared log-Mel source and Audio Tower output-row geometry
-  weight_layout.rs          exact Audio Tower and shared Qwen3 text binding tree
-
-crates/inference-backend-metal/src/
-  operators/
-    matmul_bf16.rs          adaptive BF16 matmul operator
-    bias_activation_bf16.rs BF16 bias-plus-activation operator
-    conv2d_unfold.rs        audio Conv2D unfold operator
-  components/
-    tower_block_attention.rs shared bidirectional block self-attention for encoder towers
-    audio_encoder_layout.rs audio chunk/dechunk and merger layout
-    layer_norm.rs           BF16 LayerNorm
-    resource_embed.rs       resource-to-hidden replacement operation
-
-crates/inference-executor-metal/src/model/
-  resource_arena.rs         shared Metal buffer and byte-range allocation owner
-  resource_embed.rs         replay wrapper and active replacement mapping builder
-  main_resource_embed.rs    model-level resource mapping and replay owner
-  qwen/v3_asr/
-    audio.rs                Audio encoder worker, replay lifecycle, and Audio Tower
-    resource.rs             prepared-source registration and processor adapter
-  qwen/v3/executor/
-    mod.rs                  text-only or resource-aware input composition
-
-crates/inference-runtime-core/src/runtime/
-  resource/                 ResourceID, ResourceURI, Resource, and ResourcePlacement
-  resource/processor.rs     model-neutral processor contract and type router
-  decoder/resource.rs       cache-block ResourceSegment annotation
-  tasks/resource_materialization.rs
-                            async resource materialization transport
-
-crates/inference-runtime-service/src/
-  asr/
-    audio.rs                WAV decode, resample, and log-Mel preparation
-    tokenizer.rs            checkpoint tokenizer load
-    mod.rs                  prompt composition and transcription result parsing
-  rpc/http/transcriptions.rs
-                            multipart transcription endpoint
-  bin/qwen_server/asr.rs    Qwen3-ASR runtime and service wiring
-  bin/qwen3_asr.rs          service binary
-```
+| Root under `crates/` | Owner files |
+| --- | --- |
+| `inference-executor-core/src/model/qwen/v3_asr/` | `config.rs`, `input.rs`, `weight_layout.rs` |
+| `inference-backend-metal/src/operators/` | `matmul_bf16.rs`, `bias_activation_bf16.rs`, `conv2d_unfold.rs` |
+| `inference-backend-metal/src/components/` | `tower_block_attention.rs`, `audio_encoder_layout.rs`, `layer_norm.rs`, `resource_embed.rs` |
+| `inference-executor-metal/src/model/` | `resource_arena.rs`, `resource_embed.rs`, `main_resource_embed.rs` |
+| `inference-executor-metal/src/model/qwen/v3_asr/` | `audio.rs`, `resource.rs` |
+| `inference-executor-metal/src/model/qwen/v3/executor/` | `mod.rs`, text/resource composition |
+| `inference-runtime-core/src/runtime/` | `resource/`, `decoder/resource.rs`, `tasks/resource_materialization.rs` |
+| `inference-runtime-service/src/` | `asr/`, `rpc/http/transcriptions.rs`, `bin/qwen_server/asr.rs`, `bin/qwen3_asr.rs` |
 
 ## Owner boundary
 
-The service owns these operations:
+| Owner | Responsibility |
+| --- | --- |
+| Service | WAV conversion, resampling/normalization/log-Mel, prompt/placeholder tokens, prepared-source registration, language/result parsing |
+| Runtime core | Resource identity/placement/segments, request/allocation lifetime, cache hit/miss, async tasks |
+| ASR model integration | Shared resource arena, processor, standalone encoder worker/stream/weights, hidden replacement map |
+| Shared Qwen3 executor | Text embedding, decoder, unembedding, sampling |
+| Metal backend | Buffers, kernels, replay submission |
 
-- WAV decode and sample conversion.
-- Resampling, normalization, and log-Mel calculation.
-- Prompt tokenization and audio placeholder expansion.
-- Per-request prepared-source registration.
-- Language validation and transcription output parsing.
-
-The runtime core owns these objects and operations:
-
-- `ResourceID` and runtime-neutral `ResourceTypeID`.
-- `Resource`, `ResourcePlacement`, and cache-block `ResourceSegment` values.
-- Request and concrete-allocation lifetime.
-- Cache-hit bypass and cache-miss detection.
-- Async resource-task dispatch.
-
-The Qwen3-ASR executor integration owns these operations:
-
-- Resource-arena creation during multimodal model initialization.
-- The registered Qwen3-ASR audio resource processor.
-- The standalone Audio encoder executor, worker, stream, weights, and execution.
-- The source-to-hidden replacement mapping.
-
-The model initializer passes one shared Metal resource arena to the Audio encoder executor and Qwen3 decoder.
-
-The shared Qwen3 executor owns text embedding, decoder execution, unembedding, and sampling.
-The Metal backend owns buffers, kernels, and replay submission.
+The initializer shares one resource arena between encoder and decoder.
 
 Backend constructors validate static shader dimensions, including the MLX LayerNorm loop tile.
 Invocation constructors validate dynamic counts, signed coordinates, padded layouts, and attention window ends.

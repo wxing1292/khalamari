@@ -53,24 +53,21 @@ The residual-dependent PLE gate and convolution run at the configured layer.
 
 ## Checkpoint boundary
 
-`Qwen4xModelConfig::normalize` validates the supported architecture during initialization.
-The current QSA geometry is 24 Q heads, two KV heads, and head dimension 256.
-The indexer has four Q heads, one K head, and head dimension 128.
-Both use 64 rotary dimensions with the default partial factor `0.25`.
-The indexer uses the main attention rotary width.
+| Boundary | Contract |
+| --- | --- |
+| `Qwen4xModelConfig::normalize` | Validate supported architecture once |
+| Main QSA | 24 Q heads, two KV heads, head dimension 256 |
+| Indexer | Four Q heads, one K head, head dimension 128 |
+| Rotary geometry | Both use 64 dimensions, default partial factor `0.25`, indexer uses main rotary width |
+| Binding resolver | One complete prefix, reject mixed/incomplete trees |
+| Loader | Validate dtype/shape/affine layout before recording |
+| GR/PLE normalization | Raw BF16 offsets |
+| QSA normalization | Convert offsets to effective FP32 scales at load |
+| GDN | Existing norm contract, configured SiLU/sigmoid output gate |
+| N-gram table | Stream shards into at most eight final resident groups, stable global IDs, one affine layout/group |
 
-The binding resolver selects one complete checkpoint prefix.
-It rejects incomplete or mixed binding trees.
-The loader validates tensor dtype, shape, and affine layout before recording.
-GR and PLE normalization consume raw BF16 offsets.
-Main QSA normalization converts offsets to effective FP32 scales during loading.
-GDN uses its existing normalization contract and the configured SiLU or sigmoid output gate.
-
-The loader writes n-gram checkpoint shards directly into at most eight final resident groups.
-It does not allocate a second complete table.
-Each group keeps global row IDs and one affine layout.
-The existing n-gram backend selects H1, H4, or the general sharded path.
 The complete table must fit memory.
+The n-gram backend selects H1/H4/general lookup without allocating a second complete table.
 
 ## Pages and state
 

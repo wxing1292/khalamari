@@ -38,147 +38,37 @@ See [service diagnostics](service.md#numerical-failure-diagnostics) for a comple
 
 ## Source layout
 
-```text
-crates/inference-executor-core/src/model/qwen/v3/
-  config.rs                 Qwen3ModelConfig/Qwen3TextConfig, strict parsing, and EOS fallback
-  batch.rs                  Qwen3Microbatch, request, response, and sampled-decision contracts
-  weight_layout.rs          exact Qwen3 Main/unembed binding tree
+| Root under `crates/` | Contract |
+| --- | --- |
+| `inference-executor-core/src/model/qwen/v3/` | Qwen3 config, microbatch, exact bindings |
+| `inference-executor-core/src/model/qwen/v3_asr/` | ASR config, prepared audio geometry, bindings |
+| `inference-executor-core/src/model/qwen/v3_5/` | Qwen3.5 config, microbatch, pending transactions, bindings |
+| `inference-executor-core/src/model/qwen/v3_x/` | Shared quantization/RoPE/weight values and `dflash2/` config/bindings |
+| `inference-executor-core/src/bin/qwen3x_spec_quantize/` | Spec checkpoint conversion and bit policy |
+| `inference-executor-metal/src/replay.rs` | Generic `Replay<T>` cache owner |
+| `inference-executor-metal/src/model/` | Shared embed/unembed/gather/norm/residual, capture, page arena |
+| `inference-executor-metal/src/model/qwen/v3_x/` (`layer/`, `state/`) | Shared GQA/GDN/MLP/MoE leaves and local state lifecycle |
+| `inference-executor-metal/src/model/qwen/v3_x/dflash2/` | Independent DFlash2 model, layers, history, convolution, output |
+| `inference-executor-metal/src/model/qwen/v3/` (`main/`, `executor/`) | Qwen3 Main graph, text/ASR load, preparation, replay, sampling |
+| `inference-executor-metal/src/model/qwen/v3_asr/` | Audio worker and resource processor |
+| `inference-executor-metal/src/model/qwen/v3_5/` (`main/`, `mtp/`, `executor/`) | Qwen3.5 Main/MTP structures, load, transactions, Spec orchestration |
+| `inference-executor-metal/src/sampling/` | Request parameters, ordinary/draft/rejection replay, sparse probabilities |
+| `inference-backend-metal/src/components/` | Dynamic convolution and `sampling/dflash2_selector.rs` |
 
-crates/inference-executor-core/src/model/qwen/v3_asr/
-  config.rs                 strict Qwen3-ASR checkpoint and preprocessor contract
-  input.rs                  prepared audio and Audio Tower output-row geometry
-  weight_layout.rs          exact Audio Tower and shared Qwen3 text binding tree
-
-crates/inference-executor-core/src/model/qwen/v3_x/
-  config.rs                 shared quantization, RoPE, and tensor-path value utilities
-  weight_layout.rs          shared GQA/GDN/dense-MLP/MoE leaf binding types and helpers
-  dflash2/
-    config.rs               official DFlash2 schema adapter and canonical configuration contract
-    weight_layout.rs        exact source and affine DFlash2 binding trees
-crates/inference-executor-core/src/model/qwen/v3_5/
-  config.rs                 Qwen35ModelConfig/Qwen35TextConfig parsing and normalization
-  batch.rs                  Qwen35Microbatch, request, response, and sampled-decision contracts
-  pending_transactions.rs   Qwen35 sequence-ordered pending transactions
-  weight_layout.rs          exact Qwen35 Main/unembed/MTP binding trees
-
-crates/inference-executor-core/src/bin/qwen3x_spec_quantize/
-  main.rs                   DFlash2 converter CLI
-  checkpoint.rs             shared safetensors and BF16 affine conversion
-  dflash2.rs                DFlash2 tensor and bit policy
-
-crates/inference-executor-metal/src/
-  replay.rs                 generic Replay<T> component/cache owner
-  model/
-    embedding.rs            shared weight-bearing Embed component
-    unembedding.rs          shared weight-bearing Unembed component and QMV/QMM selection
-    gather.rs               shared row-gather model component
-    main_residual_capture.rs
-                            shared Main residual-capture contract
-    page_arena.rs           shared physical page buffer
-    residual_add.rs         shared residual-add/capture model component
-    rms_norm.rs             shared weight-bearing RMS-normalization component
-    qwen/v3_x/
-      dflash2/
-        embed.rs            Main embedding view and anchor-plus-MASK replay
-        execution.rs        Spec Prefill and Spec Decode recording, submission, and proposal readback
-        load.rs             exact affine checkpoint and resource load
-        main_feature.rs     all-row projection from selected Main layers and direct capture owner
-        attention.rs        sliding-history plus bidirectional local-block attention
-        conv.rs             dynamic grouped-convolution weight owner
-        layer.rs            independent Qwen3xDFlash2Layer
-        model.rs            Prefill and body replay owners
-        output.rs           raw Top-K, candidate lattice, path selection, and sparse output
-      layer/
-        gqa.rs              shared Qwen3xGQA leaf load and record
-        gdn.rs              shared Qwen3xGDN leaf load and record
-        dense_mlp.rs        shared Qwen3xDenseMLP leaf load and record
-        moe.rs              shared Qwen3xMoE leaf load and record
-      state/
-        gqa.rs              Qwen3xGQAState page/metadata/reset lifecycle
-        gdn.rs              Qwen3xGDNState prepare/restore/commit/publish/reset lifecycle
-      weight.rs             shared Qwen checkpoint decoding/validation helpers
-    qwen/v3/
-      main/
-        mod.rs              Qwen3 Main owner and replay key
-        text_embed.rs       Qwen3 Main text embedding component and replay key
-        gqa.rs              Qwen3 Main ungated GQA weights, state, load, and record
-        layer.rs            fixed Qwen3MainLayer and Qwen3MainLayerScratch
-        output.rs           Qwen3 gather/unembed component and replay key
-        component_config.rs Qwen3 QKV GQA and dense-MLP core/Metal configuration
-      executor/
-        mod.rs              Qwen3Executor, private pending transactions, and runtime integration
-        load.rs             text and ASR top-down load
-        batch.rs            validation, prepare, reset, and commit lifecycle
-        recording.rs        recorder lifecycle and Main replay submission
-        main.rs             MainTextEmbed, MainResourceEmbed, Main, and GatherUnembed orchestration
-        sampling.rs         ordinary sampling and readback
-    qwen/v3_asr/
-      audio.rs              Audio Tower load, model graph, and execution
-      resource.rs           prepared audio registration and async materialization
-    qwen/v3_5/
-      main/
-        mod.rs              Qwen35 Main owner and replay key
-        text_embed.rs       Qwen35 Main text embedding component and replay key
-        layer.rs            Qwen35MainLayer variants and role-specific scratch
-        output.rs           Qwen35 gather/unembed component and replay key
-      mtp/
-        decode_plan.rs        acceptance-aware Decode token/index plan
-        hidden_state_cache.rs per-request BF16 hidden cache and tail metadata
-        hidden_state_transfer.rs previous-hidden gather and retained-tail scatter
-        mod.rs              supported one-layer Qwen35MTP owner and replay key
-        embed.rs            Qwen35MTPEmbed and its replay key
-        layer.rs            Qwen35MTPLayer and role-specific scratch
-      component_config.rs   Qwen35 component configuration and MTP validation
-      executor/
-        mod.rs              Qwen35Executor fields and ReplayableDecoderModel integration
-        load.rs             layer count pass and separate Vanilla/MTP/DFlash2 top-down load
-        batch.rs            validation, prepare, reset, and commit lifecycle
-        recording.rs        recorder lifecycle and common replay submission
-        main.rs             MainTextEmbed, MainResourceEmbed, Main, and GatherUnembed orchestration
-        sampling.rs         Main/Spec/rejection orchestration and readback
-        mtp.rs              MTP request, proposal-batch, and proposal flow
-        dflash2.rs          DFlash2 Spec proposal orchestration
-
-crates/inference-executor-metal/src/sampling/
-  sampling_params.rs        request-slot SamplingParamsStore shared by all sampling modes
-  top_k_sampling.rs         TopKSampling and TopKSamplingOutputBuffers
-  top_k_replay.rs           Sampling/DraftSampling replay components
-  rejection_replay.rs       generic sparse rejection replay owner
-  spec_probs.rs             SpecProbsStore sparse Spec/Main probability workspace
-
-crates/inference-backend-metal/src/components/
-  dynamic_grouped_conv.rs   request-local DFlash2 prepare/finish convolution leaf
-  metal/dynamic_grouped_conv.metal
-  sampling/dflash2_selector.rs
-                            DFlash2 candidate-lattice scoring and probabilistic path walk
-  metal/dflash2_selector.metal
-```
-
-Runtime core owns scheduling, request lifecycle, physical page allocation/free, and page IDs.
-The executor owns model-specific interpretation of page IDs, trained tensors, backend state, replay caches, and
-submission order.
+Runtime core owns scheduling, lifecycle, and physical pages.
+The executor owns model interpretation, trained tensors, state, replay caches, and submission order.
 Metal kernels remain backend components.
 
-The sharing boundary is below the model execution graph.
-Qwen3 and Qwen3.5 each own these model-level objects:
+```text
+model-specific config + batch/response + transactions + binding tree
+  + layer/scratch + plan + Main + executor/recorder + replay keys
+       |
+       +-> shared v3_x leaf components and values
+       +-> independent reusable DFlash2 model role
+```
 
-- A model configuration.
-- Batch and response contracts.
-- A pending-transaction owner.
-- A model binding tree.
-- Layer and scratch types.
-- A plan and configuration builder.
-- Main components.
-- An executor and recorder.
-- Replay keys.
-
-Structural APIs stay in their model directories.
-
-`qwen/v3_x` contains shared leaf components, values, and the reusable Qwen3x DFlash2 model.
-These leaves include quantization, RoPE, tensor-path values, weight bindings, checkpoint helpers, and GQA/GDN state
-owners.
-They also include `Qwen3xGQA`, `Qwen3xGDN`, `Qwen3xDenseMLP`, and `Qwen3xMoE`.
-The DFlash2 model composes compatible generic leaf owners into an independent model role.
+Keep structural APIs in their model directory.
+Share below the graph through leaf weights, quantization/RoPE/path values, checkpoint helpers, and GQA/GDN state owners.
 Qwen3 has no GDN transaction, state-page metadata, MTP lane, or Qwen3.5 replay key.
 
 ## Semantic object tree
@@ -968,37 +858,26 @@ A state version ahead of its token index is a lifecycle invariant violation and 
 
 ## Supported MTP
 
-MTP reuses one physical GQA body layer for `K` dependent logical steps.
-It shares the Main token embedding and owns its input projection, GQA page table, scratch, and proposal loop.
-Runtime cache lanes `1..=K` map to the matching logical MTP steps.
-
-Each logical step uses the same composed sequence:
-
 ```text
-MTPEmbed -> MTP -> GatherUnembed -> DraftSampling
+K logical steps, one trained physical GQA/MLP body layer
+  MTPEmbed -> MTP -> GatherUnembed -> DraftSampling
+    -> wait/read non-final sampled token -> next logical step
 ```
 
-Each non-final step waits for its sampled token before the next step starts.
-The public Spec lifecycle remains one transaction.
+| Contract | Owner/behavior |
+| --- | --- |
+| Weights | Shared Main token embedding, MTP input projection/body |
+| KV state | Independent MTP table/scratch, runtime lanes `1..=K` |
+| Request cache | `Empty`, `Prefill`, or `Decode`, pending Main index plus `K` cached tail IDs |
+| Retained hidden state | Decode writes BF16 rows, survives turn completion |
+| Continuation change | Preserve anchor/index, repair MTP from old `x1`, no Main replay |
+| Publication | Update metadata after the full wave, one public Spec transaction |
 
-The request-local cache metadata is `Empty`, `Prefill`, or `Decode`.
-Each nonempty state stores the pending Main index and `K` cached tail token IDs, not the uncached final draft.
-Decode metadata and retained BF16 hidden rows survive turn completion.
-The next input must keep the anchor and index. A changed cached continuation prefix repairs MTP from old `x1`.
-Main does not replay tokens. Recurrent GDN keeps the same unshifted transaction contract.
-Only Decode writes the retained hidden rows. Metadata changes after the full MTP wave completes.
-
-[`mtp_design.md`](mtp_design.md) documents the complete current component contract.
+See [MTP protocol](mtp_design.md) for token/hidden routing, repair, checkpoint, and replay contracts.
 
 ## Supported DFlash2
 
-DFlash2 support is experimental.
-Qwen3.5-family executors support the affine Qwen3x DFlash2 checkpoint contract.
-
-The checkpoint `block_size` defines the complete Decode query block.
-The Decode block contains one anchor row followed by `block_size - 1` MASK rows.
-`--num-spec-tokens` overrides the MTP or DFlash2 proposal count.
-Prefill and Decode are independent replay recordings:
+DFlash2 support is experimental. Qwen3.5-family executors consume the affine Qwen3x checkpoint contract.
 
 ```text
 MainTextEmbed -> MainResourceEmbed? -> Main -> GatherUnembed -> RejectionSampling
@@ -1006,70 +885,35 @@ MainTextEmbed -> MainResourceEmbed? -> Main -> GatherUnembed -> RejectionSamplin
   -> DFlash2Embed -> DFlash2 -> DFlash2Output
 ```
 
-The executor records both independent recordings before one ordered submission.
-Prefill depends on Main capture.
-Spec Decode prepare depends on rejection sampling.
-The serial sequence emits Spec Decode prepare first, then Prefill, and then the remaining Spec Decode work.
-This order makes the acceptance-dependent chain ready first and preserves both dependencies without a CPU boundary.
+| Stage | Contract |
+| --- | --- |
+| Recording | Independent Prefill/Decode programs, recorded before one ordered submission |
+| Dependencies | Decode prepare consumes rejection, Prefill consumes Main capture |
+| Ordered execution | Decode prepare -> Prefill -> remaining Decode, no CPU rejection boundary |
+| Query block | Anchor plus `block_size - 1` MASK rows, `--num-spec-tokens` can override proposal count |
+| Prefill | Project each captured physical Main row once, write each draft layer's history KV |
+| Logical history | Fixed Main rows + accepted prefix, excludes rejected suffix and new anchor |
+| Layer | Sliding-history partial + bidirectional-block partial -> shared Reduce, dynamic convolution around attention/MLP |
+| Output | MASK gather -> shared Unembed -> Top-K -> edge lattice -> request-local path -> exact sparse draft distributions |
+| Request parameters | Shared `SamplingParamsStore` temperature/seed, per-step logical sample positions |
+| Lifecycle | Shared runtime cache-block lifetime, separate DFlash2 page table/snapshot |
 
-DFlash2 reads stable temperature and seed values from the same request-slot `SamplingParamsStore` as Main and MTP. The sequential path walk adds each proposal step to the first sample position from Spec Decode prepare.
-
-Prefill projects every physical Main residual row once.
-Logical history contains the fixed Main rows and the accepted speculative prefix.
-It does not expose the rejected physical suffix or the newly sampled anchor.
-Each DFlash2 layer derives persistent K/V from that projected Main feature and writes its own paged history cache.
-The persistent cache stores all history tokens.
-Decode limits reads, not writes, with one explicit half-open history range for each query row:
-
-```text
-[max(0, query_position + 1 - sliding_window), anchor_position)
-```
-
-The anchor and MASK rows form one query tile or part of a query tile.
-Each layer computes one SplitKV sliding-history partial and one dense bidirectional block partial.
-The shared reducer combines those partials.
-The layer then applies the DFlash2 prepare/finish dynamic convolution around attention and MLP.
-
-The output owner gathers only MASK rows.
-It uses the shared Main Unembed owner to produce unary logits.
-It selects the fixed `selector_top_k` candidate set, builds the DFlash2 edge lattice, walks one request-local
-probabilistic path, and writes the exact sparse draft distributions that rejection sampling consumes.
-
-Main K/V and persistent DFlash2 history K/V share one runtime cache-block lifecycle.
-The executor owns a separate DFlash2 page table and snapshot file.
-Proposal-local Q/K/V, attention partials, convolution coefficients, candidate tensors, and selector outputs remain
-ephemeral executor workspaces.
-
-[`dflash2_design.md`](dflash2_design.md) documents the complete current component contract.
+Decode reads `[max(0, query_position + 1 - sliding_window), anchor_position)` and retains all committed history writes.
+Proposal Q/K/V, partials, convolution coefficients, candidates, and selector outputs are ephemeral.
+See [DFlash2](dflash2_design.md) for the complete layer/checkpoint contract.
 
 ## Verification
 
-Unit tests cover:
+| Domain | Coverage |
+| --- | --- |
+| Configuration/load | Strict Qwen3/ASR and normalized Qwen3.5 config, exact bindings |
+| Runtime wiring | Model Main batches, pending transactions, GQA/GDN overwrite/reset/snapshot |
+| Replay | Idempotence, strict lookup, active-row primitive and GatherUnembed parity |
+| MTP | Cache lanes, previous-hidden gather, embedding/norm/concat/projection with nonzero weights, sparse rejection |
+| DFlash2 | Config/bindings, sliding ranges, convolution, selector, page split, sparse rejection |
+| ASR | Audio prep/tower/materialization, text/audio composition, transcription endpoint |
+| External service | Qwen3 Main-only, Qwen3.5 Vanilla/MTP/DFlash2, generated text |
 
-- Qwen3-ASR checkpoint parsing, audio preparation, Audio Tower execution, resource materialization, and
-  text-and-audio composition.
-- The strict flat Qwen3 adapter.
-- Model-specific Main batch contracts.
-- Normalized Qwen3.5 configuration and exact bindings.
-- GQA/GDN state and page overwrite/reset.
-- GDN transactions and snapshot I/O.
-- Generic replay idempotence and strict lookup.
-- MTP cache-lane mapping and MTP and DFlash2 sparse rejection.
-- DFlash2 configuration adaptation, exact bindings, per-row sliding ranges, convolution, selector, and page splitting.
-- Embed, RowGather, and Unembed active-row replay against CPU references.
-- Qwen3 and Qwen3.5 GatherUnembed composition for every active row count in one recorded capacity.
-- Qwen3.5 MTPEmbed previous-hidden gather, token embedding, both norms, concatenation, and input projection with nonzero
-  weights for every active token count.
-
-The Qwen3, Qwen3.5, and DFlash2 Embed owners only bind model-local replay keys around the shared `Embed` leaf.
-They do not duplicate its numerical test. DFlash2 Output has a candidate-selection contract instead of the
-GatherUnembed contract. Its Gather, Unembed, Top-K, codebook Embed, and selector leaves retain independent numerical
-coverage.
-
-End-to-end verification exercises Qwen3-ASR transcription through the service endpoint.
-End-to-end tests exercise Qwen3 Main-only through server/decode.
-They also exercise Qwen3.5 Vanilla, MTP, and DFlash2 modes.
-Focused DFlash2 unit tests cover its new model and backend contracts.
-The tests inspect generated text.
-Performance evidence follows [`executor_benchmarks.md`](executor_benchmarks.md).
-Collect that evidence serially.
+Model Embed owners bind keys around the shared leaf instead of duplicating its numerical tests.
+DFlash2 Output tests candidate selection separately from its Gather/Unembed/Top-K/codebook/selector leaves.
+Follow [performance evidence](executor_benchmarks.md) and run GPU acceptance serially.
