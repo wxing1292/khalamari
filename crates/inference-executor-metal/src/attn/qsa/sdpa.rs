@@ -1,3 +1,4 @@
+use inference_backend_metal::components::ReplayRecorder;
 use inference_backend_metal::components::gqa::sdpa::sliced_kv;
 use inference_backend_metal::components::qsa_sdpa;
 use inference_backend_metal::components::qsa_sparse_gqa;
@@ -7,9 +8,8 @@ use inference_backend_metal::metal::Dtype;
 use inference_backend_metal::metal::ReplayArguments;
 use inference_backend_metal::metal::ReplayParameterKey;
 use inference_backend_metal::metal::ReplayU32;
-use inference_executor_core::attn::GQAPageTableLayout;
-use inference_executor_core::backend::recorder::Recorder;
 
+use crate::attn::gqa::request_page_table::GQAPageTableLayout;
 use crate::attn::qsa::batch_metadata::QSASDPAMetadataBuffers;
 
 /// The supported QSA SDPA kernel facts. This config does not include
@@ -227,10 +227,7 @@ impl QSASDPA {
         qsa_sparse_gqa::Compute::topology_boundaries()
     }
 
-    pub fn record<'a, R>(&self, recorder: &mut R, input: QSASDPAInput<'a>, active: QSASDPAReplay)
-    where
-        R: Recorder<'a, Operator = crate::def::replay_op::ReplayOp<'a>>,
-    {
+    pub fn record<'a>(&self, recorder: &mut ReplayRecorder, input: QSASDPAInput<'a>, active: QSASDPAReplay) {
         let shape = input.metadata.shape();
         assert_eq!(input.metadata.config(), self.config);
         assert!(shape.num_total_tokens <= input.scratch.shape.num_total_tokens);
@@ -342,13 +339,9 @@ impl QSASDPA {
                 active.num_active_sparse_queries,
             )
         });
-        recorder.record(crate::def::replay_op::ReplayOp::opaque(qsa_sdpa::Invocation::new(
-            input.output,
-            dense_map,
-            sparse_map,
-            dense_reduce,
-            sparse_reduce,
-        )));
+        recorder.record(inference_backend_metal::components::ReplayOp::opaque(
+            qsa_sdpa::Invocation::new(input.output, dense_map, sparse_map, dense_reduce, sparse_reduce),
+        ));
     }
 }
 

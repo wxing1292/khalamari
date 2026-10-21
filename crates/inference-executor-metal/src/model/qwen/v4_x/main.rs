@@ -1,5 +1,7 @@
 use std::rc::Rc;
 
+use inference_backend_metal::components::ReplayOp;
+use inference_backend_metal::components::ReplayRecorder;
 use inference_backend_metal::components::gated_residual;
 use inference_backend_metal::components::ngram_embedding;
 use inference_backend_metal::components::qsa_indexer;
@@ -13,7 +15,6 @@ use inference_backend_metal::metal::ReplayU32;
 use inference_executor_core::attn::GDNCore;
 use inference_executor_core::attn::GQACore;
 use inference_executor_core::attn::qsa_indexer::core::QSAIndexerCore;
-use inference_executor_core::backend::recorder::Recorder;
 use inference_executor_core::checkpoint::QuantizedTensorBindings;
 use inference_executor_core::def::ModelExecutorError;
 use inference_executor_core::gated_residual::core::GatedResidualCore;
@@ -38,8 +39,6 @@ use crate::checkpoint::SafeTensorStore;
 use crate::def::layer::ReplayLayer;
 use crate::def::quantized_affine::QuantizedAffineLayout;
 use crate::def::quantized_affine::QuantizedAffineWeights;
-use crate::def::replay_op::ReplayOp;
-use crate::def::replay_op::ReplayRecorder;
 use crate::gated_residual::backend::GatedResidual;
 use crate::gated_residual::backend::ReadInput;
 use crate::gated_residual::backend::WriteInput;

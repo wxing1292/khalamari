@@ -8,7 +8,6 @@ use inference_executor_core::ngram_embedding::reference as hash_reference;
 use inference_executor_core::ple::reference;
 
 use super::*;
-use crate::def::replay_op::MetalReplayRuntime;
 use crate::ple::batch_metadata::PLERequest;
 
 const TOKENS: ReplayParameterKey = ReplayParameterKey::new("test.ple.tokens");
@@ -18,7 +17,7 @@ const REQUESTS: ReplayParameterKey = ReplayParameterKey::new("test.ple.requests"
 fn test_prepare_apply_commit_replay() {
     let device = Device::system_default();
     let stream = Stream::new(&device);
-    let runtime = MetalReplayRuntime::new(&stream);
+    let runtime = &stream;
     let ngram = NGramEmbeddingCore {
         vocab_size: 32,
         eos_token_id: 0,
@@ -89,7 +88,7 @@ fn test_prepare_apply_commit_replay() {
     let output = Buffer::new_zeroed(&device, 8 * wide * 2);
     let initial = fixture(4 * tail * wide, 41);
     let states = buffer(&device, &initial);
-    let mut recorder = runtime.create_recorder();
+    let mut recorder = ReplayRecorder::new(runtime.create_replay_program());
     component.prepare(
         &mut recorder,
         PLEPrepareInput {
@@ -102,7 +101,7 @@ fn test_prepare_apply_commit_replay() {
         },
     );
     let prepare = recorder.build();
-    let mut recorder = runtime.create_recorder();
+    let mut recorder = ReplayRecorder::new(runtime.create_replay_program());
     component.apply(
         &mut recorder,
         PLEApplyInput {
@@ -117,7 +116,7 @@ fn test_prepare_apply_commit_replay() {
         },
     );
     let apply = recorder.build();
-    let mut recorder = runtime.create_recorder();
+    let mut recorder = ReplayRecorder::new(runtime.create_replay_program());
     component.commit(
         &mut recorder,
         PLECommitInput {

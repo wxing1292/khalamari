@@ -17,5 +17,3 @@ pub use config::Qwen3TextConfig;
 pub use config::init_qwen3_model_config;
 
 pub mod weight_layout;
-
-pub const QWEN3_PAGE_SIZE_BYTES: usize = 32 * 1024;

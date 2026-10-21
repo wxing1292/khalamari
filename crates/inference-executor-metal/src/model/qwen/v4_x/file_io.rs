@@ -24,8 +24,8 @@ impl Qwen4xExecutor {
             "Qwen4x snapshot requires committed transactions"
         );
         let device = self.runtime.device();
-        let runtime = MetalReplayRuntime::new(self.runtime.stream());
-        self.state.pack_snapshot(device, &runtime);
+        let runtime = self.runtime.stream();
+        self.state.pack_snapshot(device, runtime);
         let mut writer = StateSnapshotWriter::new(path, STATE_FILES, plan, self.runtime.buffer_io())?;
         let slots = match plan {
             ExecutorHibernationPlan::All => {
@@ -105,7 +105,7 @@ impl Qwen4xExecutor {
             return Err(error);
         }
         self.state
-            .restore_snapshot(device, &MetalReplayRuntime::new(self.runtime.stream()));
+            .restore_snapshot(device, self.runtime.stream());
         self.main.component_mut().load_state(&self.gdn);
         Ok(())
     }

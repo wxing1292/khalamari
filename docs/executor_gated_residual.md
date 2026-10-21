@@ -4,7 +4,7 @@ Gated residual (GR) maintains several residual channels for each token.
 `read` produces one hidden row for attention or MLP computation.
 For a paired write, read also produces one write coefficient per channel.
 `write` adds the component output to each original channel with a learned scalar coefficient.
-The two operations record through the executor `Recorder`. They do not submit work or own request state.
+The two operations record through the backend `ReplayRecorder`. They do not submit work or own request state.
 
 ## Source layout
 

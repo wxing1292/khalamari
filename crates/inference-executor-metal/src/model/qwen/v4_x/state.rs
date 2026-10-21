@@ -1,5 +1,7 @@
 use std::collections::HashSet;
 
+use inference_backend_metal::components::ReplayOp;
+use inference_backend_metal::components::ReplayRecorder;
 use inference_backend_metal::components::ple;
 use inference_backend_metal::components::qsa_indexer;
 use inference_backend_metal::components::state_pages;
@@ -7,8 +9,7 @@ use inference_backend_metal::metal::Buffer;
 use inference_backend_metal::metal::Device;
 use inference_backend_metal::metal::Dtype;
 use inference_backend_metal::metal::ReplayU32;
-use inference_executor_core::attn::GQAPageTableLayout;
-use inference_executor_core::backend::recorder::Recorder;
+use inference_backend_metal::metal::Stream;
 use inference_executor_core::def::ModelExecutorError;
 use inference_executor_core::model::qwen::v3_5::Qwen35Microbatch;
 use inference_executor_core::model::qwen::v4_x::LayerType;
@@ -18,6 +19,7 @@ use inference_runtime_core::compute::BatchDeviceRequest;
 use wincode::SchemaRead;
 use wincode::SchemaWrite;
 
+use crate::attn::gqa::request_page_table::GQAPageTableLayout;
 use crate::attn::gqa::request_page_table::GQARequestPageTable;
 use crate::attn::qsa::backend::QSAActive;
 use crate::attn::qsa::batch_metadata::QSASDPAMetadataBuffers;
@@ -26,9 +28,6 @@ use crate::attn::qsa::sdpa::QSASDPARequest;
 use crate::attn::qsa::sdpa::QSASDPAShape;
 use crate::attn::qsa_indexer::batch_metadata::QSAIndexerMetadataBuffers;
 use crate::attn::qsa_indexer::batch_metadata::QSAIndexerRequest;
-use crate::def::replay_op::MetalReplayRuntime;
-use crate::def::replay_op::ReplayOp;
-use crate::def::replay_op::ReplayRecorder;
 use crate::model::qwen::v4_x::executor::Qwen4xExecutorConfig;
 use crate::model::qwen::v4_x::main::Qwen4xMain;
 use crate::model::qwen::v4_x::main::ngram_core;
@@ -77,7 +76,7 @@ pub struct Qwen4xState {
     max_groups: u32,
     group_policy: ReplayBucketPolicy,
     query_policy: ReplayBucketPolicy,
-    pending_commit: Option<crate::def::replay_op::MetalReplaySubmission>,
+    pending_commit: Option<inference_backend_metal::metal::ReplaySubmission>,
 }
 struct Resources {
     pages: GQARequestPageTable,
@@ -361,7 +360,7 @@ impl Qwen4xState {
     pub fn prepare(
         &mut self,
         device: &Device,
-        runtime: &MetalReplayRuntime<'_>,
+        runtime: &Stream,
         pages: &Buffer,
         request: &BatchDeviceRequest,
         batch: &Qwen35Microbatch,
@@ -435,7 +434,7 @@ impl Qwen4xState {
             );
         }
         if !restore_jobs.is_empty() {
-            let mut recorder = runtime.create_recorder();
+            let mut recorder = ReplayRecorder::new(runtime.create_replay_program());
             self.record_copy(device, &mut recorder, pages, &self.resources().packed, &restore_jobs);
             self.unpack(device, &mut recorder, &restore_slots);
             runtime.submit_replay(&recorder.build()).wait();
@@ -617,7 +616,7 @@ impl Qwen4xState {
     pub fn commit(
         &mut self,
         device: &Device,
-        runtime: &MetalReplayRuntime<'_>,
+        runtime: &Stream,
         pages: &Buffer,
         main: &Qwen4xMain,
         batch: &Qwen35Microbatch,
@@ -625,7 +624,7 @@ impl Qwen4xState {
     ) {
         let count = batch.num_reqs();
         assert_eq!(versions.len(), count);
-        let mut recorder = runtime.create_recorder();
+        let mut recorder = ReplayRecorder::new(runtime.create_replay_program());
         let mut commits = Vec::new();
         let mut accepted = Vec::new();
         // Each publish gets one independent convolution destination. Final destinations are request-local.
@@ -783,8 +782,8 @@ impl Qwen4xState {
         );
         history[history.len() - self.history_len..].to_vec()
     }
-    pub fn pack_snapshot(&self, device: &Device, runtime: &MetalReplayRuntime<'_>) {
-        let mut recorder = runtime.create_recorder();
+    pub fn pack_snapshot(&self, device: &Device, runtime: &Stream) {
+        let mut recorder = ReplayRecorder::new(runtime.create_replay_program());
         for layer in 0..self.layout.num_gqa_layers as usize {
             let jobs: Vec<_> = (0..self.config.max_requests)
                 .map(|slot| {
@@ -825,8 +824,8 @@ impl Qwen4xState {
         }
         runtime.submit_replay(&recorder.build()).wait();
     }
-    pub fn restore_snapshot(&self, device: &Device, runtime: &MetalReplayRuntime<'_>) {
-        let mut recorder = runtime.create_recorder();
+    pub fn restore_snapshot(&self, device: &Device, runtime: &Stream) {
+        let mut recorder = ReplayRecorder::new(runtime.create_replay_program());
         let slots: Vec<_> = (0..self.config.max_requests as u32).collect();
         self.unpack(device, &mut recorder, &slots);
         runtime.submit_replay(&recorder.build()).wait();

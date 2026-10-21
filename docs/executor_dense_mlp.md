@@ -34,8 +34,8 @@ crates/inference-executor-core/src/def/
 
 crates/inference-executor-metal/src/def/
   ReplayLayer              typed semantic replay input/output and record contract
-crates/inference-executor-core/src/backend/
-  Recorder
+crates/inference-backend-metal/src/components/replay.rs
+  ReplayRecorder           concrete Metal recording and fusion
 ```
 
 The current runtime path is the Metal replay path in
@@ -76,14 +76,14 @@ It owns the full `gate_up_swiglu -> down` backend path.
 It does not own tensor storage, runtime scheduling, or page allocation.
 
 The backend implements `ReplayLayer`.
-Qwen model and layer code use `Recorder` to append dense MLP work to a larger whole-layer or whole-model replay.
+Qwen model and layer code use the backend `ReplayRecorder` to append dense MLP work to a larger whole-layer or whole-model replay.
 Focused tests and benches build replay programs from the same recorder path.
 The internal order is `gate_up_swiglu -> down [barrier before]`.
 Model and layer wiring own barriers on the first consumer command and downstream residual consumers.
 
 ## Replay contract
 
-`DenseMLP` records one dense gated MLP forward into a caller-owned `Recorder`.
+`DenseMLP` records one dense gated MLP forward into a caller-owned `ReplayRecorder`.
 It does not submit commands.
 It does not own tensor storage or request lifecycle.
 The semantic layer input is

@@ -1,5 +1,7 @@
 //! Persistent history-KV projection and cache write.
 
+use inference_backend_metal::components::ReplayOp;
+use inference_backend_metal::components::ReplayRecorder;
 use inference_backend_metal::components::gqa::kv_page_write as backend_kv_page_write;
 use inference_backend_metal::components::rms_norm_rope;
 use inference_backend_metal::metal::Buffer;
@@ -8,13 +10,11 @@ use inference_backend_metal::metal::Dtype;
 use inference_backend_metal::metal::ReplayU32;
 use inference_backend_metal::operators::affine_quantized;
 use inference_executor_core::attn::BiDiBlockGQACore;
-use inference_executor_core::attn::GQAPageTableLayout;
-use inference_executor_core::backend::recorder::Recorder;
 
 use crate::attn::bidi_block_gqa::backend::BiDiBlockGQAMetalConfig;
 use crate::attn::bidi_block_gqa::backend::BiDiBlockGQAWeights;
 use crate::attn::gqa::backend::GQAKVCacheBindings;
-use crate::def::replay_op::ReplayOp;
+use crate::attn::gqa::request_page_table::GQAPageTableLayout;
 
 pub struct BiDiBlockGQAKVCacheWriteScratch {
     max_tokens: usize,
@@ -116,10 +116,7 @@ impl BiDiBlockGQAKVCacheWriter {
         }
     }
 
-    pub fn record<'a, R>(&'a self, recorder: &mut R, input: BiDiBlockGQAKVCacheWriteInput<'a>)
-    where
-        R: Recorder<'a, Operator = ReplayOp<'a>>,
-    {
+    pub fn record<'a>(&'a self, recorder: &mut ReplayRecorder, input: BiDiBlockGQAKVCacheWriteInput<'a>) {
         assert!(
             input.num_total_tokens > 0,
             "BiDiBlockGQA KV-cache write requires tokens"

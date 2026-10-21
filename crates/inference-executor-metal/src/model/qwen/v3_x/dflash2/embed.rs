@@ -1,12 +1,12 @@
 use std::rc::Rc;
 
+use inference_backend_metal::components::ReplayRecorder;
 use inference_backend_metal::metal::Buffer;
 use inference_backend_metal::metal::ReplayArguments;
 use inference_backend_metal::metal::ReplayParameterKey;
 use inference_backend_metal::metal::ReplayU32;
 
 use crate::def::layer::ReplayLayer;
-use crate::def::replay_op::ReplayRecorder;
 use crate::model::embedding::Embed;
 use crate::model::embedding::EmbedInput;
 use crate::replay::ReplayComponent;

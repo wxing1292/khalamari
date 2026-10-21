@@ -1,27 +1,25 @@
 use std::rc::Rc;
 
+use inference_backend_metal::components::ReplayRecorder;
 use inference_backend_metal::metal::Buffer;
 use inference_backend_metal::metal::Device;
 use inference_backend_metal::metal::Dtype;
 use inference_backend_metal::metal::ReplayArguments;
-use inference_executor_core::backend::recorder::Recorder;
 use inference_executor_core::replay::ReplayBucketPolicy;
-use inference_executor_core::sampling::SparseRejectionSamplingBounds;
-use inference_executor_core::sampling::SparseRejectionSamplingReqParams;
-use inference_executor_core::sampling::SparseRejectionSamplingShape;
 use inference_executor_core::sampling::SpecMicrobatch;
-use inference_executor_core::sampling::TopKSamplingLogitsDtype;
-use inference_executor_core::sampling::TopKSamplingShape;
 
-use crate::def::replay_op::ReplayOp;
-use crate::def::replay_op::ReplayRecorder;
 use crate::replay::ReplayComponent;
 use crate::sampling::rejection_sampling::SparseRejectionSampling;
+use crate::sampling::rejection_sampling::SparseRejectionSamplingBounds;
 use crate::sampling::rejection_sampling::SparseRejectionSamplingInputs;
 use crate::sampling::rejection_sampling::SparseRejectionSamplingOutput;
+use crate::sampling::rejection_sampling::SparseRejectionSamplingReqParams;
+use crate::sampling::rejection_sampling::SparseRejectionSamplingShape;
 use crate::sampling::top_k_sampling::TopKSampling;
 use crate::sampling::top_k_sampling::TopKSamplingInputs;
 use crate::sampling::top_k_sampling::TopKSamplingWriteDistributionOutput;
+use crate::sampling::top_k_sampling::config::TopKSamplingLogitsDtype;
+use crate::sampling::top_k_sampling::config::TopKSamplingShape;
 
 pub struct RejectionSampler {
     sparse_sampler: SparseRejectionSampling,
@@ -271,10 +269,7 @@ impl RejectionSampler {
         shape
     }
 
-    pub fn record<'a, R>(&'a self, recorder: &mut R, input: RejectionSamplerInput<'a>)
-    where
-        R: Recorder<'a, Operator = ReplayOp<'a>>,
-    {
+    pub fn record<'a>(&'a self, recorder: &mut ReplayRecorder, input: RejectionSamplerInput<'a>) {
         self.sparse_sampler
             .record(recorder, input.shape, self.input(input), self.output());
     }
@@ -410,21 +405,20 @@ mod tests {
     use inference_backend_metal::metal::Stream;
     use inference_executor_core::model::qwen::v3_5::Qwen35Microbatch;
     use inference_executor_core::sampling::SamplerConfig;
-    use inference_executor_core::sampling::SparseRejectionSamplingShape;
-    use inference_executor_core::sampling::TopKSamplingBounds;
-    use inference_executor_core::sampling::TopKSamplingShape;
 
     use super::PreparedRejection;
     use super::RejectionSampler;
     use super::RejectionSamplerInput;
     use super::RejectionSampling;
     use super::RejectionSamplingInput;
-    use crate::def::replay_op::MetalReplayRuntime;
     use crate::replay::Replay;
+    use crate::sampling::rejection_sampling::SparseRejectionSamplingShape;
     use crate::sampling::sampling_params::SamplingParamsStore;
     use crate::sampling::spec_probs::SpecProbsStore;
     use crate::sampling::top_k_sampling::TopKSampling;
     use crate::sampling::top_k_sampling::TopKSamplingWriteDistributionOutput;
+    use crate::sampling::top_k_sampling::config::TopKSamplingBounds;
+    use crate::sampling::top_k_sampling::config::TopKSamplingShape;
 
     #[test]
     fn test_prepare_inputs_success() {
@@ -522,7 +516,7 @@ mod tests {
         ));
         let rejector = Rc::new(RejectionSampler::new(&device, 2, 4, 8, 4));
         let mut replay = Replay::new("test rejection", RejectionSampling::new(sampler, rejector));
-        let runtime = MetalReplayRuntime::new(&stream);
+        let runtime = &stream;
         let spec_probs = SpecProbsStore::new(&device, 2, 4, 8, 4);
         let logits = Buffer::new_zeroed_elements(&device, 16, Dtype::Bfloat16);
         let target_distribution_indices = Buffer::new_zeroed_elements(&device, 8, Dtype::Uint32);
@@ -559,7 +553,7 @@ mod tests {
                 draft_probs: spec_probs.draft_probs(),
             },
         };
-        let (_, cache_hit) = replay.record(&runtime, &input);
+        let (_, cache_hit) = replay.record(runtime, &input);
         assert!(!cache_hit);
         let mismatched_input = RejectionSamplingInput {
             target_shape: TopKSamplingShape {
@@ -569,6 +563,6 @@ mod tests {
             ..input
         };
 
-        let _ = replay.record(&runtime, &mismatched_input);
+        let _ = replay.record(runtime, &mismatched_input);
     }
 }

@@ -182,7 +182,7 @@ inference-error             shared typed errors and error logging
 inference-runtime-launcher  Qwen CLI and const-specialized worker builds
 inference-runtime-core      scheduling, lifecycle, and cache ownership
 inference-runtime-service   inference API, RPC, codecs, and model services
-inference-executor-core     backend-neutral model/component contracts
+inference-executor-core     shared model contracts, configuration, and CPU references
 inference-executor-metal    Qwen execution, replay, sampling, MTP and DFlash2
 inference-backend-metal     Metal resources, kernels, and ICB runtime
 ```

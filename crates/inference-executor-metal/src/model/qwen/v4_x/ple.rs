@@ -236,9 +236,9 @@ impl Qwen4xPLE {
         self.weights = Some(PLEWeightsOwned::load(device, store, config, self.ple_index, bindings)?);
         Ok(())
     }
-    fn prepare<'a, R: Recorder<'a, Operator = ReplayOp<'a>>>(
+    fn prepare<'a>(
         &'a self,
-        recorder: &mut R,
+        recorder: &mut ReplayRecorder,
         num_total_tokens: u32,
         num_active_tokens: ReplayU32,
         state: &'a Qwen4xState,
@@ -257,9 +257,9 @@ impl Qwen4xPLE {
             },
         );
     }
-    fn apply<'a, R: Recorder<'a, Operator = ReplayOp<'a>>>(
+    fn apply<'a>(
         &'a self,
-        recorder: &mut R,
+        recorder: &mut ReplayRecorder,
         num_total_tokens: u32,
         num_active_tokens: ReplayU32,
         residual: &'a Buffer,

@@ -1,3 +1,5 @@
+use inference_backend_metal::components::ReplayOp;
+use inference_backend_metal::components::ReplayRecorder;
 use inference_backend_metal::components::resource_embed::Config;
 use inference_backend_metal::components::resource_embed::Mapping;
 use inference_backend_metal::components::resource_embed::MappingTable;
@@ -7,11 +9,8 @@ use inference_backend_metal::metal::Device;
 use inference_backend_metal::metal::ReplayArguments;
 use inference_backend_metal::metal::ReplayParameterKey;
 use inference_backend_metal::metal::ReplayU32;
-use inference_executor_core::backend::recorder::Recorder;
 use inference_runtime_core::compute::DeviceRequest;
 
-use crate::def::replay_op::ReplayOp;
-use crate::def::replay_op::ReplayRecorder;
 use crate::replay::ReplayComponent;
 
 const RESOURCE_EMBED_NUM_ACTIVE_MAPPINGS: ReplayParameterKey =

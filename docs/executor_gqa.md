@@ -18,7 +18,7 @@ Use these sections for common tasks:
 | Root | Owner files |
 | --- | --- |
 | `inference-executor-core/src/attn/gqa/` | `core.rs`, `ungated_core.rs`, `bidi_block_gqa_core.rs`, `reference.rs` |
-| `inference-executor-metal/src/attn/gqa/` | `sdpa.rs` selection, `batch_metadata.rs` uploads, `backend.rs` / `ungated_backend.rs` replay |
+| `inference-executor-metal/src/attn/gqa/` | `sdpa.rs` selection, `batch_metadata.rs` replay shape and uploads, `backend.rs` / `ungated_backend.rs` replay |
 | Same GQA directory | `scratch.rs` / `ungated_scratch.rs`, `request_page_table.rs`, `request_page_table/file_io.rs` |
 | `inference-executor-metal/src/attn/bidi_block_gqa/` | Paged history, block SDPA, capacity, metadata, scratch, state/I/O |
 | `inference-executor-metal/src/attn/qsa/` | Dense/sparse SDPA, batch metadata, parity/replay tests |
@@ -30,10 +30,11 @@ Use these sections for common tasks:
 All roots above are under `crates/`.
 Core owns semantic geometry. The executor owns replay wiring, request tables, and local page interpretation.
 Runtime core owns physical page allocation/release.
-`request_page_table.rs` accumulates runtime IDs between reset notifications.
+`request_page_table.rs` owns `GQAPageTableLayout` and accumulates runtime IDs between reset notifications.
+`batch_metadata.rs` owns `GQAReplayShape`, including Metal Q-token tiles and SDPA map-task capacities.
 
 ```text
-Qwen semantic inputs -> ReplayLayer input/output -> caller-owned Recorder
+Qwen semantic inputs -> ReplayLayer input/output -> caller-owned ReplayRecorder
   -> adaptive affine projections -> selected SDPA execution -> output projection
 ```
 
@@ -419,7 +420,7 @@ projection-split and activation-gate kernels. Runtime token counts remain invoca
 
 ## Replay contract
 
-`GQA` records one GQA layer forward through `ReplayLayer::record(...)` and a caller-owned `Recorder`. It does not
+`GQA` records one GQA layer forward through `ReplayLayer::record(...)` and a caller-owned `ReplayRecorder`. It does not
 submit commands. It does not own request scheduling or page allocation.
 
 The semantic replay input is:

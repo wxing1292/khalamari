@@ -1,10 +1,10 @@
 use std::rc::Rc;
 
+use inference_backend_metal::components::ReplayRecorder;
 use inference_backend_metal::metal::Buffer;
 use inference_backend_metal::metal::Device;
 use inference_backend_metal::metal::ReplayU32;
 use inference_executor_core::attn::GQACore;
-use inference_executor_core::backend::recorder::Recorder;
 use inference_executor_core::checkpoint::TensorMap;
 use inference_executor_core::checkpoint::remove_tensor;
 use inference_executor_core::def::ModelExecutorError;
@@ -20,7 +20,6 @@ use crate::attn::gqa::request_page_table::GQARequestPageTable;
 use crate::attn::gqa::scratch::GQAScratch;
 use crate::checkpoint::SafeTensorStore;
 use crate::def::layer::ReplayLayer;
-use crate::def::replay_op::ReplayOp;
 use crate::model::qwen::v3_x::state::Qwen3xGQAState;
 use crate::model::qwen::v3_x::weight::affine_config;
 use crate::model::qwen::v3_x::weight::concat_bytes;
@@ -102,17 +101,15 @@ impl Qwen3xGQA {
             .expect("Qwen3.x GQA weights must be loaded before execution")
     }
 
-    pub fn record<'a, R>(
+    pub fn record<'a>(
         &'a self,
-        recorder: &mut R,
+        recorder: &mut ReplayRecorder,
         input: &'a Buffer,
         output: &'a Buffer,
         pages: &'a Buffer,
         metadata: &'a GQAMetadataBuffers,
         num_active_tokens: ReplayU32,
-    ) where
-        R: Recorder<'a, Operator = ReplayOp<'a>>,
-    {
+    ) {
         let _ = <GQA as ReplayLayer>::record(
             self.backend(),
             recorder,

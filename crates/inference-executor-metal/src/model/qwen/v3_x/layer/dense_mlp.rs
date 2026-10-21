@@ -1,10 +1,10 @@
 use std::rc::Rc;
 
+use inference_backend_metal::components::ReplayRecorder;
 use inference_backend_metal::components::dense_mlp;
 use inference_backend_metal::metal::Buffer;
 use inference_backend_metal::metal::Device;
 use inference_backend_metal::metal::ReplayU32;
-use inference_executor_core::backend::recorder::Recorder;
 use inference_executor_core::checkpoint::TensorMap;
 use inference_executor_core::checkpoint::remove_tensor;
 use inference_executor_core::def::ModelExecutorError;
@@ -13,7 +13,6 @@ use inference_executor_core::model::qwen::v3_x::weight_layout::Qwen3xDenseMLPWei
 
 use crate::checkpoint::SafeTensorStore;
 use crate::def::layer::ReplayLayer;
-use crate::def::replay_op::ReplayOp;
 use crate::mlp::dense::backend::DenseMLP;
 use crate::mlp::dense::backend::DenseMLPInput;
 use crate::mlp::dense::backend::DenseMLPMetalConfig;
@@ -74,16 +73,14 @@ impl Qwen3xDenseMLP {
         self.backend.replay_topology_boundaries()
     }
 
-    pub fn record<'a, R>(
+    pub fn record<'a>(
         &'a self,
-        recorder: &mut R,
+        recorder: &mut ReplayRecorder,
         input: &'a Buffer,
         output: &'a Buffer,
         num_total_tokens: u32,
         num_active_tokens: ReplayU32,
-    ) where
-        R: Recorder<'a, Operator = ReplayOp<'a>>,
-    {
+    ) {
         let _ = <DenseMLP as ReplayLayer>::record(
             &self.backend,
             recorder,

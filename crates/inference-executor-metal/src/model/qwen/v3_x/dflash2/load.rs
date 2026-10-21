@@ -5,7 +5,6 @@ use std::rc::Rc;
 use inference_backend_metal::metal::Device;
 use inference_backend_metal::metal::Dtype;
 use inference_executor_core::attn::BiDiBlockCapacity;
-use inference_executor_core::attn::GQAPageTableLayout;
 use inference_executor_core::checkpoint::QuantizedTensorBindings;
 use inference_executor_core::def::ModelExecutorError;
 use inference_executor_core::model::qwen::v3_x::dflash2::Qwen3xDFlash2Config;
@@ -13,6 +12,7 @@ use inference_executor_core::model::qwen::v3_x::dflash2::Qwen3xDFlash2WeightBind
 use inference_executor_core::model::qwen::v3_x::dflash2::resolve_qwen3x_dflash2_weight_bindings;
 
 use crate::attn::bidi_block_gqa::state::BiDiBlockGQAState;
+use crate::attn::gqa::request_page_table::GQAPageTableLayout;
 use crate::checkpoint::SafeTensorStore;
 use crate::model::embedding::Embed;
 use crate::model::qwen::v3_x::dflash2::attention::qwen3x_dflash2_gqa_core;

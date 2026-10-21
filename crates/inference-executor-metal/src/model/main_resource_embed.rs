@@ -4,9 +4,9 @@ use inference_backend_metal::components::resource_embed;
 use inference_backend_metal::metal::Buffer;
 use inference_backend_metal::metal::Device;
 use inference_backend_metal::metal::ReplayArguments;
+use inference_backend_metal::metal::Stream;
 use inference_runtime_core::compute::DeviceRequest;
 
-use crate::def::replay_op::MetalReplayRuntime;
 use crate::model::resource_arena::MetalResourceArena;
 use crate::model::resource_embed::ResourceEmbed;
 use crate::model::resource_embed::ResourceEmbedInput;
@@ -60,7 +60,7 @@ impl MainResourceEmbed {
             .map(|table| self.replay.component().prepare_replay(table))
     }
 
-    pub fn record(&mut self, runtime: &MetalReplayRuntime<'_>, hidden: &Buffer) -> Option<resource_embed::Shape> {
+    pub fn record(&mut self, runtime: &Stream, hidden: &Buffer) -> Option<resource_embed::Shape> {
         let table = self.prepared_table.as_ref()?;
         let input = ResourceEmbedInput {
             table,

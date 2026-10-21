@@ -1,20 +1,22 @@
 use std::rc::Rc;
 
+use inference_backend_metal::components::ReplayOp;
+use inference_backend_metal::components::ReplayRecorder;
 use inference_backend_metal::components::sampling::top_k;
 use inference_backend_metal::metal::Buffer;
 use inference_backend_metal::metal::Device;
 use inference_backend_metal::metal::Dtype;
 use inference_backend_metal::metal::ReplayArguments;
-use inference_executor_core::backend::recorder::Recorder;
 use inference_executor_core::sampling::SamplerConfig;
 use inference_executor_core::sampling::SamplingDomain;
-use inference_executor_core::sampling::TopKSamplingBounds;
-use inference_executor_core::sampling::TopKSamplingLogitsDtype;
-use inference_executor_core::sampling::TopKSamplingShape;
 
 use crate::def::layer::ReplayLayer;
-use crate::def::replay_op::ReplayOp;
 use crate::sampling::sampling_params::SamplingParamsStore;
+use crate::sampling::top_k_sampling::config::TopKSamplingBounds;
+use crate::sampling::top_k_sampling::config::TopKSamplingLogitsDtype;
+use crate::sampling::top_k_sampling::config::TopKSamplingShape;
+
+pub mod config;
 
 struct TopKSamplingCompute {
     map: top_k::MapCompute,
@@ -31,7 +33,7 @@ impl TopKSamplingCompute {
 
     fn record_sample<'a>(
         &'a self,
-        recorder: &mut impl Recorder<'a, Operator = ReplayOp<'a>>,
+        recorder: &mut ReplayRecorder,
         shape: TopKSamplingShape,
         logits_dtype: Dtype,
         buffers: TopKSamplingComputeBuffers<'a>,
@@ -56,7 +58,7 @@ impl TopKSamplingCompute {
 
     fn record_write_distribution<'a>(
         &'a self,
-        recorder: &mut impl Recorder<'a, Operator = ReplayOp<'a>>,
+        recorder: &mut ReplayRecorder,
         shape: TopKSamplingShape,
         logits_dtype: Dtype,
         buffers: TopKSamplingComputeBuffers<'a>,
@@ -79,7 +81,7 @@ impl TopKSamplingCompute {
 
     fn record_sample_and_write_distribution<'a>(
         &'a self,
-        recorder: &mut impl Recorder<'a, Operator = ReplayOp<'a>>,
+        recorder: &mut ReplayRecorder,
         shape: TopKSamplingShape,
         logits_dtype: Dtype,
         buffers: TopKSamplingComputeBuffers<'a>,
@@ -124,7 +126,7 @@ impl TopKSamplingCompute {
 
     fn record_reduce_sample<'a>(
         &'a self,
-        recorder: &mut impl Recorder<'a, Operator = ReplayOp<'a>>,
+        recorder: &mut ReplayRecorder,
         shape: top_k::Shape,
         buffers: TopKSamplingComputeBuffers<'a>,
         draw: TopKSamplingDraw,
@@ -149,7 +151,7 @@ impl TopKSamplingCompute {
 
     fn record_reduce_write_distribution<'a>(
         &'a self,
-        recorder: &mut impl Recorder<'a, Operator = ReplayOp<'a>>,
+        recorder: &mut ReplayRecorder,
         shape: top_k::Shape,
         buffers: TopKSamplingComputeBuffers<'a>,
         output: TopKSamplingWriteDistributionOutput<'a>,
@@ -292,7 +294,7 @@ impl TopKSampling {
 
     pub fn record<'a>(
         &'a self,
-        recorder: &mut impl Recorder<'a, Operator = ReplayOp<'a>>,
+        recorder: &mut ReplayRecorder,
         shape: TopKSamplingShape,
         logits_dtype: TopKSamplingLogitsDtype,
         sampling_domain: SamplingDomain,
@@ -323,7 +325,7 @@ impl TopKSampling {
 
     pub fn record_write_distribution<'a>(
         &'a self,
-        recorder: &mut impl Recorder<'a, Operator = ReplayOp<'a>>,
+        recorder: &mut ReplayRecorder,
         shape: TopKSamplingShape,
         logits_dtype: TopKSamplingLogitsDtype,
         inputs: TopKSamplingInputs<'a>,
@@ -349,7 +351,7 @@ impl TopKSampling {
 
     pub fn record_with_write_distribution<'a>(
         &'a self,
-        recorder: &mut impl Recorder<'a, Operator = ReplayOp<'a>>,
+        recorder: &mut ReplayRecorder,
         shape: TopKSamplingShape,
         logits_dtype: TopKSamplingLogitsDtype,
         draw: TopKSamplingDraw,
@@ -417,10 +419,7 @@ impl ReplayLayer for TopKSampling {
     type Input<'a> = TopKSamplingInput<'a>;
     type Output<'a> = TopKSamplingOutput<'a>;
 
-    fn record<'a, R>(&'a self, recorder: &mut R, input: Self::Input<'a>) -> Self::Output<'a>
-    where
-        R: Recorder<'a, Operator = ReplayOp<'a>>,
-    {
+    fn record<'a>(&'a self, recorder: &mut ReplayRecorder, input: Self::Input<'a>) -> Self::Output<'a> {
         Self::record(
             self,
             recorder,

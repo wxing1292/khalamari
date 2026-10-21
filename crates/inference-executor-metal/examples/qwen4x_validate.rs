@@ -1,6 +1,7 @@
 //! Real-checkpoint Main capture. The default layer limit is eight.
 use std::path::PathBuf;
 
+use inference_executor_core::model::ExecutionSubmission;
 use inference_executor_core::model::ReplayableDecoderModel;
 use inference_executor_core::model::qwen::v4_x::init_qwen4x_model_config;
 use inference_executor_metal::model::qwen::v4_x::Qwen4xExecutor;

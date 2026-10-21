@@ -32,6 +32,8 @@ fn test_rejects_unsupported_architecture_at_config_boundary() {
         "ple_layer_ids",
         "output_gate_type",
         "indexer_budget",
+        "head_ratio",
+        "compression_ratio",
         "rope_parameters",
     ] {
         let mut config = fixture();
@@ -40,7 +42,36 @@ fn test_rejects_unsupported_architecture_at_config_boundary() {
             "ple_layer_ids" => config.text_config.ple_layer_ids = vec![4],
             "output_gate_type" => config.text_config.output_gate_type = "relu".to_string(),
             "indexer_budget" => config.text_config.indexer_budget = 2047,
+            "head_ratio" => config.text_config.num_attention_heads = 23,
+            "compression_ratio" => config.text_config.indexer_compress_ratio = 1,
             "rope_parameters" => config.text_config.rope_parameters.rope_type = Some("yarn".to_string()),
+            _ => unreachable!(),
+        }
+        assert!(config.normalize().is_err(), "{invalid}");
+    }
+}
+
+#[test]
+fn test_model_geometry_does_not_require_metal_capabilities() {
+    let mut config = fixture();
+    config.text_config.num_attention_heads = 12;
+    config.text_config.num_experts = 1024;
+    config.text_config.max_position_embeddings = i32::MAX as usize + 1;
+    config.normalize().unwrap();
+
+    config.text_config.ple_layer_ids.clear();
+    config.text_config.hidden_size = i32::MAX as usize + 1;
+    config.normalize().unwrap();
+}
+
+#[test]
+fn test_ple_reference_integer_domains_remain_validated() {
+    for invalid in ["residual_width", "vocab_size", "history_length"] {
+        let mut config = fixture();
+        match invalid {
+            "residual_width" => config.text_config.hidden_size = 1 << 30,
+            "vocab_size" => config.text_config.vocab_size = u32::MAX as usize + 1,
+            "history_length" => config.text_config.ple_conv_kernel_size = 1 << 31,
             _ => unreachable!(),
         }
         assert!(config.normalize().is_err(), "{invalid}");

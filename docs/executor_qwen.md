@@ -624,7 +624,7 @@ Spec Prefill projects the complete captured Main-row prefix.
 
 The object-safe capture contract returns only this descriptor.
 It never receives a recorder.
-The Main record method remains generic over `Recorder<Operator = ReplayOp>`.
+The Main record method takes the concrete Metal backend `ReplayRecorder`.
 
 The Qwen3.5 loader supplies no capture owner when fixed-block Spec Prefill is disabled.
 When DFlash2 is enabled for Qwen3.5, `Qwen3xDFlash2MainFeatureProjector` owns its separate capture destinations.
@@ -917,3 +917,9 @@ See [DFlash2](dflash2_design.md) for the complete layer/checkpoint contract.
 Model Embed owners bind keys around the shared leaf instead of duplicating its numerical tests.
 DFlash2 Output tests candidate selection separately from its Gather/Unembed/Top-K/codebook/selector leaves.
 Follow [performance evidence](executor_benchmarks.md) and run GPU acceptance serially.
+
+### Metal page allocation unit
+
+`inference-executor-metal/src/model/qwen/v3/mod.rs` owns `QWEN3_PAGE_SIZE_BYTES`.
+`inference-executor-metal/src/model/qwen/v3_5/mod.rs` owns `QWEN35_PAGE_SIZE_BYTES`.
+Both are 32 KiB. These constants select Metal storage capacity; shared model configuration does not own them.

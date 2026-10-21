@@ -9,8 +9,6 @@ use inference_backend_metal::metal::ReplayProgram;
 use inference_backend_metal::metal::Stream;
 use inference_executor_core::sampling::MAX_TOP_K;
 use inference_executor_core::sampling::SamplerConfig;
-use inference_executor_core::sampling::TopKSamplingBounds;
-use inference_executor_metal::def::replay_op::MetalReplayRuntime;
 use inference_executor_metal::replay::Replay;
 use inference_executor_metal::sampling::sampling_params::SamplingParamsStore;
 use inference_executor_metal::sampling::top_k_replay::Sampling;
@@ -18,6 +16,7 @@ use inference_executor_metal::sampling::top_k_replay::SamplingInput;
 use inference_executor_metal::sampling::top_k_replay::TopKSamplingReplayKey;
 use inference_executor_metal::sampling::top_k_sampling::TopKSampling;
 use inference_executor_metal::sampling::top_k_sampling::TopKSamplingOutputBuffers;
+use inference_executor_metal::sampling::top_k_sampling::config::TopKSamplingBounds;
 
 const DEFAULT_VOCAB_SIZE: u32 = 151_936;
 
@@ -192,8 +191,8 @@ impl MainSamplingFixture {
             logits: &self.logits,
             output: self.output.as_output(),
         };
-        let runtime = MetalReplayRuntime::new(&self.stream);
-        let (key, _) = self.replay.record(&runtime, &input);
+        let runtime = &self.stream;
+        let (key, _) = self.replay.record(runtime, &input);
         PreparedReplay {
             key,
             arguments,
@@ -202,7 +201,7 @@ impl MainSamplingFixture {
     }
 
     fn run(&self, case: Case, prepared: &PreparedReplay) {
-        MetalReplayRuntime::new(&self.stream)
+        self.stream
             .submit_replay_with_arguments(self.replay.replay(&prepared.key), &prepared.arguments)
             .wait();
         if case == Case::SampleReadback {

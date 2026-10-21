@@ -1,18 +1,18 @@
 use std::rc::Rc;
 
+use inference_backend_metal::components::ReplayOp;
+use inference_backend_metal::components::ReplayRecorder;
 use inference_backend_metal::components::embedding;
 use inference_backend_metal::metal::Buffer;
 use inference_backend_metal::metal::Device;
 use inference_backend_metal::metal::Dtype;
 use inference_backend_metal::metal::ReplayU32;
-use inference_executor_core::backend::recorder::Recorder;
 use inference_executor_core::checkpoint::QuantizedTensorBindings;
 use inference_executor_core::checkpoint::remove_tensor;
 use inference_executor_core::def::ModelExecutorError;
 
 use crate::checkpoint::SafeTensorStore;
 use crate::def::layer::ReplayLayer;
-use crate::def::replay_op::ReplayOp;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct EmbedConfig {
@@ -142,10 +142,7 @@ impl ReplayLayer for Embed {
     type Input<'a> = EmbedInput<'a>;
     type Output<'a> = &'a Buffer;
 
-    fn record<'a, R>(&'a self, recorder: &mut R, input: Self::Input<'a>) -> Self::Output<'a>
-    where
-        R: Recorder<'a, Operator = ReplayOp<'a>>,
-    {
+    fn record<'a>(&'a self, recorder: &mut ReplayRecorder, input: Self::Input<'a>) -> Self::Output<'a> {
         self.validate_num_tokens(input.num_total_tokens);
         let weights = self.weights();
         let shape = embedding::Shape {

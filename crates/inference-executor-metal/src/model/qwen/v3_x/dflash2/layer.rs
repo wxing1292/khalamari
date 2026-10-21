@@ -1,10 +1,10 @@
 use std::rc::Rc;
 
+use inference_backend_metal::components::ReplayRecorder;
 use inference_backend_metal::metal::Buffer;
 use inference_backend_metal::metal::Device;
 use inference_backend_metal::metal::Dtype;
 use inference_backend_metal::metal::ReplayU32;
-use inference_executor_core::backend::recorder::Recorder;
 use inference_executor_core::def::ModelExecutorError;
 use inference_executor_core::mlp::dense::DenseMLPCore;
 use inference_executor_core::model::qwen::v3_x::dflash2::Qwen3xDFlash2Config;
@@ -15,7 +15,6 @@ use crate::attn::bidi_block_gqa::metadata::BiDiBlockGQAMetadataBuffers;
 use crate::attn::bidi_block_gqa::state::BiDiBlockGQAState;
 use crate::checkpoint::SafeTensorStore;
 use crate::def::quantized_affine::QuantizedAffineLayout;
-use crate::def::replay_op::ReplayOp;
 use crate::mlp::dense::backend::DenseMLPMetalConfig;
 use crate::mlp::dense::scratch::DenseMLPScratch;
 use crate::model::qwen::v3_x::dflash2::attention::Qwen3xDFlash2Attention;
@@ -180,18 +179,16 @@ impl Qwen3xDFlash2Layer {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn record_prefill<'a, R>(
+    pub fn record_prefill<'a>(
         &'a self,
-        recorder: &mut R,
+        recorder: &mut ReplayRecorder,
         num_total_tokens: u32,
         num_active_tokens: ReplayU32,
         main_feature: &'a Buffer,
         req_slots: &'a Buffer,
         flat_token_indices: &'a Buffer,
         pages: &'a Buffer,
-    ) where
-        R: Recorder<'a, Operator = ReplayOp<'a>>,
-    {
+    ) {
         self.attention.record_prefill(
             recorder,
             num_total_tokens,
@@ -203,17 +200,14 @@ impl Qwen3xDFlash2Layer {
         );
     }
 
-    pub fn record_bidi_block<'a, R>(
+    pub fn record_bidi_block<'a>(
         &'a self,
-        recorder: &mut R,
+        recorder: &mut ReplayRecorder,
         num_total_tokens: u32,
         num_active_tokens: ReplayU32,
         num_active_query_blocks: ReplayU32,
         input: Qwen3xDFlash2LayerInput<'a>,
-    ) -> &'a Buffer
-    where
-        R: Recorder<'a, Operator = ReplayOp<'a>>,
-    {
+    ) -> &'a Buffer {
         debug_assert!(num_total_tokens <= self.scratch.max_tokens);
         self.input_norm.record_with_barrier(
             recorder,

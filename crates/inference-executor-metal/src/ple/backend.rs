@@ -1,3 +1,5 @@
+use inference_backend_metal::components::ReplayOp;
+use inference_backend_metal::components::ReplayRecorder;
 use inference_backend_metal::components::ngram_embedding;
 use inference_backend_metal::components::ple;
 use inference_backend_metal::metal::Buffer;
@@ -5,7 +7,6 @@ use inference_backend_metal::metal::Device;
 use inference_backend_metal::metal::Dtype;
 use inference_backend_metal::metal::ReplayU32;
 use inference_backend_metal::operators::affine_quantized;
-use inference_executor_core::backend::recorder::Recorder;
 use inference_executor_core::ngram_embedding::core::HashParameters;
 use inference_executor_core::ngram_embedding::core::NGramEmbeddingCore;
 use inference_executor_core::ple::core::PLECore;
@@ -14,7 +15,6 @@ use super::batch_metadata::PLEMetadataBuffers;
 use super::scratch::PLEScratch;
 use crate::def::quantized_affine::QuantizedAffineLayout;
 use crate::def::quantized_affine::QuantizedAffineWeights;
-use crate::def::replay_op::ReplayOp;
 
 #[derive(Clone, Copy, Debug)]
 pub struct PLEMetalConfig {
@@ -188,10 +188,7 @@ impl PLE {
         boundaries.dedup();
         boundaries.into_boxed_slice()
     }
-    pub fn prepare<'a, R>(&'a self, recorder: &mut R, input: PLEPrepareInput<'a, '_>)
-    where
-        R: Recorder<'a, Operator = ReplayOp<'a>>,
-    {
+    pub fn prepare<'a>(&'a self, recorder: &mut ReplayRecorder, input: PLEPrepareInput<'a, '_>) {
         assert_eq!(input.metadata.ngram_core(), self.ngram_core);
         let num_total_tokens = input.num_total_tokens;
         let num_active_tokens = input.num_active_tokens;
@@ -232,10 +229,7 @@ impl PLE {
         );
     }
     /// Project a decoded embedding from either resident lookup or an external row loader.
-    pub fn project<'a, R>(&'a self, recorder: &mut R, input: PLEProjectInput<'a>)
-    where
-        R: Recorder<'a, Operator = ReplayOp<'a>>,
-    {
+    pub fn project<'a>(&'a self, recorder: &mut ReplayRecorder, input: PLEProjectInput<'a>) {
         let num_total_tokens = input.num_total_tokens;
         let num_active_tokens = input.num_active_tokens;
         let scratch = input.scratch;
@@ -279,10 +273,7 @@ impl PLE {
             },
         )));
     }
-    pub fn apply<'a, R>(&'a self, recorder: &mut R, input: PLEApplyInput<'a>) -> &'a Buffer
-    where
-        R: Recorder<'a, Operator = ReplayOp<'a>>,
-    {
+    pub fn apply<'a>(&'a self, recorder: &mut ReplayRecorder, input: PLEApplyInput<'a>) -> &'a Buffer {
         let num_total_tokens = input.num_total_tokens;
         let num_active_tokens = input.num_active_tokens;
         let scratch = input.scratch;
@@ -330,10 +321,7 @@ impl PLE {
         )));
         input.output
     }
-    pub fn commit<'a, R>(&'a self, recorder: &mut R, input: PLECommitInput<'a>)
-    where
-        R: Recorder<'a, Operator = ReplayOp<'a>>,
-    {
+    pub fn commit<'a>(&'a self, recorder: &mut ReplayRecorder, input: PLECommitInput<'a>) {
         recorder.record_with_barrier_before(ReplayOp::opaque(self.compute.commit(
             input.metadata.max_tokens(),
             input.metadata.max_requests(),

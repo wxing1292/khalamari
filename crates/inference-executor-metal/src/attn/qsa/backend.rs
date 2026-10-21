@@ -1,3 +1,5 @@
+use inference_backend_metal::components::ReplayOp;
+use inference_backend_metal::components::ReplayRecorder;
 use inference_backend_metal::components::gqa::activation_gate as backend_activation_gate;
 use inference_backend_metal::components::gqa::kv_page_write as backend_kv_page_write;
 use inference_backend_metal::components::gqa::qgkv_split as backend_qgkv_split;
@@ -12,10 +14,9 @@ use inference_backend_metal::metal::ReplayParameterKey;
 use inference_backend_metal::metal::ReplayU32;
 use inference_backend_metal::operators::affine_quantized;
 use inference_executor_core::attn::GQACore;
-use inference_executor_core::attn::GQAPageTableLayout;
 use inference_executor_core::attn::qsa_indexer::core::QSAIndexerCore;
-use inference_executor_core::backend::recorder::Recorder;
 
+use crate::attn::gqa::request_page_table::GQAPageTableLayout;
 use crate::attn::qsa::batch_metadata::QSASDPAMetadataBuffers;
 use crate::attn::qsa::scratch::QSAScratch;
 use crate::attn::qsa::scratch::QSAScratchBindings;
@@ -35,7 +36,6 @@ use crate::attn::qsa_indexer::backend::QSAIndexerWeights;
 use crate::attn::qsa_indexer::batch_metadata::QSAIndexerMetadataBuffers;
 use crate::attn::qsa_indexer::batch_metadata::QSAIndexerRequest;
 use crate::def::layer::ReplayLayer;
-use crate::def::replay_op::ReplayOp;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct QSAMetalConfig {
@@ -313,10 +313,7 @@ impl ReplayLayer for QSA {
     type Input<'a> = QSAInput<'a>;
     type Output<'a> = QSAOutput<'a>;
 
-    fn record<'a, R>(&'a self, recorder: &mut R, input: Self::Input<'a>) -> Self::Output<'a>
-    where
-        R: Recorder<'a, Operator = ReplayOp<'a>>,
-    {
+    fn record<'a>(&'a self, recorder: &mut ReplayRecorder, input: Self::Input<'a>) -> Self::Output<'a> {
         self.validate_input(&input);
         let shape = input.batch_metadata.shape();
         let scratch = input.scratch;

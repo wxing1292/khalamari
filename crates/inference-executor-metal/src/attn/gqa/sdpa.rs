@@ -4,11 +4,11 @@ use std::ops::Range;
 
 use inference_backend_metal::components::gqa::sdpa as backend_sdpa;
 use inference_backend_metal::metal::Dtype;
-use inference_executor_core::attn::GQAPageTableLayout;
-use inference_executor_core::attn::GQAReplayShape;
 use inference_executor_core::replay::ReplayBucketPolicy;
 
 use crate::attn::gqa::batch_metadata::GQAReplayBucketPolicy;
+use crate::attn::gqa::batch_metadata::GQAReplayShape;
+use crate::attn::gqa::request_page_table::GQAPageTableLayout;
 
 const D256_PAGE16_MIN_SELECTION_SCORE: u64 = 2048;
 

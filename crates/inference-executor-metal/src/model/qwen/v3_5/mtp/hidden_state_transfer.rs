@@ -12,6 +12,8 @@
 
 use std::ops::Range;
 
+use inference_backend_metal::components::ReplayOp;
+use inference_backend_metal::components::ReplayRecorder;
 use inference_backend_metal::metal::Buffer;
 use inference_backend_metal::metal::Device;
 use inference_backend_metal::metal::Dtype;
@@ -20,11 +22,8 @@ use inference_backend_metal::metal::ReplayParameterKey;
 use inference_backend_metal::metal::ReplayU32;
 use inference_backend_metal::operators::row_route;
 use inference_backend_metal::operators::row_scatter;
-use inference_executor_core::backend::recorder::Recorder;
 use inference_executor_core::replay::ReplayBucketPolicy;
 
-use crate::def::replay_op::ReplayOp;
-use crate::def::replay_op::ReplayRecorder;
 use crate::replay::ReplayComponent;
 
 const QWEN35_MTP_HIDDEN_STATE_TRANSFER_NUM_ACTIVE_ROWS: ReplayParameterKey =
@@ -197,16 +196,14 @@ impl Qwen35MTPHiddenStateTransfer {
         (key, arguments)
     }
 
-    pub fn record<'a, R>(
+    pub fn record<'a>(
         &'a self,
-        recorder: &mut R,
+        recorder: &mut ReplayRecorder,
         key: &Qwen35MTPHiddenStateTransferReplayKey,
         num_active_rows: ReplayU32,
         num_active_write_rows: ReplayU32,
         args: Qwen35MTPHiddenStateTransferArgs<'a>,
-    ) where
-        R: Recorder<'a, Operator = ReplayOp<'a>>,
-    {
+    ) {
         debug_assert!(args.num_rows > 0);
         validate_active_rows(
             num_active_rows,
@@ -311,7 +308,6 @@ mod tests {
     use inference_backend_metal::metal::Stream;
 
     use super::*;
-    use crate::def::replay_op::MetalReplayRuntime;
     use crate::replay::Replay;
 
     #[test]
@@ -374,9 +370,9 @@ mod tests {
     fn test_transfer_reads_old_boundary_before_in_place_writeback() {
         let device = Device::system_default();
         let stream = Stream::new(&device);
-        let runtime = MetalReplayRuntime::new(&stream);
+        let runtime = &stream;
         for num_continuation_tokens in [0, 1, 3] {
-            run_transfer_case(&device, &runtime, num_continuation_tokens);
+            run_transfer_case(&device, runtime, num_continuation_tokens);
         }
     }
 
@@ -384,7 +380,7 @@ mod tests {
     fn test_replay_repairs_hidden_inputs_with_and_without_writeback() {
         let device = Device::system_default();
         let stream = Stream::new(&device);
-        let runtime = MetalReplayRuntime::new(&stream);
+        let runtime = &stream;
         let mut replay = Replay::new(
             "qwen3.5 MTP tail repair test",
             Qwen35MTPHiddenStateTransfer::new(&device, 1, 8),
@@ -435,7 +431,7 @@ mod tests {
                         write_routes: &write_routes,
                         hidden_state_cache_output: &cache,
                     };
-                    let (key, hit) = replay.record(&runtime, &input);
+                    let (key, hit) = replay.record(runtime, &input);
                     assert_eq!(hit, !seen.insert(key.clone()));
                     let (_, arguments) = replay.component().prepare_replay(num_rows as u32, num_write_rows);
                     runtime
@@ -470,7 +466,7 @@ mod tests {
         }
     }
 
-    fn run_transfer_case(device: &Device, runtime: &MetalReplayRuntime<'_>, num_continuation_tokens: usize) {
+    fn run_transfer_case(device: &Device, runtime: &Stream, num_continuation_tokens: usize) {
         let hidden_state_cache = Buffer::from_slice(device, &[9_u16, 10, 11]);
         let module0_values = (100_u16..100 + num_continuation_tokens as u16 + 1).collect::<Vec<_>>();
         let module0_hidden = Buffer::from_slice(device, &module0_values);
@@ -525,7 +521,7 @@ mod tests {
 
     fn run_transfer(
         device: &Device,
-        runtime: &MetalReplayRuntime<'_>,
+        runtime: &Stream,
         num_continuation_tokens: usize,
         module_index: usize,
         hidden_state_cache_rows: Range<u32>,

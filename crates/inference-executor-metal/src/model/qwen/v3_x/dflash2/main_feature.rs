@@ -1,19 +1,19 @@
 use std::ops::Range;
 
+use inference_backend_metal::components::ReplayOp;
+use inference_backend_metal::components::ReplayRecorder;
 use inference_backend_metal::components::residual_add;
 use inference_backend_metal::metal::Buffer;
 use inference_backend_metal::metal::Device;
 use inference_backend_metal::metal::Dtype;
 use inference_backend_metal::metal::ReplayU32;
 use inference_backend_metal::operators::affine_quantized;
-use inference_executor_core::backend::recorder::Recorder;
 use inference_executor_core::checkpoint::remove_tensor;
 use inference_executor_core::def::ModelExecutorError;
 use inference_executor_core::model::qwen::v3_x::dflash2::Qwen3xDFlash2Config;
 use inference_executor_core::model::qwen::v3_x::dflash2::Qwen3xDFlash2MainFeatureWeightBindings;
 
 use crate::checkpoint::SafeTensorStore;
-use crate::def::replay_op::ReplayOp;
 use crate::model::main_residual_capture::MainResidualCapture;
 use crate::model::qwen::v3_x::weight::affine_parameter_safetensors_dtype;
 use crate::model::qwen::v3_x::weight::remove_quant_weight;
@@ -201,10 +201,12 @@ impl Qwen3xDFlash2MainFeatureProjector {
         self.hidden_norm.unload_weights();
     }
 
-    pub fn record<'a, R>(&'a self, recorder: &mut R, num_total_tokens: u32, num_active_tokens: ReplayU32) -> &'a Buffer
-    where
-        R: Recorder<'a, Operator = ReplayOp<'a>>,
-    {
+    pub fn record<'a>(
+        &'a self,
+        recorder: &mut ReplayRecorder,
+        num_total_tokens: u32,
+        num_active_tokens: ReplayU32,
+    ) -> &'a Buffer {
         assert!(num_total_tokens > 0, "Qwen3 DFlash2 Main projection requires tokens");
         assert!(
             num_total_tokens <= self.layout.max_tokens,

@@ -63,9 +63,9 @@ fn split_main_lane_page_ids(
 #[cfg(test)]
 mod tests {
     use inference_backend_metal::metal::Device;
-    use inference_executor_core::attn::GQAPageTableLayout;
 
     use super::split_main_lane_page_ids;
+    use crate::attn::gqa::request_page_table::GQAPageTableLayout;
     use crate::attn::gqa::request_page_table::GQARequestPageTable;
 
     #[test]

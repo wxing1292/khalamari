@@ -10,6 +10,8 @@ use std::time::Duration;
 use std::time::Instant;
 
 use half::bf16;
+use inference_backend_metal::components::ReplayOp;
+use inference_backend_metal::components::ReplayRecorder;
 use inference_backend_metal::components::gqa::activation_gate as backend_activation_gate;
 use inference_backend_metal::components::gqa::fp8::bf16_to_f32;
 use inference_backend_metal::components::gqa::fp8::fp8_e4m3_to_bf16;
@@ -25,12 +27,9 @@ use inference_backend_metal::metal::Operator;
 use inference_backend_metal::metal::ReplayProgram;
 use inference_backend_metal::metal::Stream;
 use inference_backend_metal::operators::affine_quantized;
-use inference_executor_core::attn::GQAReplayShape;
-use inference_executor_core::backend::recorder::Recorder;
-use inference_executor_core::model::qwen::v3_5::QWEN35_PAGE_SIZE_BYTES;
 use inference_executor_metal::attn::gqa::batch_metadata::GQAMetadataBuffers;
-use inference_executor_metal::def::replay_op::MetalReplayRuntime;
-use inference_executor_metal::def::replay_op::ReplayOp;
+use inference_executor_metal::attn::gqa::batch_metadata::GQAReplayShape;
+use inference_executor_metal::model::qwen::v3_5::QWEN35_PAGE_SIZE_BYTES;
 use safetensors::SafeTensors;
 use safetensors::tensor::TensorView;
 
@@ -706,7 +705,7 @@ fn build_single_invocation_replay<I>(stream: &Stream, invocation: I) -> ReplayPr
 where
     I: Operator,
 {
-    let mut recorder = MetalReplayRuntime::new(stream).create_recorder();
+    let mut recorder = ReplayRecorder::new(stream.create_replay_program());
     recorder.record(ReplayOp::opaque(invocation));
     recorder.build()
 }

@@ -1,6 +1,7 @@
 use std::mem::size_of;
 
 use half::bf16;
+use inference_backend_metal::components::ReplayRecorder;
 use inference_backend_metal::components::dense_mlp;
 use inference_backend_metal::components::sparse_mlp;
 use inference_backend_metal::metal::ReplayArguments;
@@ -18,8 +19,6 @@ use inference_executor_core::mlp::moe::reference::moe_routing_from_bf16_probs_re
 use inference_executor_core::mlp::moe::reference::quantized_sparse_mlp_reference;
 
 use super::*;
-use crate::def::replay_op::MetalReplayRuntime;
-use crate::def::replay_op::ReplayRecorder;
 use crate::mlp::moe::scratch::MoEScratch;
 use crate::replay::Replay;
 use crate::replay::ReplayComponent;
@@ -119,7 +118,7 @@ fn assert_routing_replay_matches_reference(num_experts: usize, num_experts_per_t
         core.norm_topk_prob,
     );
 
-    let runtime = MetalReplayRuntime::new(&stream);
+    let runtime = &stream;
     let mut replay = Replay::new("test.gated_moe.routing", TestGatedMoERouting(moe));
     let input = GatedMoERoutingInput {
         num_total_tokens,
@@ -128,11 +127,11 @@ fn assert_routing_replay_matches_reference(num_experts: usize, num_experts_per_t
         scratch,
         weights,
     };
-    let (key, cache_hit) = replay.record(&runtime, &input);
+    let (key, cache_hit) = replay.record(runtime, &input);
     assert!(!cache_hit);
 
     for num_active_tokens in [1_u32, 8, 3, 7, 2, 6, 4, 5] {
-        assert_eq!(replay.record(&runtime, &input), (key, true));
+        assert_eq!(replay.record(runtime, &input), (key, true));
         runtime
             .submit_replay_with_arguments(
                 replay.replay(&key),
@@ -167,7 +166,7 @@ fn assert_routing_replay_matches_reference(num_experts: usize, num_experts_per_t
 fn assert_full_replay_matches_reference(num_experts: usize, num_experts_per_token: usize) {
     let device = Device::system_default();
     let stream = inference_backend_metal::metal::Stream::new(&device);
-    let runtime = MetalReplayRuntime::new(&stream);
+    let runtime = &stream;
 
     for with_shared_experts in [false, true] {
         let (mut core, metal) = full_test_config(with_shared_experts);
@@ -198,11 +197,11 @@ fn assert_full_replay_matches_reference(num_experts: usize, num_experts_per_toke
                 num_total_tokens,
                 ReplayU32::Parameter(NUM_ACTIVE_TOKENS),
             );
-            let (key, cache_hit) = replay.record(&runtime, &input);
+            let (key, cache_hit) = replay.record(runtime, &input);
             assert!(!cache_hit);
 
             for &num_active_tokens in active_counts {
-                assert_eq!(replay.record(&runtime, &input), (key, true));
+                assert_eq!(replay.record(runtime, &input), (key, true));
                 runtime
                     .submit_replay_with_arguments(
                         replay.replay(&key),

@@ -5,26 +5,26 @@ use std::time::Duration;
 use std::time::Instant;
 
 use half::bf16;
+use inference_backend_metal::components::ReplayRecorder;
 use inference_backend_metal::metal::Buffer;
 use inference_backend_metal::metal::Device;
 use inference_backend_metal::metal::ReplayArguments;
 use inference_backend_metal::metal::ReplayProgram;
 use inference_backend_metal::metal::Stream;
-use inference_executor_core::attn::GQAPageTableLayout;
 use inference_executor_core::checkpoint::SafeTensorStore;
 use inference_executor_core::model::qwen::v3_5::LayerType;
-use inference_executor_core::model::qwen::v3_5::QWEN35_PAGE_SIZE_BYTES;
 use inference_executor_core::model::qwen::v3_5::Qwen35ModelConfig;
 use inference_executor_core::model::qwen::v3_5::init_qwen35_model_config;
 use inference_executor_core::model::qwen::v3_5::weight_layout::Qwen35LayerWeightBindings;
 use inference_executor_core::model::qwen::v3_5::weight_layout::Qwen35MainWeightBindings;
 use inference_executor_core::model::qwen::v3_5::weight_layout::Qwen35ModelWeightBindings;
 use inference_executor_core::model::qwen::v3_5::weight_layout::resolve_qwen35_model_weight_bindings;
+use inference_executor_metal::attn::gqa::request_page_table::GQAPageTableLayout;
 use inference_executor_metal::def::layer::ReplayLayer;
-use inference_executor_metal::def::replay_op::MetalReplayRuntime;
 use inference_executor_metal::mlp::dense::scratch::DenseMLPScratch;
 use inference_executor_metal::mlp::moe::scratch::MoEScratch;
 use inference_executor_metal::model::page_arena::PageArena;
+use inference_executor_metal::model::qwen::v3_5::QWEN35_PAGE_SIZE_BYTES;
 use inference_executor_metal::model::qwen::v3_5::component_config::Qwen35MetalDefaults;
 use inference_executor_metal::model::qwen::v3_5::component_config::derive_qwen35_dense_mlp_configs;
 use inference_executor_metal::model::qwen::v3_5::component_config::derive_qwen35_gdn_configs;
@@ -351,14 +351,14 @@ impl FullMainFixture {
         );
         self.gqa_state.add_private_replay_arguments(&mut arguments);
         self.gdn_state.add_private_replay_arguments(&mut arguments);
-        let runtime = MetalReplayRuntime::new(&self.stream);
-        let (key, _) = self.main.record(&runtime, &input);
+        let runtime = &self.stream;
+        let (key, _) = self.main.record(runtime, &input);
         assert_eq!(key, expected_key, "Main prepared and recorded replay keys must match");
         PreparedMainReplay { key, arguments }
     }
 
     fn run(&self, prepared: &PreparedMainReplay) {
-        MetalReplayRuntime::new(&self.stream)
+        self.stream
             .submit_replay_with_arguments(self.main.replay(&prepared.key), &prepared.arguments)
             .wait();
     }
@@ -514,7 +514,7 @@ impl LayerRangeFixture {
     }
 
     fn build_replay(&self) -> ReplayProgram {
-        let mut recorder = MetalReplayRuntime::new(&self.stream).create_recorder();
+        let mut recorder = ReplayRecorder::new(self.stream.create_replay_program());
         let mut hidden = &self.input;
         for layer in &self.layers {
             hidden = <Qwen35MainLayer as ReplayLayer>::record(
@@ -535,7 +535,7 @@ impl LayerRangeFixture {
     }
 
     fn run(&self, replay: &ReplayProgram) {
-        MetalReplayRuntime::new(&self.stream).submit_replay(replay).wait();
+        self.stream.submit_replay(replay).wait();
     }
 
     fn print_gqa_split_plan(&self) {

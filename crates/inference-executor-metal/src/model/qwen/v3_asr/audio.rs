@@ -18,6 +18,7 @@ use inference_backend_metal::operators::matmul_bf16;
 use inference_executor_core::checkpoint::SafeTensorStore;
 use inference_executor_core::def::ModelExecutorError;
 use inference_executor_core::model::EncoderExecutorLifecycle;
+use inference_executor_core::model::ExecutionSubmission;
 use inference_executor_core::model::ReplayableEncoderModel;
 use inference_executor_core::model::qwen::v3_asr::Qwen3ASRAudioConfig;
 use inference_executor_core::model::qwen::v3_asr::Qwen3ASRAudioSource;
@@ -31,8 +32,7 @@ use inference_runtime_core::Result as RuntimeResult;
 use inference_runtime_core::memory::BlockAllocator;
 use inference_runtime_core::memory::OffsetAllocation;
 
-use crate::def::replay_op::MetalReplayRuntime;
-use crate::def::replay_op::MetalReplaySubmission;
+use crate::def::submission::MetalReplaySubmission;
 use crate::model::resource_arena::MetalResourceArena;
 
 const BF16_BYTES: usize = 2;
@@ -293,7 +293,7 @@ impl ReplayableEncoderModel for AudioEncoderModel {
     }
 
     fn submit(&mut self, recorder: &Self::ModelOpsRecorder) -> Self::Submission {
-        MetalReplayRuntime::new(&self.stream).submit_replay(recorder)
+        self.stream.submit_replay(recorder).into()
     }
 
     fn complete(

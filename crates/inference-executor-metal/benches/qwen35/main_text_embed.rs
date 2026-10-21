@@ -13,7 +13,6 @@ use inference_executor_core::checkpoint::SafeTensorStore;
 use inference_executor_core::model::qwen::v3_5::init_qwen35_model_config;
 use inference_executor_core::model::qwen::v3_5::weight_layout::Qwen35ModelWeightBindings;
 use inference_executor_core::model::qwen::v3_5::weight_layout::resolve_qwen35_model_weight_bindings;
-use inference_executor_metal::def::replay_op::MetalReplayRuntime;
 use inference_executor_metal::model::embedding::Embed;
 use inference_executor_metal::model::embedding::EmbedConfig;
 use inference_executor_metal::model::qwen::v3_5::main::text_embed::Qwen35MainTextEmbed;
@@ -179,8 +178,8 @@ impl MainTextEmbedFixture {
             hidden_output: &self.hidden_output,
         };
         let (expected_key, arguments) = self.replay.component().prepare_replay(num_tokens);
-        let runtime = MetalReplayRuntime::new(&self.stream);
-        let (key, _) = self.replay.record(&runtime, &input);
+        let runtime = &self.stream;
+        let (key, _) = self.replay.record(runtime, &input);
         assert_eq!(
             key, expected_key,
             "MainTextEmbed prepared and recorded replay keys must match"
@@ -189,7 +188,7 @@ impl MainTextEmbedFixture {
     }
 
     fn run(&self, prepared: &PreparedReplay) {
-        MetalReplayRuntime::new(&self.stream)
+        self.stream
             .submit_replay_with_arguments(self.replay.replay(&prepared.key), &prepared.arguments)
             .wait();
     }

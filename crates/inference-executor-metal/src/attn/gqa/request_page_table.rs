@@ -1,8 +1,47 @@
 use inference_backend_metal::metal::Buffer;
 use inference_backend_metal::metal::Device;
-use inference_executor_core::attn::GQAPageTableLayout;
 
 mod file_io;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct GQAPageTableLayout {
+    /// Init-time page-table storage layout. Treat the memory as a tensor with
+    /// shape `[num_req_slots, num_gqa_layers, num_blocks, num_page_ids_per_block]`.
+    ///
+    /// One physical page stores both K and V:
+    /// `[K/V, kv_head, page_token_index, head_dim]`.
+    pub num_req_slots: u32,
+    /// Number of GQA page-table layer slots.
+    pub num_gqa_layers: u32,
+    /// Logical cache-block capacity per request slot and GQA layer.
+    pub num_blocks: u32,
+    /// Physical page IDs assigned to one request/GQA-layer/cache-block tuple.
+    pub num_page_ids_per_block: u32,
+}
+
+impl GQAPageTableLayout {
+    pub fn validate(self) {
+        assert!(self.num_req_slots > 0);
+        assert!(self.num_blocks > 0);
+        assert!(self.num_gqa_layers > 0);
+        assert!(self.num_page_ids_per_block > 0);
+    }
+
+    pub fn num_page_ids(self) -> usize {
+        (self.num_req_slots as usize)
+            .checked_mul(self.num_gqa_layers as usize)
+            .and_then(|count| count.checked_mul(self.num_blocks as usize))
+            .and_then(|count| count.checked_mul(self.num_page_ids_per_block as usize))
+            .expect("GQA page-table element count must fit usize")
+    }
+
+    /// Number of physical GQA pages addressable by one request/GQA-layer table.
+    pub fn num_physical_pages_per_request(self) -> usize {
+        (self.num_blocks as usize)
+            .checked_mul(self.num_page_ids_per_block as usize)
+            .expect("GQA per-request physical page count must fit usize")
+    }
+}
 
 #[derive(Debug)]
 pub struct GQARequestPageTable {
@@ -124,10 +163,10 @@ impl GQARequestPageTable {
 #[cfg(test)]
 mod tests {
     use inference_backend_metal::metal::Device;
-    use inference_executor_core::attn::GQAPageTableLayout;
     use inference_runtime_core::compute::ExecutorHibernationPlan;
 
     use super::GQARequestPageTable;
+    use crate::attn::gqa::request_page_table::GQAPageTableLayout;
     use crate::model::state_snapshot::GQAStateSnapshotFiles;
     use crate::model::state_snapshot::SelectedStateIO;
     use crate::model::state_snapshot::StateSnapshotFile;

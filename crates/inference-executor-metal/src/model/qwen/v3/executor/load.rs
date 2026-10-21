@@ -7,9 +7,7 @@ use inference_backend_metal::MetalRuntime;
 use inference_backend_metal::metal::Buffer;
 use inference_backend_metal::metal::Device;
 use inference_backend_metal::metal::Dtype;
-use inference_executor_core::attn::GQAPageTableLayout;
 use inference_executor_core::def::ModelExecutorError;
-use inference_executor_core::model::qwen::v3::QWEN3_PAGE_SIZE_BYTES;
 use inference_executor_core::model::qwen::v3::init_qwen3_model_config;
 use inference_executor_core::model::qwen::v3::weight_layout::Qwen3ModelWeightBindings;
 use inference_executor_core::model::qwen::v3::weight_layout::resolve_qwen3_model_weight_bindings;
@@ -20,15 +18,16 @@ use inference_executor_core::model::qwen::v3_asr::weight_layout::resolve_qwen3_a
 use inference_executor_core::sampling::HFGenerationConfig;
 use inference_executor_core::sampling::MAX_TOP_K;
 use inference_executor_core::sampling::RequestSamplingState;
-use inference_executor_core::sampling::TopKSamplingBounds;
 use inference_runtime_core::runtime::Token;
 
+use crate::attn::gqa::request_page_table::GQAPageTableLayout;
 use crate::checkpoint::SafeTensorStore;
 use crate::mlp::dense::scratch::DenseMLPScratch;
 use crate::model::embedding::Embed;
 use crate::model::embedding::EmbedConfig;
 use crate::model::main_resource_embed::MainResourceEmbed;
 use crate::model::page_arena::PageArena;
+use crate::model::qwen::v3::QWEN3_PAGE_SIZE_BYTES;
 use crate::model::qwen::v3::executor::Qwen3Checkpoint;
 use crate::model::qwen::v3::executor::Qwen3Executor;
 use crate::model::qwen::v3::executor::Qwen3PendingTransactions;
@@ -51,6 +50,7 @@ use crate::sampling::sampling_params::SamplingParamsStore;
 use crate::sampling::top_k_replay::Sampling;
 use crate::sampling::top_k_sampling::TopKSampling;
 use crate::sampling::top_k_sampling::TopKSamplingOutputBuffers;
+use crate::sampling::top_k_sampling::config::TopKSamplingBounds;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Qwen3ExecutorConfig {

@@ -1,6 +1,5 @@
-use inference_executor_core::attn::GQAReplayShape;
-
 use crate::attn::gqa::backend::GQAReplayTopology;
+use crate::attn::gqa::batch_metadata::GQAReplayShape;
 
 pub mod executor;
 pub mod main;
@@ -27,3 +26,5 @@ impl Qwen35GQAReplayKey {
         }
     }
 }
+
+pub const QWEN35_PAGE_SIZE_BYTES: usize = 32 * 1024;

@@ -41,7 +41,7 @@ The source dependency direction puts model semantics at the top and Metal execut
 ```text
 runtime core ---------------- batch, page IDs, lifecycle ------------------+
                                                                           |
-executor core ---------------- Core, ReplayShape, CPU reference ----------+
+executor core -------- model contracts, geometry, CPU reference -----------+
                                                                           v
                                                                Qwen model executor
                                                                stage order and roles
@@ -65,10 +65,28 @@ executor core ---------------- Core, ReplayShape, CPU reference ----------+
 
 The arrows show use and lowering. They do not transfer semantic ownership to a lower layer.
 
+Executor core shares `ReplayableDecoderModel`, `ReplayableEncoderModel`, and `ExecutionSubmission` with the runtime.
+Each model chooses its own `ModelOpsRecorder`; these associated types have no shared recorder bound.
+Core also owns model configuration, logical batch contracts, CPU references, and reusable CPU algorithms.
+`ReplayBucketPolicy` is one optional CPU capacity algorithm. It does not require a backend to use buckets or a common graph key.
+Metal owns GQA tile/map-task counts, GQA page-table layouts, GDN recording capacities, sampling buffer bounds/dtypes, and model page bytes.
+Model capability checks also belong to the backend executor. Core validates model relationships and shared CPU reference domains.
+
+```text
+Runtime input: request A, 3 active tokens, runtime-owned page IDs
+  -> shared model contract: prepare / record / submit / complete
+     -> Metal metadata: active = 3, recorded capacity = 4
+        -> cache key: capacity 4 + topology + record-time facts
+        -> ReplayRecorder: operators + bindings for persistent Metal buffers
+        -> Stream: submit ReplayProgram with active count 3
+        -> MetalReplaySubmission: retain completion ownership
+  <- shared model response: sampled token IDs and state/cache decisions
+```
+
 ## Shared component model
 
 ```text
-backend-neutral core/config + shape
+backend-neutral model geometry/config
   -> immutable backend kernels/tuning
   -> executor adapter: weights + state + metadata + scratch
   -> typed record input/output -> production-owner test + CPU reference
@@ -100,7 +118,7 @@ entity when its contract does not need it.
 | Layer | Common entity | Primary responsibility |
 | --- | --- | --- |
 | Executor core | `*Core` | Backend-neutral geometry and semantic relationships |
-| Executor core | `*ReplayShape` | One recorded work shape and its submission capacity |
+| Metal executor component | `*ReplayShape` | One Metal recorded work shape and its submission capacity |
 | Executor core | `ReplayBucketPolicy` | Shared capacity algorithm with executor-supplied topology boundaries |
 | Executor core | `*_reference` | CPU oracle with no Metal dependency |
 | Model executor | `Qwen*`, Main, MTP, DFlash2 | Model role, stage order, checkpoint bindings, and persistent state |
@@ -110,7 +128,7 @@ entity when its contract does not need it.
 | Executor component | `*MetadataBuffers`, `*Scratch` | Reusable batch metadata and temporary workspace |
 | Executor component | `*StateTable`, `*RequestSlots` | Component-local persistent state and request-slot interpretation |
 | Executor component | `ReplayLayer` | Typed lowering from one semantic component to `ReplayOp` values |
-| Executor component | `Recorder<ReplayOp>` | Backend-neutral stage composition through Metal replay operations |
+| Metal backend component | `ReplayRecorder` | Concrete recording and fusion of `ReplayOp` values |
 | Backend component | `*Config`, `*Shape` | Static workload facts and one backend invocation shape |
 | Backend component | `*Buffers`, `*Weights`, `*Scratch` | Borrowed backend resource groups for one invocation |
 | Backend component | `ExecutionVariant`, `VariantKey`, `KernelConstants`, `*KernelKind` | Selectable execution, replay identity, compile-time constants, and low-level kernel identity |
@@ -190,10 +208,7 @@ impl ReplayLayer for Component {
     type Input<'a> = ComponentInput<'a>;
     type Output<'a> = &'a Buffer;
 
-    fn record<'a, R>(&'a self, recorder: &mut R, input: Self::Input<'a>) -> Self::Output<'a>
-    where
-        R: Recorder<'a, Operator = ReplayOp<'a>>,
-    {
+    fn record<'a>(&'a self, recorder: &mut ReplayRecorder, input: Self::Input<'a>) -> Self::Output<'a> {
         input.shape.validate();
         recorder.record_with_barrier_before(ReplayOp::opaque(self.compute.invoke(
             backend_shape(input.shape),
@@ -240,16 +255,13 @@ impl ModelComponent {
             .expect("component weights must be loaded before execution")
     }
 
-    pub fn record<'a, R>(
+    pub fn record<'a>(
         &'a self,
-        recorder: &mut R,
+        recorder: &mut ReplayRecorder,
         shape: ComponentReplayShape,
         input: &'a Buffer,
         output: &'a Buffer,
-    )
-    where
-        R: Recorder<'a, Operator = ReplayOp<'a>>,
-    {
+    ) {
         let _ = <Component as ReplayLayer>::record(
             &self.backend,
             recorder,
@@ -291,18 +303,18 @@ operations. A stateless component must not add them for symmetry.
 
 ```text
 crates/inference-executor-core/src/
-  attn/gqa       backend-neutral GQA metadata and shapes
-  attn/gdn       backend-neutral GDN metadata and shapes
+  attn/gqa       GQA geometry, logical visibility metadata, and CPU references
+  attn/gdn       GDN geometry, state-version semantics, and CPU references
   mlp/dense      backend-neutral dense gated-MLP metadata
-  mlp/moe        backend-neutral MoE metadata and execution policy
+  mlp/moe        backend-neutral MoE geometry and CPU references
   model/qwen     Qwen config, microbatch, and pending-transaction contracts
-  sampling       sampling config, RNG domains, shapes, and CPU references
+  sampling       sampling config, RNG domains, request state, and CPU references
 
 crates/inference-executor-metal/src/
-  attn           GQA/GDN adapters, batch metadata, page/state tables, scratch
+  attn           GQA/GDN adapters, replay shapes, GPU page/state layouts, scratch
   mlp            dense-MLP and MoE adapters
   model/qwen     semantic model/layer components, weights, replay stages, MTP, DFlash2
-  sampling       top-k/top-p, DFlash2 selection, and sparse rejection replay owners
+  sampling       Metal sampling capacities/dtypes, distributions, and replay owners
 
 crates/inference-backend-metal/src/
   metal          reusable Metal device/buffer/kernel/stream/replay runtime
@@ -353,8 +365,9 @@ Each model role owns only the plan needed to convert its configuration to reusab
 The layer owns stage ordering and scratch handoff. The component owns reusable math, backend dispatch, and
 component-local state interpretation.
 
-Backend-neutral core types name component geometry and runtime replay shapes. Metal `ReplayLayer` names the typed
-record input and output and the record operation.
+Backend-neutral core types name component geometry and model semantics.
+Metal components own replay shapes and GPU storage layouts.
+Metal `ReplayLayer` names the typed record input, output, and record operation.
 
 `ReplayLayer` is intentionally lightweight. Page tables, routing keys, state transactions, and other component metadata
 remain explicit typed input. An artificial tensor-to-tensor API does not hide this metadata.
@@ -399,7 +412,7 @@ Executor code lowers semantic components into backend recordable operations:
 
 ```text
 ReplayLayer::record(typed input)
-  -> Recorder<ReplayOp>
+  -> backend ReplayRecorder (fusion + recording)
   -> backend Operator::record
   -> pipeline + buffer/constant bindings + dispatch
   -> ReplayProgram
@@ -409,8 +422,10 @@ ReplayLayer::record(typed input)
 The executor owns semantic stage order and the buffers exchanged between stages. Backend operators own kernel binding,
 resource usage, dispatch, and internal phase barriers.
 
-`def::replay_op::ReplayOp` re-exports the backend operation type.
-The executor `ReplayRecorder` and `MetalReplaySubmission` adapt the executor-core recorder and submission traits.
+Metal layers use `inference_backend_metal::components::{ReplayOp, ReplayRecorder}` directly.
+`Replay<T>::record` takes the concrete `Stream` that owns the replay.
+[`MetalReplaySubmission`](../crates/inference-executor-metal/src/def/submission.rs) adapts backend completion to the shared
+`ExecutionSubmission` contract. The adapter owns the submission until completion; it does not add a recording API.
 
 The backend [`README`](../crates/inference-backend-metal/README.md) contains these details:
 

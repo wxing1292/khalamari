@@ -1,8 +1,4 @@
 impl Qwen3Executor {
-    fn replay_runtime(&self) -> MetalReplayRuntime<'_> {
-        MetalReplayRuntime::new(self.runtime.stream())
-    }
-
     fn submit_main_recording(&self, recorder: &Qwen3ModelOpsRecorder) -> MetalReplaySubmission {
         let main_text_embed_replay = self.main_text_embed.replay(&recorder.main_text_embed_key);
         let main_replay = self.main.replay(&recorder.main_key);
@@ -20,7 +16,7 @@ impl Qwen3Executor {
             ));
         }
         sequence.push(ReplayExecution::new(main_replay, &recorder.main_arguments));
-        let runtime = self.replay_runtime();
+        let runtime = self.runtime.stream();
         let mut timestamp_stage_ends = runtime.gpu_timestamps_enabled().then(|| Vec::with_capacity(1));
         if let Some(gather_unembed_key) = &recorder.gather_unembed_key {
             assert!(
@@ -57,9 +53,9 @@ impl Qwen3Executor {
             }
         }
         if let Some(stage_ends) = timestamp_stage_ends {
-            runtime.submit_replay_sequence_with_gpu_timestamps(&sequence, &stage_ends)
+            runtime.submit_replay_sequence_with_gpu_timestamps(&sequence, &stage_ends).into()
         } else {
-            runtime.submit_replay_sequence(&sequence)
+            runtime.submit_replay_sequence(&sequence).into()
         }
     }
 }

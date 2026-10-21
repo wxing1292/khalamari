@@ -32,7 +32,6 @@ use inference_executor_core::sampling::HFGenerationConfig;
 use inference_executor_core::sampling::MAX_TOP_K;
 use inference_executor_core::sampling::RequestSamplingState;
 use inference_executor_core::sampling::SamplerConfig;
-use inference_executor_core::sampling::TopKSamplingBounds;
 use inference_runtime_core::compute::BatchDevReq;
 use inference_runtime_core::compute::BatchDeviceRequest;
 use inference_runtime_core::compute::BatchDeviceResponse;
@@ -45,8 +44,7 @@ use inference_runtime_core::runtime::Token;
 use crate::attn::gdn::backend::GDN;
 use crate::attn::gdn::state_table::GDNStateCapacity;
 use crate::checkpoint::SafeTensorStore;
-use crate::def::replay_op::MetalReplayRuntime;
-use crate::def::replay_op::MetalReplaySubmission;
+use crate::def::submission::MetalReplaySubmission;
 use crate::model::embedding::Embed;
 use crate::model::embedding::EmbedConfig;
 use crate::model::page_arena::PageArena;
@@ -82,6 +80,7 @@ use crate::sampling::top_k_replay::SamplingInput;
 use crate::sampling::top_k_replay::TopKSamplingReplayKey;
 use crate::sampling::top_k_sampling::TopKSampling;
 use crate::sampling::top_k_sampling::TopKSamplingOutputBuffers;
+use crate::sampling::top_k_sampling::config::TopKSamplingBounds;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Qwen4xExecutorConfig {
@@ -136,6 +135,56 @@ pub fn init_qwen4x_model(
     let model = init_qwen4x_model_config(&model_dir)?;
     Qwen4xExecutor::new(model_dir, model, config)
 }
+
+fn validate_metal_model_config(model: &Qwen4xModelConfig) -> Result<(), ModelExecutorError> {
+    let text = &model.text_config;
+    let dimensions = [
+        text.hidden_size,
+        text.num_hidden_layers,
+        text.num_attention_heads,
+        text.num_key_value_heads,
+        text.head_dim,
+        text.linear_num_value_heads,
+        text.linear_num_key_heads,
+        text.linear_key_head_dim,
+        text.linear_value_head_dim,
+        text.linear_conv_kernel_dim,
+        text.num_experts,
+        text.num_experts_per_tok,
+        text.moe_intermediate_size,
+        text.vocab_size,
+        text.max_position_embeddings,
+        text.hc_count,
+        text.hc_lowrank,
+        text.indexer_n_heads,
+        text.indexer_head_dim,
+        text.indexer_budget,
+    ];
+    if dimensions.iter().any(|&v| i32::try_from(v).is_err())
+        || text.num_experts > 512
+        || u32::try_from(text.hc_count * text.hidden_size).is_err()
+    {
+        return Err(ModelExecutorError::custom(
+            "Qwen4x Metal dimensions exceed their supported shader domains",
+        ));
+    }
+    if (
+        text.num_attention_heads,
+        text.num_key_value_heads,
+        text.head_dim,
+        text.indexer_n_heads,
+        text.indexer_head_dim,
+        text.indexer_budget,
+        text.indexer_compress_ratio,
+    ) != (24, 2, 256, 4, 128, 2048, 4)
+    {
+        return Err(ModelExecutorError::custom(
+            "Qwen4x Metal requires QSA 24/2/256 and indexer 4/1/128, budget 2048, ratio 4",
+        ));
+    }
+    Ok(())
+}
+
 impl Qwen4xExecutor {
     pub fn new(
         model_dir: impl AsRef<Path>,
@@ -144,6 +193,7 @@ impl Qwen4xExecutor {
     ) -> Result<Self, ModelExecutorError> {
         config.validate();
         model.normalize()?;
+        validate_metal_model_config(&model)?;
         let model_dir = model_dir.as_ref();
         let text = &model.text_config;
         let generation = HFGenerationConfig::load(model_dir)?;
@@ -426,10 +476,10 @@ impl ReplayableDecoderModel for Qwen4xExecutor {
         self.sampler.set_params(micro.req_slots(), micro.sampler_configs());
         self.token_ids.write_typed(0, micro.flat_token_ids());
         let num_total_tokens = self.main.component().capacity(micro.total_tokens() as u32);
-        let runtime = MetalReplayRuntime::new(self.runtime.stream());
+        let runtime = self.runtime.stream();
         self.state.prepare(
             self.runtime.device(),
-            &runtime,
+            runtime,
             self.pages.buffer(),
             request,
             micro,
@@ -460,7 +510,7 @@ impl ReplayableDecoderModel for Qwen4xExecutor {
             &prepared,
             num_total_tokens,
         );
-        self.gdn.restore(&runtime, self.pages.buffer());
+        self.gdn.restore(runtime, self.pages.buffer());
         batch
     }
     fn commit_batch(&mut self, request: BatchDeviceRequest, output: Self::SampledOutput) -> BatchDeviceResponse {
@@ -468,7 +518,7 @@ impl ReplayableDecoderModel for Qwen4xExecutor {
         let versions = self.transactions.commit(request.seq, &output.decisions);
         self.state.commit(
             self.runtime.device(),
-            &MetalReplayRuntime::new(self.runtime.stream()),
+            self.runtime.stream(),
             self.pages.buffer(),
             self.main.component(),
             &batch,
@@ -506,7 +556,7 @@ impl ReplayableDecoderModel for Qwen4xExecutor {
         batch: &Self::ModelBatchRequest,
     ) -> Self::ModelBatchHidden {
         let (key, _) = self.embed.record(
-            &MetalReplayRuntime::new(self.runtime.stream()),
+            self.runtime.stream(),
             &Qwen35MainTextEmbedArgs {
                 num_tokens: batch.microbatch().total_tokens() as u32,
                 token_ids: &self.token_ids,
@@ -530,9 +580,7 @@ impl ReplayableDecoderModel for Qwen4xExecutor {
             state: &self.state,
             gdn: &self.gdn,
         };
-        let (key, _) = self
-            .main
-            .record(&MetalReplayRuntime::new(self.runtime.stream()), &input);
+        let (key, _) = self.main.record(self.runtime.stream(), &input);
         debug_assert_eq!(key, recorder.main_key);
         self.transactions.push(batch.compute_seq(), batch.microbatch().clone());
         Rc::clone(&self.hidden_output)
@@ -552,7 +600,7 @@ impl ReplayableDecoderModel for Qwen4xExecutor {
         let count = indices.len() as u32;
         let (_, arguments) = self.output.component().prepare_replay(count);
         let (key, _) = self.output.record(
-            &MetalReplayRuntime::new(self.runtime.stream()),
+            self.runtime.stream(),
             &Qwen35GatherUnembedArgs {
                 num_rows: count,
                 hidden_input: &self.hidden_output,
@@ -571,7 +619,7 @@ impl ReplayableDecoderModel for Qwen4xExecutor {
         let configs = sample_sampler_configs(micro);
         let shape = self.sampling.component().prepare_shape(&configs);
         let (key, _) = self.sampling.record(
-            &MetalReplayRuntime::new(self.runtime.stream()),
+            self.runtime.stream(),
             &SamplingInput {
                 shape,
                 logits: &self.logits,
@@ -595,7 +643,7 @@ impl ReplayableDecoderModel for Qwen4xExecutor {
         if let Some((key, args)) = &r.sampling {
             sequence.push(ReplayExecution::new(self.sampling.replay(key), args));
         }
-        MetalReplayRuntime::new(self.runtime.stream()).submit_replay_sequence(&sequence)
+        self.runtime.stream().submit_replay_sequence(&sequence).into()
     }
     fn read_main(
         &mut self,

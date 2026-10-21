@@ -1,17 +1,17 @@
+use inference_backend_metal::components::ReplayOp;
+use inference_backend_metal::components::ReplayRecorder;
 use inference_backend_metal::components::dynamic_grouped_conv;
 use inference_backend_metal::metal::Buffer;
 use inference_backend_metal::metal::Device;
 use inference_backend_metal::metal::Dtype;
 use inference_backend_metal::metal::ReplayU32;
 use inference_backend_metal::operators::affine_quantized;
-use inference_executor_core::backend::recorder::Recorder;
 use inference_executor_core::checkpoint::remove_tensor;
 use inference_executor_core::def::ModelExecutorError;
 use inference_executor_core::model::qwen::v3_x::dflash2::Qwen3xDFlash2Config;
 use inference_executor_core::model::qwen::v3_x::dflash2::Qwen3xDFlash2ConvWeightBindings;
 
 use crate::checkpoint::SafeTensorStore;
-use crate::def::replay_op::ReplayOp;
 use crate::model::qwen::v3_x::weight::affine_parameter_safetensors_dtype;
 use crate::model::qwen::v3_x::weight::remove_quant_weight;
 use crate::model::qwen::v3_x::weight::to_u32;
@@ -170,17 +170,15 @@ impl Qwen3xDFlash2Conv {
         self.weights.take();
     }
 
-    pub fn record_prepare<'a, R>(
+    pub fn record_prepare<'a>(
         &'a self,
-        recorder: &mut R,
+        recorder: &mut ReplayRecorder,
         num_total_tokens: u32,
         num_active_tokens: ReplayU32,
         num_active_query_blocks: ReplayU32,
         hidden: &'a Buffer,
         output: &'a Buffer,
-    ) where
-        R: Recorder<'a, Operator = ReplayOp<'a>>,
-    {
+    ) {
         let (shape, weights) = self.shape_and_weights(num_total_tokens);
         recorder.record_with_barrier_before(ReplayOp::opaque(self.projection.invoke(
             num_total_tokens,
@@ -209,16 +207,14 @@ impl Qwen3xDFlash2Conv {
         )));
     }
 
-    pub fn record_finish<'a, R>(
+    pub fn record_finish<'a>(
         &'a self,
-        recorder: &mut R,
+        recorder: &mut ReplayRecorder,
         num_total_tokens: u32,
         num_active_query_blocks: ReplayU32,
         hidden: &'a Buffer,
         output: &'a Buffer,
-    ) where
-        R: Recorder<'a, Operator = ReplayOp<'a>>,
-    {
+    ) {
         let (shape, weights) = self.shape_and_weights(num_total_tokens);
         recorder.record_with_barrier_before(ReplayOp::opaque(self.conv.invoke(
             shape,

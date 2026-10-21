@@ -1,12 +1,11 @@
 use std::fmt::Debug;
 use std::hash::Hash;
 
+use inference_backend_metal::components::ReplayRecorder;
 use inference_backend_metal::metal::ReplayProgram;
+use inference_backend_metal::metal::Stream;
 use quick_cache::OptionsBuilder;
 use quick_cache::unsync::Cache;
-
-use crate::def::replay_op::MetalReplayRuntime;
-use crate::def::replay_op::ReplayRecorder;
 
 const REPLAY_CACHE_CAPACITY: usize = 128;
 
@@ -56,11 +55,11 @@ impl<T: ReplayComponent> Replay<T> {
 
     /// Records or reuses a program. The returned key remains available until
     /// the next `record` or `clear` call on this owner.
-    pub fn record<'a>(&'a mut self, runtime: &MetalReplayRuntime<'_>, input: &T::Input<'a>) -> (T::Key, bool) {
+    pub fn record<'a>(&'a mut self, runtime: &Stream, input: &T::Input<'a>) -> (T::Key, bool) {
         let key = self.component.replay_key(input);
         let cache_hit = self.cache.get(&key).is_some();
         if !cache_hit {
-            let mut recorder = runtime.create_recorder();
+            let mut recorder = ReplayRecorder::new(runtime.create_replay_program());
             self.component.record(&mut recorder, input);
             self.cache.insert(key.clone(), recorder.build());
         }
@@ -78,17 +77,15 @@ impl<T: ReplayComponent> Replay<T> {
 mod tests {
     use std::cell::Cell;
 
+    use inference_backend_metal::components::ReplayOp;
+    use inference_backend_metal::components::ReplayRecorder;
     use inference_backend_metal::metal::Buffer;
     use inference_backend_metal::metal::Device;
     use inference_backend_metal::metal::Stream;
     use inference_backend_metal::operators::bf16_concat_rows;
-    use inference_executor_core::backend::recorder::Recorder;
 
     use super::Replay;
     use super::ReplayComponent;
-    use crate::def::replay_op::MetalReplayRuntime;
-    use crate::def::replay_op::ReplayOp;
-    use crate::def::replay_op::ReplayRecorder;
 
     const NUM_ACTIVE_ROWS: inference_backend_metal::metal::ReplayParameterKey =
         inference_backend_metal::metal::ReplayParameterKey::new("test.replay.num_active_rows");
@@ -97,20 +94,20 @@ mod tests {
     fn test_record_is_idempotent_and_replay_is_strict() {
         let device = Device::system_default();
         let stream = Stream::new(&device);
-        let runtime = MetalReplayRuntime::new(&stream);
+        let runtime = &stream;
         let mut replay = Replay::new("test", component(&device));
 
-        let (key, cache_hit) = replay.record(&runtime, &7);
+        let (key, cache_hit) = replay.record(runtime, &7);
         assert!(!cache_hit);
         assert_eq!(replay.component().records.get(), 1);
-        assert_eq!(replay.record(&runtime, &7), (key, true));
+        assert_eq!(replay.record(runtime, &7), (key, true));
         assert_eq!(replay.component().records.get(), 1);
         let _ = replay.replay(&key);
 
         replay.clear();
         replay.cache.set_capacity(3);
         for key in 0..4 {
-            assert_eq!(replay.record(&runtime, &key), (key, false));
+            assert_eq!(replay.record(runtime, &key), (key, false));
             let _ = replay.replay(&key);
         }
         assert_eq!(replay.cache.len(), 3);
@@ -119,17 +116,17 @@ mod tests {
         // Warm resident entries before revisiting an evicted key. The rebuilt program
         // must remain available even when the older programs have higher counts.
         for key in resident_keys {
-            assert_eq!(replay.record(&runtime, &key), (key, true));
-            assert_eq!(replay.record(&runtime, &key), (key, true));
+            assert_eq!(replay.record(runtime, &key), (key, true));
+            assert_eq!(replay.record(runtime, &key), (key, true));
         }
-        assert_eq!(replay.record(&runtime, &evicted_key), (evicted_key, false));
+        assert_eq!(replay.record(runtime, &evicted_key), (evicted_key, false));
         let _ = replay.replay(&evicted_key);
         assert_eq!(replay.cache.len(), 3);
         assert_eq!(replay.component().records.get(), 6);
 
         replay.clear();
         assert!(replay.cache.is_empty());
-        assert_eq!(replay.record(&runtime, &evicted_key), (evicted_key, false));
+        assert_eq!(replay.record(runtime, &evicted_key), (evicted_key, false));
         assert_eq!(replay.component().records.get(), 7);
     }
 

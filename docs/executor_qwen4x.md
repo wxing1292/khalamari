@@ -55,9 +55,11 @@ The residual-dependent PLE gate and convolution run at the configured layer.
 
 | Boundary | Contract |
 | --- | --- |
-| `Qwen4xModelConfig::normalize` | Validate supported architecture once |
-| Main QSA | 24 Q heads, two KV heads, head dimension 256 |
-| Indexer | Four Q heads, one K head, head dimension 128 |
+| `Qwen4xModelConfig::normalize` | Validate model relationships and shared CPU reference integer domains |
+| `Qwen4xExecutor::new` | Validate Metal geometry and shader integer domains before weight I/O or GPU allocation |
+| Metal Main QSA | 24 Q heads, two KV heads, head dimension 256 |
+| Metal indexer | Four Q heads, one K head, head dimension 128, budget 2048, compression ratio four |
+| Metal MoE | At most 512 experts |
 | Rotary geometry | Both use 64 dimensions, default partial factor `0.25`, indexer uses main rotary width |
 | Binding resolver | One complete prefix, reject mixed/incomplete trees |
 | Loader | Validate dtype/shape/affine layout before recording |
@@ -68,6 +70,22 @@ The residual-dependent PLE gate and convolution run at the configured layer.
 
 The complete table must fit memory.
 The n-gram backend selects H1/H4/general lookup without allocating a second complete table.
+
+Executor core does not impose Metal's fixed head geometry or expert limit.
+The PLE CPU reference uses `u32` dimensions, residual width, and convolution history length.
+Core validation retains these shared limits when PLE is enabled.
+
+```text
+checkpoint Q/KV heads = 12/2, head dimension = 256
+    -> core: positive dimensions, integral head ratio, valid rotary width
+    -> Metal executor: reject unsupported QSA geometry
+       weights unopened; GPU resources unallocated
+
+checkpoint Q/KV heads = 24/2, head dimension = 256
+    -> same core semantic checks
+    -> Metal executor: validate fixed geometry and shader domains
+    -> existing binding resolver -> weight loading -> GPU execution
+```
 
 ## Pages and state
 

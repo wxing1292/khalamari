@@ -43,6 +43,8 @@
 
 use std::rc::Rc;
 
+use inference_backend_metal::components::ReplayOp;
+use inference_backend_metal::components::ReplayRecorder;
 use inference_backend_metal::components::check_finite;
 use inference_backend_metal::metal::Buffer;
 use inference_backend_metal::metal::Device;
@@ -50,8 +52,6 @@ use inference_backend_metal::metal::Dtype;
 use inference_backend_metal::metal::ReplayArguments;
 use inference_backend_metal::metal::ReplayParameterKey;
 use inference_backend_metal::metal::ReplayU32;
-use inference_executor_core::attn::GQAReplayShape;
-use inference_executor_core::backend::recorder::Recorder;
 use inference_executor_core::def::ModelExecutorError;
 use inference_executor_core::model::qwen::v3_5::Qwen35Microbatch;
 use inference_executor_core::model::qwen::v3_5::Qwen35ModelConfig;
@@ -61,10 +61,9 @@ use inference_runtime_core::compute::BatchDeviceRequest;
 
 use crate::attn::gqa::backend::GQAReplayTopology;
 use crate::attn::gqa::backend::add_gqa_private_replay_arguments;
+use crate::attn::gqa::batch_metadata::GQAReplayShape;
 use crate::attn::gqa::request_page_table::GQARequestPageTable;
 use crate::checkpoint::SafeTensorStore;
-use crate::def::replay_op::ReplayOp;
-use crate::def::replay_op::ReplayRecorder;
 use crate::mlp::dense::scratch::DenseMLPScratch;
 use crate::mlp::moe::scratch::MoEScratch;
 use crate::model::qwen::v3_5::Qwen35GQAReplayKey;
@@ -300,16 +299,13 @@ impl Qwen35MTP {
 }
 
 impl Qwen35MTP {
-    pub fn record<'a, R>(
+    pub fn record<'a>(
         &'a self,
-        recorder: &mut R,
+        recorder: &mut ReplayRecorder,
         num_total_tokens: u32,
         num_active_tokens: ReplayU32,
         args: Qwen35MTPArgs<'a>,
-    ) -> &'a Buffer
-    where
-        R: Recorder<'a, Operator = ReplayOp<'a>>,
-    {
+    ) -> &'a Buffer {
         match num_active_tokens {
             ReplayU32::Fixed(value) => {
                 assert_eq!(value, args.num_tokens);
@@ -450,7 +446,6 @@ mod tests {
     use std::rc::Rc;
 
     use inference_backend_metal::metal::Device;
-    use inference_executor_core::attn::GQAPageTableLayout;
     use inference_executor_core::model::qwen::v3_5::Qwen35TextConfig;
     use inference_runtime_core::compute::BatchDeviceRequest;
     use inference_runtime_core::compute::DecoderSyncBlocks;
@@ -460,6 +455,7 @@ mod tests {
     use inference_runtime_core::runtime::Token;
 
     use super::*;
+    use crate::attn::gqa::request_page_table::GQAPageTableLayout;
     use crate::model::qwen::v3_5::component_config::derive_qwen35_dense_mlp_configs;
     use crate::model::qwen::v3_5::component_config::derive_qwen35_gqa_configs;
 

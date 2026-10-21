@@ -10,7 +10,7 @@ This document describes the current GDN forward, state commit, and cache-page li
 | CPU correctness references | `crates/inference-executor-core/src/attn/gdn/reference.rs` |
 | Qwen request packing and sampling metadata | `crates/inference-executor-core/src/model/qwen/v3_5/batch.rs` |
 | GDN projections and mixed forward | `crates/inference-executor-metal/src/attn/gdn/backend.rs` |
-| Batch metadata and shared layer scratch | `crates/inference-executor-metal/src/attn/gdn/{batch_metadata,scratch}.rs` |
+| Metal replay shape, batch metadata, and shared layer scratch | `crates/inference-executor-metal/src/attn/gdn/{batch_metadata,scratch}.rs` |
 | Materialized state slots and pending cache pages | `crates/inference-executor-metal/src/attn/gdn/request_slots.rs` |
 | State/log resources, preparation, commit, restore, and publish | `crates/inference-executor-metal/src/attn/gdn/state_table.rs` |
 | Full and selected snapshot I/O | `crates/inference-executor-metal/src/attn/gdn/state_table/file_io.rs` |

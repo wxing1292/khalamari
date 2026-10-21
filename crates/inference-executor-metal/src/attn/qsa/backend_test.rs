@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 
 use half::bf16;
+use inference_backend_metal::components::ReplayRecorder;
 use inference_backend_metal::components::gqa::fp8::bf16_to_f32;
 use inference_backend_metal::components::gqa::fp8::bf16_to_fp8_e4m3;
 use inference_backend_metal::components::gqa::fp8::f32_to_bf16;
@@ -15,7 +16,6 @@ use inference_backend_metal::metal::ReplayArguments;
 use inference_backend_metal::metal::ReplayU32;
 use inference_backend_metal::metal::Stream;
 use inference_executor_core::attn::GQACore;
-use inference_executor_core::attn::GQAPageTableLayout;
 use inference_executor_core::attn::qsa_indexer::core::QSAIndexerCore;
 use inference_executor_core::attn::qsa_indexer::reference as indexer_reference;
 use inference_executor_core::attn::qsa_indexer::reference::Input as IndexerReferenceInput;
@@ -30,6 +30,7 @@ use super::QSAMetalConfig;
 use super::QSAReplay;
 use super::QSAReplayTopology;
 use super::QSAWeights;
+use crate::attn::gqa::request_page_table::GQAPageTableLayout;
 use crate::attn::qsa::batch_metadata::QSASDPAMetadataBuffers;
 use crate::attn::qsa::sdpa::QSASDPAConfig;
 use crate::attn::qsa::sdpa::QSASDPAShape;
@@ -37,8 +38,6 @@ use crate::attn::qsa_indexer::backend::QSAIndexerCacheBindings;
 use crate::attn::qsa_indexer::batch_metadata::QSAIndexerMetadataBuffers;
 use crate::attn::qsa_indexer::batch_metadata::QSAIndexerRequest;
 use crate::def::layer::ReplayLayer;
-use crate::def::replay_op::MetalReplayRuntime;
-use crate::def::replay_op::ReplayRecorder;
 use crate::replay::Replay;
 use crate::replay::ReplayComponent;
 
@@ -66,7 +65,7 @@ const ROPE_THETA: f32 = 10_000_000.0;
 fn test_replay_bucketing() {
     let device = Device::system_default();
     let stream = Stream::new(&device);
-    let runtime = MetalReplayRuntime::new(&stream);
+    let runtime = &stream;
     let main_core = fixture_main_core();
     let main_config = fixture_main_config();
     let indexer_core = fixture_indexer_core();
@@ -227,7 +226,7 @@ fn test_replay_bucketing() {
                 main_history_v: &cache.main_history_v,
                 indexer_raw_history: &cache.indexer_raw_history,
             });
-            let (key, hit) = replay.record(&runtime, &input);
+            let (key, hit) = replay.record(runtime, &input);
             assert_eq!(hit, !recorded_keys.insert(key));
 
             let before_states = cache

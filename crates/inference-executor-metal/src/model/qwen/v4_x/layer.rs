@@ -259,9 +259,9 @@ impl Qwen4xMain {
         input.gdn.add_private_replay_arguments(&mut args);
         args
     }
-    fn read<'a, R: Recorder<'a, Operator = ReplayOp<'a>>>(
+    fn read<'a>(
         &'a self,
-        recorder: &mut R,
+        recorder: &mut ReplayRecorder,
         weights: &'a GRWeights,
         num_total_tokens: u32,
         num_active_tokens: ReplayU32,
@@ -285,9 +285,9 @@ impl Qwen4xMain {
             },
         );
     }
-    fn write<'a, R: Recorder<'a, Operator = ReplayOp<'a>>>(
-        &'a self,
-        recorder: &mut R,
+    fn write(
+        &self,
+        recorder: &mut ReplayRecorder,
         num_total_tokens: u32,
         num_active_tokens: ReplayU32,
     ) {

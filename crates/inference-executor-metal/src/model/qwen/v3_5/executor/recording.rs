@@ -1,13 +1,4 @@
 impl Qwen35Executor {
-    fn replay_runtime(&self) -> MetalReplayRuntime<'_> {
-        MetalReplayRuntime::new(self.runtime.stream())
-    }
-
-    fn create_recorder(&self) -> ReplayRecorder {
-        let runtime = self.replay_runtime();
-        Runtime::create_recorder(&runtime)
-    }
-
     fn submit_replay(&self, replay: &ReplayProgram) {
         self.runtime.submit_replay(replay).wait();
     }
@@ -34,7 +25,7 @@ impl Qwen35Executor {
             ));
         }
         sequence.push(ReplayExecution::new(main_replay, &recorder.main_arguments));
-        let runtime = self.replay_runtime();
+        let runtime = self.runtime.stream();
         let mut timestamp_stage_ends = runtime.gpu_timestamps_enabled().then(|| Vec::with_capacity(5));
         if let Some(gather_unembed_key) = &recorder.main_gather_unembed_key {
             assert!(
@@ -114,12 +105,12 @@ impl Qwen35Executor {
             runtime.submit_replay_sequence(&sequence)
         };
         trace::qwen35_state(|| format!("event=submit_main_sequence_submitted main_key={:?}", recorder.main_key));
-        submission
+        submission.into()
     }
     fn submit_gdn_state_restore(&mut self) -> Duration {
-        let runtime = MetalReplayRuntime::new(self.runtime.stream());
+        let runtime = self.runtime.stream();
         let start = Instant::now();
-        self.main_gdn_state.restore(&runtime, self.pages.buffer());
+        self.main_gdn_state.restore(runtime, self.pages.buffer());
         let elapsed = start.elapsed();
         trace::qwen35_state(|| format!("event=gdn_restore elapsed_us={}", elapsed.as_micros()));
         elapsed

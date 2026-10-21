@@ -1,9 +1,6 @@
-use inference_runtime_core::config::MAX_SAMPLING_TOP_K;
-
-use crate::def::ModelExecutorError;
-use crate::sampling::SamplerConfig;
-
-pub const MAX_TOP_K: usize = MAX_SAMPLING_TOP_K;
+use inference_executor_core::def::ModelExecutorError;
+use inference_executor_core::sampling::MAX_TOP_K;
+use inference_executor_core::sampling::SamplerConfig;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct TopKSamplingShape {
@@ -139,8 +136,9 @@ fn top_k_sampling_len(config: &SamplerConfig, vocab_size: usize) -> Result<usize
 
 #[cfg(test)]
 mod tests {
+    use inference_executor_core::sampling::SamplerConfig;
+
     use super::TopKSamplingBounds;
-    use crate::sampling::SamplerConfig;
 
     #[test]
     fn test_top_k_sampling_bounds_uses_full_topk_contract() {

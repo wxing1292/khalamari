@@ -1,10 +1,9 @@
+use inference_backend_metal::components::ReplayOp;
+use inference_backend_metal::components::ReplayRecorder;
 use inference_backend_metal::components::residual_add;
 use inference_backend_metal::metal::Buffer;
 use inference_backend_metal::metal::Device;
 use inference_backend_metal::metal::ReplayU32;
-use inference_executor_core::backend::recorder::Recorder;
-
-use crate::def::replay_op::ReplayOp;
 
 pub struct ResidualAdd {
     compute: residual_add::Compute,
@@ -18,18 +17,16 @@ impl ResidualAdd {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn record<'a, R>(
+    pub fn record<'a>(
         &'a self,
-        recorder: &mut R,
+        recorder: &mut ReplayRecorder,
         num_total_rows: u32,
         num_columns: u32,
         num_active_rows: ReplayU32,
         lhs: &'a Buffer,
         rhs: &'a Buffer,
         residual_output: &'a Buffer,
-    ) where
-        R: Recorder<'a, Operator = ReplayOp<'a>>,
-    {
+    ) {
         let shape = residual_add::RowShape {
             num_total_rows,
             num_columns,
@@ -44,9 +41,9 @@ impl ResidualAdd {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn record_with_capture<'a, R>(
+    pub fn record_with_capture<'a>(
         &'a self,
-        recorder: &mut R,
+        recorder: &mut ReplayRecorder,
         num_total_rows: u32,
         num_columns: u32,
         num_active_rows: ReplayU32,
@@ -54,9 +51,7 @@ impl ResidualAdd {
         rhs: &'a Buffer,
         residual_output: &'a Buffer,
         capture: residual_add::CaptureTarget<'a>,
-    ) where
-        R: Recorder<'a, Operator = ReplayOp<'a>>,
-    {
+    ) {
         let shape = residual_add::RowShape {
             num_total_rows,
             num_columns,

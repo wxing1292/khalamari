@@ -1,11 +1,11 @@
 use std::rc::Rc;
 
+use inference_backend_metal::components::ReplayRecorder;
 use inference_backend_metal::metal::Buffer;
 use inference_backend_metal::metal::Device;
 use inference_backend_metal::metal::Dtype;
 use inference_backend_metal::metal::ReplayU32;
 use inference_executor_core::attn::GDNCore;
-use inference_executor_core::backend::recorder::Recorder;
 use inference_executor_core::checkpoint::TensorMap;
 use inference_executor_core::checkpoint::remove_tensor;
 use inference_executor_core::def::ModelExecutorError;
@@ -21,7 +21,6 @@ use crate::attn::gdn::scratch::GDNScratch;
 use crate::attn::gdn::state_table::GDNRequestStateResources;
 use crate::checkpoint::SafeTensorStore;
 use crate::def::layer::ReplayLayer;
-use crate::def::replay_op::ReplayOp;
 use crate::model::qwen::v3_x::state::Qwen3xGDNState;
 use crate::model::qwen::v3_x::weight::affine_config;
 use crate::model::qwen::v3_x::weight::concat_bytes;
@@ -102,16 +101,14 @@ impl Qwen3xGDN {
             .expect("Qwen3.x GDN weights must be loaded before execution")
     }
 
-    pub fn record<'a, R>(
+    pub fn record<'a>(
         &'a self,
-        recorder: &mut R,
+        recorder: &mut ReplayRecorder,
         input: &'a Buffer,
         output: &'a Buffer,
         metadata: &'a GDNMetadataBuffers,
         num_active_tokens: ReplayU32,
-    ) where
-        R: Recorder<'a, Operator = ReplayOp<'a>>,
-    {
+    ) {
         let state = self.request_state_resources().layer_bindings(self.gdn_layer_index);
         let _ = <GDN as ReplayLayer>::record(
             self.backend(),

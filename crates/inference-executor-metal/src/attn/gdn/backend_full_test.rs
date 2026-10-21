@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 
 use half::bf16;
+use inference_backend_metal::components::ReplayRecorder;
 use inference_backend_metal::metal::Buffer;
 use inference_backend_metal::metal::Device;
 use inference_backend_metal::metal::Dtype;
@@ -28,8 +29,6 @@ use super::add_gdn_replay_arguments;
 use crate::attn::gdn::batch_metadata::GDNMetadataBuffers;
 use crate::attn::gdn::state_table::GDNPreparedRequestState;
 use crate::def::layer::ReplayLayer;
-use crate::def::replay_op::MetalReplayRuntime;
-use crate::def::replay_op::ReplayRecorder;
 use crate::replay::Replay;
 use crate::replay::ReplayComponent;
 
@@ -59,7 +58,7 @@ fn test_sigmoid_gate_replay_matches_cpu_reference_across_independent_active_doma
 fn assert_replay_matches_cpu_reference(output_gate: GDNOutputGate) {
     let device = Device::system_default();
     let stream = Stream::new(&device);
-    let runtime = MetalReplayRuntime::new(&stream);
+    let runtime = &stream;
     let core = GDNCore {
         output_gate,
         ..fixture_core()
@@ -169,7 +168,7 @@ fn assert_replay_matches_cpu_reference(output_gate: GDNOutputGate) {
                 weights: weights.bindings(),
                 num_active_tokens: ReplayU32::Parameter(GDN_NUM_ACTIVE_TOKENS),
             };
-            let (key, cache_hit) = replay.record(&runtime, &input);
+            let (key, cache_hit) = replay.record(runtime, &input);
             let seen = !recorded_keys.insert(key);
             assert_eq!(cache_hit, seen);
 

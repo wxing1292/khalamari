@@ -1,13 +1,11 @@
 use std::rc::Rc;
 
+use inference_backend_metal::components::ReplayRecorder;
 use inference_backend_metal::metal::Buffer;
 use inference_backend_metal::metal::Device;
 use inference_backend_metal::metal::ReplayArguments;
 use inference_backend_metal::metal::ReplayU32;
-use inference_executor_core::attn::GQAPageTableLayout;
-use inference_executor_core::attn::GQAReplayShape;
 use inference_executor_core::attn::UngatedGQACore;
-use inference_executor_core::backend::recorder::Recorder;
 use inference_executor_core::def::ModelExecutorError;
 use inference_executor_core::model::qwen::v3_x::weight_layout::Qwen3xGQAWeightBindings;
 use inference_runtime_core::runtime::RawRequestSlot;
@@ -16,6 +14,8 @@ use crate::attn::gqa::backend::GQAKVCacheBindings;
 use crate::attn::gqa::backend::GQAMetalConfig;
 use crate::attn::gqa::batch_metadata::GQAMetadataBuffers;
 use crate::attn::gqa::batch_metadata::GQAReplayBucketPolicy;
+use crate::attn::gqa::batch_metadata::GQAReplayShape;
+use crate::attn::gqa::request_page_table::GQAPageTableLayout;
 use crate::attn::gqa::request_page_table::GQARequestPageTable;
 use crate::attn::gqa::ungated_backend::UngatedGQA;
 use crate::attn::gqa::ungated_backend::UngatedGQAInput;
@@ -24,7 +24,6 @@ use crate::attn::gqa::ungated_backend::add_ungated_gqa_private_replay_arguments;
 use crate::attn::gqa::ungated_scratch::UngatedGQAScratch;
 use crate::checkpoint::SafeTensorStore;
 use crate::def::layer::ReplayLayer;
-use crate::def::replay_op::ReplayOp;
 use crate::model::qwen::v3_x::layer::Qwen3xUngatedGQAWeightBuffers;
 
 mod file_io;
@@ -109,17 +108,15 @@ impl Qwen3MainGQA {
             .expect("Qwen3 Main GQA weights must be loaded before execution")
     }
 
-    pub fn record<'a, R>(
+    pub fn record<'a>(
         &'a self,
-        recorder: &mut R,
+        recorder: &mut ReplayRecorder,
         input: &'a Buffer,
         output: &'a Buffer,
         pages: &'a Buffer,
         metadata: &'a GQAMetadataBuffers,
         num_active_tokens: ReplayU32,
-    ) where
-        R: Recorder<'a, Operator = ReplayOp<'a>>,
-    {
+    ) {
         let _ = <UngatedGQA as ReplayLayer>::record(
             self.backend(),
             recorder,

@@ -1,6 +1,7 @@
 use std::mem::size_of;
 use std::rc::Rc;
 
+use inference_backend_metal::components::ReplayRecorder;
 use inference_backend_metal::components::gqa::sdpa as backend_sdpa;
 use inference_backend_metal::components::rms_norm_rope::RopeScaling;
 use inference_backend_metal::metal::Buffer;
@@ -8,7 +9,6 @@ use inference_backend_metal::metal::Device;
 use inference_backend_metal::metal::Dtype;
 use inference_executor_core::attn::BiDiBlockGQACore;
 use inference_executor_core::attn::UngatedGQACore;
-use inference_executor_core::backend::recorder::Recorder;
 use inference_executor_core::def::ModelExecutorError;
 use inference_executor_core::model::qwen::v3_x::dflash2::Qwen3xDFlash2Config;
 use inference_executor_core::model::qwen::v3_x::weight_layout::Qwen3xGQAWeightBindings;
@@ -27,7 +27,6 @@ use crate::attn::gqa::request_page_table::GQARequestPageTable;
 use crate::checkpoint::SafeTensorStore;
 use crate::def::layer::ReplayLayer;
 use crate::def::quantized_affine::QuantizedAffineLayout;
-use crate::def::replay_op::ReplayOp;
 use crate::model::qwen::v3_x::layer::Qwen3xBiDiBlockGQAWeightBuffers;
 use crate::model::qwen::v3_x::weight::to_u32;
 
@@ -125,18 +124,16 @@ impl Qwen3xDFlash2Attention {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn record_prefill<'a, R>(
+    pub fn record_prefill<'a>(
         &'a self,
-        recorder: &mut R,
+        recorder: &mut ReplayRecorder,
         num_total_tokens: u32,
         num_active_tokens: inference_backend_metal::metal::ReplayU32,
         main_feature: &'a Buffer,
         req_slots: &'a Buffer,
         flat_token_indices: &'a Buffer,
         pages: &'a Buffer,
-    ) where
-        R: Recorder<'a, Operator = ReplayOp<'a>>,
-    {
+    ) {
         self.kv_cache_writer.record(
             recorder,
             BiDiBlockGQAKVCacheWriteInput {
@@ -157,17 +154,15 @@ impl Qwen3xDFlash2Attention {
         );
     }
 
-    pub fn record_bidi_block<'a, R>(
+    pub fn record_bidi_block<'a>(
         &'a self,
-        recorder: &mut R,
+        recorder: &mut ReplayRecorder,
         num_active_tokens: inference_backend_metal::metal::ReplayU32,
         metadata: &'a BiDiBlockGQAMetadataBuffers,
         hidden_input: &'a Buffer,
         hidden_output: &'a Buffer,
         pages: &'a Buffer,
-    ) where
-        R: Recorder<'a, Operator = ReplayOp<'a>>,
-    {
+    ) {
         let _ = <BiDiBlockGQA as ReplayLayer>::record(
             &self.backend,
             recorder,

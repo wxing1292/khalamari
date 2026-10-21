@@ -30,8 +30,8 @@ impl Qwen35Executor {
             hidden_output: &self.unembed_hidden,
             logits: &self.unembed_logits,
         };
-        let runtime = MetalReplayRuntime::new(self.runtime.stream());
-        let (recorded_key, _) = self.gather_unembed.record(&runtime, &input);
+        let runtime = self.runtime.stream();
+        let (recorded_key, _) = self.gather_unembed.record(runtime, &input);
         debug_assert_eq!(
             recorded_key, gather_unembed_key,
             "qwen3.5 GatherUnembed replay input must match the prepared replay key"

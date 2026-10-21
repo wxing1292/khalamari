@@ -1,11 +1,11 @@
+use inference_backend_metal::components::ReplayOp;
+use inference_backend_metal::components::ReplayRecorder;
 use inference_backend_metal::components::gated_residual;
 use inference_backend_metal::metal::Buffer;
 use inference_backend_metal::metal::Device;
 use inference_backend_metal::metal::ReplayU32;
-use inference_executor_core::backend::recorder::Recorder;
 use inference_executor_core::gated_residual::core::GatedResidualCore;
 
-use crate::def::replay_op::ReplayOp;
 use crate::gated_residual::scratch::GatedResidualScratch;
 
 /// Records independent GR read and write phases into a caller-owned replay.
@@ -92,10 +92,7 @@ impl GatedResidual {
         }
     }
 
-    pub fn read<'a, R>(&'a self, recorder: &mut R, input: ReadInput<'a>) -> &'a Buffer
-    where
-        R: Recorder<'a, Operator = ReplayOp<'a>>,
-    {
+    pub fn read<'a>(&'a self, recorder: &mut ReplayRecorder, input: ReadInput<'a>) -> &'a Buffer {
         let scratch = input.scratch.bindings();
         recorder.record_with_barrier_before(ReplayOp::gated_residual_read(self.compute.read(
             gated_residual::Shape {
@@ -113,10 +110,7 @@ impl GatedResidual {
         input.hidden_state
     }
 
-    pub fn write<'a, R>(&'a self, recorder: &mut R, input: WriteInput<'a>) -> &'a Buffer
-    where
-        R: Recorder<'a, Operator = ReplayOp<'a>>,
-    {
+    pub fn write<'a>(&'a self, recorder: &mut ReplayRecorder, input: WriteInput<'a>) -> &'a Buffer {
         recorder.record_with_barrier_before(ReplayOp::gated_residual_write(self.compute.write(
             gated_residual::Shape {
                 num_total_tokens: input.num_total_tokens,

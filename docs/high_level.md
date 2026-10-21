@@ -168,12 +168,14 @@ Backend operators must not contain model request semantics that a component can 
 | Boundary trait | Contract |
 | --- | --- |
 | `ReplayLayer` | Typed model-executor semantic replay |
-| `Recorder` | Backend recording |
 | `Operator` | Backend-recordable execution |
 
 Recommendation: Use concrete types for clear implementations and traits where boundaries can drift.
-Recommendation: Semantic layers record through `inference-executor-core::backend::recorder::Recorder`.
-The model replay-cache owner lowers records into the Metal recorder when it builds a cached replay.
+Metal semantic layers record directly through `inference_backend_metal::components::ReplayRecorder`.
+The model replay-cache owner creates this recorder from its concrete `Stream`.
+Executor core owns model execution and submission contracts, model geometry, and CPU references.
+Backend executors own recording, replay caches, resource layouts, and capacity choices.
+Device, stream, buffer, and recorder types do not require shared backend traits.
 Do not expose lower-level builders in component inputs or public executor APIs.
 Do not add a wrapper that only repackages arguments.
 

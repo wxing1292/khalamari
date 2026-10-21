@@ -16,8 +16,8 @@ impl Qwen3Executor {
             logits: &self.unembed_logits,
             output: self.sampler_output.as_output(),
         };
-        let runtime = MetalReplayRuntime::new(self.runtime.stream());
-        let (sample_key, _) = self.sampling.record(&runtime, &input);
+        let runtime = self.runtime.stream();
+        let (sample_key, _) = self.sampling.record(runtime, &input);
         self.sampler.prepare(sample_req_slots, sample_positions);
         let mut replay_arguments = ReplayArguments::new();
         self.sampler.add_replay_arguments(sample_shape, &mut replay_arguments);

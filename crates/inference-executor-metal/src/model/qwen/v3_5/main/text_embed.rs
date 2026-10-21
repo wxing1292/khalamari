@@ -1,15 +1,13 @@
 use std::rc::Rc;
 
+use inference_backend_metal::components::ReplayRecorder;
 use inference_backend_metal::metal::Buffer;
 use inference_backend_metal::metal::ReplayArguments;
 use inference_backend_metal::metal::ReplayParameterKey;
 use inference_backend_metal::metal::ReplayU32;
-use inference_executor_core::backend::recorder::Recorder;
 use inference_executor_core::replay::ReplayBucketPolicy;
 
 use crate::def::layer::ReplayLayer;
-use crate::def::replay_op::ReplayOp;
-use crate::def::replay_op::ReplayRecorder;
 use crate::model::embedding::Embed;
 use crate::model::embedding::EmbedInput;
 use crate::replay::ReplayComponent;
@@ -53,16 +51,13 @@ impl Qwen35MainTextEmbed {
             .expect("qwen3.5 Main embed weights must be loaded before execution")
     }
 
-    pub fn record<'a, R>(
+    pub fn record<'a>(
         &'a self,
-        recorder: &mut R,
+        recorder: &mut ReplayRecorder,
         num_total_tokens: u32,
         num_active_tokens: ReplayU32,
         args: Qwen35MainTextEmbedArgs<'a>,
-    ) -> &'a Buffer
-    where
-        R: Recorder<'a, Operator = ReplayOp<'a>>,
-    {
+    ) -> &'a Buffer {
         match num_active_tokens {
             ReplayU32::Fixed(value) => {
                 assert_eq!(value, args.num_tokens);

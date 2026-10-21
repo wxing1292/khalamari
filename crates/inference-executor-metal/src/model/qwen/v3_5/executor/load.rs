@@ -7,9 +7,7 @@ use inference_backend_metal::MetalRuntime;
 use inference_backend_metal::metal::Buffer;
 use inference_backend_metal::metal::Device;
 use inference_backend_metal::metal::Dtype;
-use inference_executor_core::attn::GQAPageTableLayout;
 use inference_executor_core::def::ModelExecutorError;
-use inference_executor_core::model::qwen::v3_5::QWEN35_PAGE_SIZE_BYTES;
 use inference_executor_core::model::qwen::v3_5::Qwen35ModelConfig;
 use inference_executor_core::model::qwen::v3_5::Qwen35PendingTransactions;
 use inference_executor_core::model::qwen::v3_5::init_qwen35_model_config;
@@ -22,11 +20,11 @@ use inference_executor_core::model::qwen::v3_x::dflash2::init_qwen3x_dflash2_con
 use inference_executor_core::sampling::HFGenerationConfig;
 use inference_executor_core::sampling::MAX_TOP_K;
 use inference_executor_core::sampling::RequestSamplingState;
-use inference_executor_core::sampling::TopKSamplingBounds;
 use inference_runtime_core::runtime::Token;
 
 use crate::attn::gdn::backend::GDN;
 use crate::attn::gdn::state_table::GDNStateCapacity;
+use crate::attn::gqa::request_page_table::GQAPageTableLayout;
 use crate::checkpoint::SafeTensorStore;
 use crate::mlp::dense::scratch::DenseMLPScratch;
 use crate::mlp::moe::scratch::MoEScratch;
@@ -34,6 +32,7 @@ use crate::model::embedding::Embed;
 use crate::model::embedding::EmbedConfig;
 use crate::model::main_residual_capture::MainResidualCapture;
 use crate::model::page_arena::PageArena;
+use crate::model::qwen::v3_5::QWEN35_PAGE_SIZE_BYTES;
 use crate::model::qwen::v3_5::component_config::Qwen35MetalDefaults;
 use crate::model::qwen::v3_5::component_config::derive_qwen35_dense_mlp_configs;
 use crate::model::qwen::v3_5::component_config::derive_qwen35_gdn_configs;
@@ -75,6 +74,7 @@ use crate::sampling::top_k_replay::DraftSampling;
 use crate::sampling::top_k_replay::Sampling;
 use crate::sampling::top_k_sampling::TopKSampling;
 use crate::sampling::top_k_sampling::TopKSamplingOutputBuffers;
+use crate::sampling::top_k_sampling::config::TopKSamplingBounds;
 use crate::trace;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

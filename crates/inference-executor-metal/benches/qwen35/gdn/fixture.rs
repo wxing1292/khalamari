@@ -5,6 +5,7 @@ use std::path::Path;
 use std::time::Instant;
 
 use half::bf16;
+use inference_backend_metal::components::ReplayRecorder;
 use inference_backend_metal::components::gdn::compute as backend_compute;
 use inference_backend_metal::metal::Buffer;
 use inference_backend_metal::metal::Device;
@@ -23,7 +24,6 @@ use inference_executor_metal::attn::gdn::backend::GDNWeights;
 use inference_executor_metal::attn::gdn::batch_metadata::GDNMetadataBuffers;
 use inference_executor_metal::attn::gdn::scratch::GDNScratchBindings;
 use inference_executor_metal::def::layer::ReplayLayer;
-use inference_executor_metal::def::replay_op::MetalReplayRuntime;
 use safetensors::SafeTensors;
 
 use crate::Args;
@@ -235,7 +235,7 @@ impl<'a> RealGDNFixture<'a> {
         );
         let replay_u = Buffer::new_zeroed_elements(device, num_tokens as usize * model.v_dim(), Dtype::Float32);
         let replay_qkv = Buffer::new_zeroed_elements(device, num_tokens as usize * model.conv_dim(), Dtype::Bfloat16);
-        let mut recorder = MetalReplayRuntime::new(&stream).create_recorder();
+        let mut recorder = ReplayRecorder::new(stream.create_replay_program());
         let _ = <GDN as ReplayLayer>::record(
             &backend,
             &mut recorder,
@@ -300,7 +300,7 @@ impl<'a> RealGDNFixture<'a> {
     }
 
     fn run(&self) {
-        MetalReplayRuntime::new(&self.stream).submit_replay(&self.replay).wait();
+        self.stream.submit_replay(&self.replay).wait();
     }
 
     fn measure(&self, warmup_iters: usize, iters: usize, runs: usize) {
@@ -614,7 +614,7 @@ impl<'a> RealGDNFixture<'a> {
 
     fn measure_subcomponent(&self, name: &str, replay: &ReplayProgram, warmup_iters: usize, iters: usize, runs: usize) {
         let samples = measure_runs(runs, warmup_iters, iters, || {
-            MetalReplayRuntime::new(&self.stream).submit_replay(replay).wait();
+            self.stream.submit_replay(replay).wait();
         });
         print_named_perf(
             &format!("gdn.{name}"),

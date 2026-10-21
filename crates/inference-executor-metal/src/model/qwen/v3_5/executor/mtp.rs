@@ -386,9 +386,9 @@ impl Qwen35Executor {
             write_routes: &mtp.hidden_state_cache_write_routes,
             hidden_state_cache_output: hidden_state_cache,
         };
-        let runtime = MetalReplayRuntime::new(self.runtime.stream());
+        let runtime = self.runtime.stream();
         let (recorded_transfer_key, mtp_hidden_state_transfer_cache_hit) =
-            mtp.hidden_state_transfers[0].record(&runtime, &hidden_state_transfer_input);
+            mtp.hidden_state_transfers[0].record(runtime, &hidden_state_transfer_input);
         debug_assert_eq!(
             recorded_transfer_key, mtp_hidden_state_transfer_key,
             "qwen3.5 MTP hidden-state transfer replay input must match its key"
@@ -400,7 +400,7 @@ impl Qwen35Executor {
             token_hidden_input: &self.token_hidden_input,
             hidden_output: &mtp_hidden_input,
         };
-        let (recorded_key, mtp_embed_cache_hit) = mtp.embed.record(&runtime, &input);
+        let (recorded_key, mtp_embed_cache_hit) = mtp.embed.record(runtime, &input);
         debug_assert_eq!(
             recorded_key, mtp_embed_key,
             "qwen3.5 MTPEmbed replay input must match its key"
@@ -485,8 +485,8 @@ impl Qwen35Executor {
             gqa_replay_topology: mtp.gqa_state.replay_topology(),
             pages: self.pages.buffer(),
         };
-        let runtime = MetalReplayRuntime::new(self.runtime.stream());
-        let (recorded_key, mtp_cache_hit) = mtp.body.record(&runtime, &input);
+        let runtime = self.runtime.stream();
+        let (recorded_key, mtp_cache_hit) = mtp.body.record(runtime, &input);
         debug_assert_eq!(&recorded_key, mtp_key, "qwen3.5 MTP replay input must match its key");
         if !mtp_cache_hit {
             recorder.mtp_build_elapsed += mtp_build_start.elapsed();
@@ -539,11 +539,11 @@ impl Qwen35Executor {
     }
 
     fn submit_mtp_sequence(&self, executions: &[ReplayExecution<'_>]) -> MetalReplaySubmission {
-        let runtime = self.replay_runtime();
+        let runtime = self.runtime.stream();
         if runtime.gpu_timestamps_enabled() {
-            runtime.submit_replay_sequence_with_gpu_timestamps(executions, &[executions.len()])
+            runtime.submit_replay_sequence_with_gpu_timestamps(executions, &[executions.len()]).into()
         } else {
-            runtime.submit_replay_sequence(executions)
+            runtime.submit_replay_sequence(executions).into()
         }
     }
 
@@ -652,7 +652,7 @@ impl Qwen35Executor {
             .prepare_replay(num_active_tokens);
         let hidden_input = Rc::clone(&self.speculator.mtp().hidden_input);
         let build_start = Instant::now();
-        let runtime = MetalReplayRuntime::new(self.runtime.stream());
+        let runtime = self.runtime.stream();
         let mtp = self.speculator.mtp_mut();
         debug_assert_eq!(
             mtp.execution.pending_hidden_state_cache_write_routes.len() % 2,
@@ -682,7 +682,7 @@ impl Qwen35Executor {
             hidden_state_cache_output: hidden_state_cache,
         };
         let (recorded_hidden_state_transfer_key, hidden_state_transfer_cache_hit) =
-            mtp.hidden_state_transfers[module_index].record(&runtime, &hidden_state_transfer_input);
+            mtp.hidden_state_transfers[module_index].record(runtime, &hidden_state_transfer_input);
         debug_assert_eq!(
             recorded_hidden_state_transfer_key, hidden_state_transfer_key,
             "qwen3.5 MTP hidden-state transfer replay input must match its key"
@@ -694,7 +694,7 @@ impl Qwen35Executor {
             token_hidden_input: &self.token_hidden_input,
             hidden_output: &hidden_input,
         };
-        let (recorded_embed_key, embed_cache_hit) = mtp.embed.record(&runtime, &embed_input);
+        let (recorded_embed_key, embed_cache_hit) = mtp.embed.record(runtime, &embed_input);
         debug_assert_eq!(
             recorded_embed_key, embed_key,
             "qwen3.5 MTPEmbed replay input must match its key"
@@ -707,7 +707,7 @@ impl Qwen35Executor {
             gqa_replay_topology: gqa_topology,
             pages: self.pages.buffer(),
         };
-        let (recorded_body_key, body_cache_hit) = mtp.body.record(&runtime, &body_input);
+        let (recorded_body_key, body_cache_hit) = mtp.body.record(runtime, &body_input);
         debug_assert_eq!(
             recorded_body_key, body_key,
             "qwen3.5 MTP replay input must match its key"

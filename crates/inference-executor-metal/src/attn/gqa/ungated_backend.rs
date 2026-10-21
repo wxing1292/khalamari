@@ -1,3 +1,5 @@
+use inference_backend_metal::components::ReplayOp;
+use inference_backend_metal::components::ReplayRecorder;
 use inference_backend_metal::components::gqa::kv_page_write as backend_kv_page_write;
 use inference_backend_metal::components::gqa::qkv_split as backend_qkv_split;
 use inference_backend_metal::components::gqa::sdpa as backend_sdpa;
@@ -11,22 +13,20 @@ use inference_backend_metal::metal::ReplayArguments;
 use inference_backend_metal::metal::ReplayParameterKey;
 use inference_backend_metal::metal::ReplayU32;
 use inference_backend_metal::operators::affine_quantized;
-use inference_executor_core::attn::GQAPageTableLayout;
-use inference_executor_core::attn::GQAReplayShape;
 use inference_executor_core::attn::UngatedGQACore;
-use inference_executor_core::backend::recorder::Recorder;
 
 use super::gqa_sdpa_config;
 use crate::attn::gqa::backend::GQAKVCacheBindings;
 use crate::attn::gqa::backend::GQAMetalConfig;
 use crate::attn::gqa::batch_metadata::GQAMetadataBuffers;
 use crate::attn::gqa::batch_metadata::GQAReplayBucketPolicy;
+use crate::attn::gqa::batch_metadata::GQAReplayShape;
+use crate::attn::gqa::request_page_table::GQAPageTableLayout;
 use crate::attn::gqa::sdpa::RequestShape;
 use crate::attn::gqa::sdpa::Selector;
 use crate::attn::gqa::ungated_scratch::UngatedGQAScratch;
 use crate::attn::gqa::ungated_scratch::UngatedGQAScratchBindings;
 use crate::def::layer::ReplayLayer;
-use crate::def::replay_op::ReplayOp;
 
 pub const UNGATED_GQA_NUM_ACTIVE_Q_TOKEN_TILES: ReplayParameterKey =
     ReplayParameterKey::new("ungated_gqa.num_active_q_token_tiles");
@@ -274,10 +274,7 @@ impl ReplayLayer for UngatedGQA {
     type Input<'a> = UngatedGQAInput<'a>;
     type Output<'a> = UngatedGQAOutput<'a>;
 
-    fn record<'a, R>(&'a self, recorder: &mut R, input: Self::Input<'a>) -> Self::Output<'a>
-    where
-        R: Recorder<'a, Operator = ReplayOp<'a>>,
-    {
+    fn record<'a>(&'a self, recorder: &mut ReplayRecorder, input: Self::Input<'a>) -> Self::Output<'a> {
         self.validate_input(&input);
         let shape = input.batch_metadata.replay_shape();
         let page_table_layout = input.page_table_layout;
@@ -366,10 +363,7 @@ impl ReplayLayer for UngatedGQA {
 }
 
 impl UngatedGQA {
-    fn record_sdpa<'a, R>(&'a self, recorder: &mut R, input: UngatedGQAInput<'a>) -> &'a Buffer
-    where
-        R: Recorder<'a, Operator = ReplayOp<'a>>,
-    {
+    fn record_sdpa<'a>(&'a self, recorder: &mut ReplayRecorder, input: UngatedGQAInput<'a>) -> &'a Buffer {
         let shape = input.batch_metadata.replay_shape();
         let page_table_layout = input.page_table_layout;
         let gqa_layer_index = input.gqa_layer_index;
@@ -651,13 +645,12 @@ mod tests {
 
     use super::*;
     use crate::attn::gqa::backend::GQA_NUM_ACTIVE_TOKENS;
-    use crate::def::replay_op::MetalReplayRuntime;
 
     #[test]
     fn test_fixed_partitions_and_direct_sdpa_preserve_causal_output_and_active_tokens() {
         let device = Device::system_default();
         let stream = Stream::new(&device);
-        let runtime = MetalReplayRuntime::new(&stream);
+        let runtime = &stream;
         let core = UngatedGQACore::new(0, 32, 128, 6, 1, 128_f32.sqrt().recip());
         let config = GQAMetalConfig {
             group_size: 32,
@@ -743,7 +736,7 @@ mod tests {
                         .select_partitioned(variant, kv_slice, direct_output, &requests, &policy, 8);
                 let shape = metadata.update(&[0], &[0], &[0, num_active_tokens], &selection);
                 attention_output.zero_bytes(0, attention_output.len_bytes());
-                let mut recorder = runtime.create_recorder();
+                let mut recorder = ReplayRecorder::new(runtime.create_replay_program());
                 component.record_sdpa(
                     &mut recorder,
                     UngatedGQAInput {

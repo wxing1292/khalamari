@@ -8,11 +8,14 @@ This document owns the current top-k/top-p sampling and sparse rejection-samplin
 
 | Root under `crates/` | Owners |
 | --- | --- |
-| `inference-executor-core/src/sampling/` | `config.rs`, `domain.rs`, `reference.rs`, `request_state.rs`, `top_k_sampling.rs`, `rejection_sampling.rs` |
+| `inference-executor-core/src/sampling/` | `config.rs`, `domain.rs`, `reference.rs`, `request_state.rs`, `rejection_sampling.rs` (`SpecMicrobatch`) |
 | `inference-backend-metal/src/components/sampling/` | `top_k.rs`, `rejection.rs`, `failure.rs`, `dflash2_selector.rs`, `spec_decode_input.rs` |
 | Backend `components/metal/` | `sampling.metal`, `spec_decode_input.metal`, `dflash2_selector.metal` |
-| `inference-executor-metal/src/sampling/` | `sampling_params.rs`, `top_k_sampling.rs`, `top_k_replay.rs`, `rejection_replay.rs`, `spec_probs.rs` |
+| `inference-executor-metal/src/sampling/` | `sampling_params.rs`, `top_k_sampling.rs`, `top_k_sampling/config.rs`, `top_k_replay.rs`, `rejection_sampling.rs`, `rejection_replay.rs`, `spec_probs.rs` |
 
+Core owns semantic sampler configuration, RNG domains, and CPU references.
+Metal `top_k_sampling/config.rs` owns replay capacity, supported logits dtype, and signed token-buffer bounds.
+Metal `rejection_sampling.rs` owns sparse distribution capacities and packed request parameters.
 Runtime core transports sampler config and decisions.
 The executor owns RNG, sparse distributions, replay geometry, and one root seed per live request slot until reset.
 

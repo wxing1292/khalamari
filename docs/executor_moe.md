@@ -152,7 +152,7 @@ Only their true matrix axes retain `n` and `k`.
 
 ## Replay contract
 
-`GatedMoE` records one MoE MLP forward through `ReplayLayer::record(...)` and a caller-owned `Recorder`.
+`GatedMoE` records one MoE MLP forward through `ReplayLayer::record(...)` and a caller-owned `ReplayRecorder`.
 The boundary includes routing, expert computation, optional shared experts, and combine.
 
 Replay returns `next_hidden_state` directly.

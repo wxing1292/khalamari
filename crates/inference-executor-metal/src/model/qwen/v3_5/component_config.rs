@@ -9,7 +9,6 @@ use inference_executor_core::def::ModelExecutorError;
 use inference_executor_core::mlp::dense::DenseMLPCore;
 use inference_executor_core::mlp::moe::GatedMoECore;
 use inference_executor_core::model::qwen::v3_5::LayerType;
-use inference_executor_core::model::qwen::v3_5::QWEN35_PAGE_SIZE_BYTES;
 use inference_executor_core::model::qwen::v3_5::Qwen35ModelConfig;
 use inference_executor_core::model::qwen::v3_5::Qwen35TextConfig;
 use inference_executor_core::model::qwen::v3_x::QuantizationConfig;
@@ -19,6 +18,7 @@ use crate::attn::gqa::backend::GQAMetalConfig;
 use crate::def::quantized_affine::QuantizedAffineLayout;
 use crate::mlp::dense::backend::DenseMLPMetalConfig;
 use crate::mlp::moe::backend::GatedMoEMetalConfig;
+use crate::model::qwen::v3_5::QWEN35_PAGE_SIZE_BYTES;
 use crate::model::qwen::v3_x::weight::to_u32;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

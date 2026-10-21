@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 
+use inference_executor_core::model::ExecutionSubmission;
 use inference_executor_core::model::qwen::v4_x::reference;
 use inference_executor_core::ngram_embedding::core::HashParameters;
 use inference_executor_core::ngram_embedding::core::NGramEmbeddingCore;
@@ -14,6 +15,44 @@ use safetensors::tensor::View;
 use safetensors::tensor::serialize_to_file;
 
 use super::*;
+
+#[test]
+fn test_unsupported_metal_geometry_fails_before_weight_io() {
+    let missing_model = std::env::temp_dir().join(format!("psi-missing-qwen4x-{}", std::process::id()));
+    assert!(!missing_model.exists());
+    for unsupported in ["head_geometry", "expert_count", "shader_dimension", "residual_width"] {
+        let mut model: Qwen4xModelConfig = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../inference-executor-core/src/model/qwen/v4_x/config_fixture.json"
+        )))
+        .unwrap();
+        match unsupported {
+            "head_geometry" => model.text_config.num_attention_heads = 12,
+            "expert_count" => model.text_config.num_experts = 1024,
+            "shader_dimension" => model.text_config.max_position_embeddings = i32::MAX as usize + 1,
+            "residual_width" => {
+                model.text_config.ple_layer_ids.clear();
+                model.text_config.hidden_size = 1 << 30;
+            },
+            _ => unreachable!(),
+        }
+        model.normalize().unwrap();
+        let error = Qwen4xExecutor::new(
+            &missing_model,
+            model,
+            Qwen4xExecutorConfig {
+                max_requests: 1,
+                max_tokens: 1,
+                max_tokens_per_request: 1,
+                num_cache_pages: 1,
+                num_tokens_per_block: 512,
+            },
+        )
+        .err()
+        .expect("Metal must reject unsupported geometry before opening the model directory");
+        assert!(error.to_string().contains("Qwen4x Metal"), "{unsupported}: {error}");
+    }
+}
 
 #[test]
 fn test_first8_cpu_reference_fixed_random_and_mixed_batch() {

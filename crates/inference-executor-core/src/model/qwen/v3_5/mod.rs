@@ -23,5 +23,3 @@ mod pending_transactions;
 pub use pending_transactions::Qwen35PendingTransactions;
 
 pub mod weight_layout;
-
-pub const QWEN35_PAGE_SIZE_BYTES: usize = 32 * 1024;

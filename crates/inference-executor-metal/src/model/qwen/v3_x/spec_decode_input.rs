@@ -1,5 +1,7 @@
 use std::ops::Range;
 
+use inference_backend_metal::components::ReplayOp;
+use inference_backend_metal::components::ReplayRecorder;
 use inference_backend_metal::components::gqa::sdpa::MapThreadBlockConstants;
 use inference_backend_metal::components::sampling::spec_decode_input as backend;
 use inference_backend_metal::metal::Buffer;
@@ -7,12 +9,9 @@ use inference_backend_metal::metal::Device;
 use inference_backend_metal::metal::Dtype;
 use inference_backend_metal::metal::ReplayArguments;
 use inference_executor_core::attn::BiDiBlockGQAMetadata;
-use inference_executor_core::backend::recorder::Recorder;
 use inference_executor_core::replay::ReplayBucketPolicy;
 
 use crate::attn::bidi_block_gqa::metadata::BiDiBlockGQAMetadataBuffers;
-use crate::def::replay_op::ReplayOp;
-use crate::def::replay_op::ReplayRecorder;
 use crate::replay::ReplayComponent;
 use crate::sampling::rejection_sampling::SparseRejectionSamplingOutput;
 

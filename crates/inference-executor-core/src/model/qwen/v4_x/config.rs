@@ -224,32 +224,15 @@ impl Qwen4xModelConfig {
             text.indexer_head_dim,
             text.indexer_budget,
         ];
-        if dimensions.iter().any(|&v| v == 0 || i32::try_from(v).is_err())
+        if dimensions.contains(&0)
             || text.hc_count < 2
-            || text.num_experts > 512
             || text.num_experts_per_tok > text.num_experts
+            || !text.num_attention_heads.is_multiple_of(text.num_key_value_heads)
             || !text.linear_num_value_heads.is_multiple_of(text.linear_num_key_heads)
-            || text
-                .hc_count
-                .checked_mul(text.hidden_size)
-                .is_none_or(|v| u32::try_from(v).is_err())
+            || text.hc_count.checked_mul(text.hidden_size).is_none()
         {
             return Err(ModelExecutorError::custom(
-                "Qwen4x dimensions exceed their supported shader domains",
-            ));
-        }
-        if (
-            text.num_attention_heads,
-            text.num_key_value_heads,
-            text.head_dim,
-            text.indexer_n_heads,
-            text.indexer_head_dim,
-            text.indexer_budget,
-            text.indexer_compress_ratio,
-        ) != (24, 2, 256, 4, 128, 2048, 4)
-        {
-            return Err(ModelExecutorError::custom(
-                "Qwen4x currently requires QSA 24/2/256 and indexer 4/1/128, budget 2048, ratio 4",
+                "Qwen4x has invalid model dimensions or head/expert relationships",
             ));
         }
         let theta = text.rope_parameters.rope_theta.unwrap_or(0.0);
@@ -261,7 +244,9 @@ impl Qwen4xModelConfig {
             || theta <= 0.0
             || !rotary.is_finite()
             || rotary <= 0.0
+            || rope_dim <= 0.0
             || rope_dim.fract() != 0.0
+            || rope_dim as usize > text.head_dim
             || rope_dim as usize > text.indexer_head_dim
             || !(rope_dim as usize).is_multiple_of(2)
             || text
@@ -279,9 +264,9 @@ impl Qwen4xModelConfig {
                 "Qwen4x requires SiLU MLP, bias-free attention, and one indexer KV head",
             ));
         }
-        if text.indexer_compress_ratio == 0 || !text.indexer_budget.is_multiple_of(text.indexer_compress_ratio) {
+        if text.indexer_compress_ratio <= 1 || !text.indexer_budget.is_multiple_of(text.indexer_compress_ratio) {
             return Err(ModelExecutorError::custom(
-                "Qwen4x indexer budget must be divisible by its compression ratio",
+                "Qwen4x indexer compression ratio must exceed one and divide its budget",
             ));
         }
         if !matches!(text.output_gate_type.as_str(), "silu" | "sigmoid") {
@@ -345,7 +330,16 @@ impl Qwen4xModelConfig {
                 || text.ngram_vocab_size_base < 2
                 || text.make_ngram_vocab_size_divisible_by == 0
                 || ngram_heads.is_none_or(|heads| heads == 0 || !text.ple_embed_dim.is_multiple_of(heads))
+                || u32::try_from(text.hc_count * text.hidden_size).is_err()
+                || text
+                    .ple_conv_kernel_size
+                    .checked_sub(1)
+                    .and_then(|n| n.checked_mul(text.ngram_size))
+                    .is_none_or(|n| u32::try_from(n).is_err())
                 || [
+                    text.vocab_size,
+                    text.hidden_size,
+                    text.hc_count,
                     text.ngram_size,
                     text.heads_per_ngram,
                     text.ple_embed_dim,

@@ -1,11 +1,10 @@
+use inference_backend_metal::components::ReplayOp;
+use inference_backend_metal::components::ReplayRecorder;
 use inference_backend_metal::components::rms_norm;
 use inference_backend_metal::metal::Buffer;
 use inference_backend_metal::metal::Device;
 use inference_backend_metal::metal::Dtype;
 use inference_backend_metal::metal::ReplayU32;
-use inference_executor_core::backend::recorder::Recorder;
-
-use crate::def::replay_op::ReplayOp;
 
 pub struct RMSNorm {
     weight: Option<Buffer>,
@@ -64,16 +63,14 @@ impl RMSNorm {
         self.compute.invoke(shape, num_active_tokens, buffers)
     }
 
-    pub fn record<'a, R>(
+    pub fn record<'a>(
         &'a self,
-        recorder: &mut R,
+        recorder: &mut ReplayRecorder,
         num_total_tokens: u32,
         num_active_tokens: ReplayU32,
         input: &'a Buffer,
         output: &'a Buffer,
-    ) where
-        R: Recorder<'a, Operator = ReplayOp<'a>>,
-    {
+    ) {
         recorder.record(ReplayOp::rms_norm(self.invocation(
             num_total_tokens,
             num_active_tokens,
@@ -82,16 +79,14 @@ impl RMSNorm {
         )));
     }
 
-    pub fn record_with_barrier<'a, R>(
+    pub fn record_with_barrier<'a>(
         &'a self,
-        recorder: &mut R,
+        recorder: &mut ReplayRecorder,
         num_total_tokens: u32,
         num_active_tokens: ReplayU32,
         input: &'a Buffer,
         output: &'a Buffer,
-    ) where
-        R: Recorder<'a, Operator = ReplayOp<'a>>,
-    {
+    ) {
         recorder.record_with_barrier_before(ReplayOp::rms_norm(self.invocation(
             num_total_tokens,
             num_active_tokens,

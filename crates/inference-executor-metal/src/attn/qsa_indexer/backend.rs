@@ -1,3 +1,5 @@
+use inference_backend_metal::components::ReplayOp;
+use inference_backend_metal::components::ReplayRecorder;
 use inference_backend_metal::components::qsa_indexer;
 use inference_backend_metal::metal::Buffer;
 use inference_backend_metal::metal::Device;
@@ -5,11 +7,9 @@ use inference_backend_metal::metal::Dtype;
 use inference_backend_metal::metal::ReplayU32;
 use inference_backend_metal::operators::affine_quantized;
 use inference_executor_core::attn::qsa_indexer::core::QSAIndexerCore;
-use inference_executor_core::backend::recorder::Recorder;
 
 use crate::attn::qsa_indexer::batch_metadata::QSAIndexerMetadataBuffers;
 use crate::attn::qsa_indexer::scratch::QSAIndexerScratch;
-use crate::def::replay_op::ReplayOp;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct QSAIndexerMetalConfig {
@@ -157,10 +157,7 @@ impl QSAIndexer {
         self.qk.topology(num_total_tokens)
     }
 
-    pub fn prepare<'a, R>(&'a self, recorder: &mut R, input: QSAIndexerPrepareInput<'a>)
-    where
-        R: Recorder<'a, Operator = ReplayOp<'a>>,
-    {
+    pub fn prepare<'a>(&'a self, recorder: &mut ReplayRecorder, input: QSAIndexerPrepareInput<'a>) {
         recorder.record_with_barrier_before(ReplayOp::opaque(self.qk.invoke(
             input.num_total_tokens,
             input.num_active_tokens,
@@ -192,10 +189,7 @@ impl QSAIndexer {
         )));
     }
 
-    pub fn select<'a, R>(&'a self, recorder: &mut R, input: QSAIndexerSelectInput<'a>) -> &'a Buffer
-    where
-        R: Recorder<'a, Operator = ReplayOp<'a>>,
-    {
+    pub fn select<'a>(&'a self, recorder: &mut ReplayRecorder, input: QSAIndexerSelectInput<'a>) -> &'a Buffer {
         if input.shape.num_total_groups as usize <= self.core.top_k {
             return input.group_ids;
         }

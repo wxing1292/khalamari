@@ -9,7 +9,6 @@ use inference_backend_metal::MetalRuntime;
 use inference_backend_metal::metal::Buffer;
 use inference_backend_metal::metal::ReplayArguments;
 use inference_backend_metal::metal::ReplayExecution;
-use inference_executor_core::attn::GQAPageTableLayout;
 use inference_executor_core::def::ModelExecutorError;
 use inference_executor_core::model::ModelOutputTiming;
 use inference_executor_core::model::ReplayableDecoderModel;
@@ -40,9 +39,9 @@ use inference_runtime_core::runtime::RawComputeSlotSeq;
 use inference_runtime_core::runtime::RawRequestSlot;
 use inference_runtime_core::runtime::Token;
 
+use crate::attn::gqa::request_page_table::GQAPageTableLayout;
 use crate::checkpoint::SafeTensorStore;
-use crate::def::replay_op::MetalReplayRuntime;
-use crate::def::replay_op::MetalReplaySubmission;
+use crate::def::submission::MetalReplaySubmission;
 use crate::model::embedding::Embed;
 use crate::model::main_resource_embed::MainResourceEmbed;
 use crate::model::page_arena::PageArena;
@@ -516,8 +515,8 @@ impl ReplayableDecoderModel for Qwen3Executor {
             token_ids: &self.token_ids,
             hidden_output: &self.token_hidden_input,
         };
-        let runtime = MetalReplayRuntime::new(self.runtime.stream());
-        let (recorded_key, _) = self.main_text_embed.record(&runtime, &input);
+        let runtime = self.runtime.stream();
+        let (recorded_key, _) = self.main_text_embed.record(runtime, &input);
         debug_assert_eq!(
             recorded_key, recorder.main_text_embed_key,
             "qwen3 MainTextEmbed replay input must match the prepared replay key"
@@ -525,7 +524,7 @@ impl ReplayableDecoderModel for Qwen3Executor {
         let resource_embed_key = self
             .main_resource_embed
             .as_mut()
-            .and_then(|main_resource_embed| main_resource_embed.record(&runtime, &self.token_hidden_input));
+            .and_then(|main_resource_embed| main_resource_embed.record(runtime, &self.token_hidden_input));
         debug_assert_eq!(
             resource_embed_key, recorder.resource_embed_key,
             "Qwen3 ResourceEmbed replay input must match the prepared replay key"
@@ -555,8 +554,8 @@ impl ReplayableDecoderModel for Qwen3Executor {
             gqa_replay_topology: self.main_gqa_state.replay_topology(),
             pages: self.pages.buffer(),
         };
-        let runtime = MetalReplayRuntime::new(self.runtime.stream());
-        let (recorded_key, _) = self.main.record(&runtime, &input);
+        let runtime = self.runtime.stream();
+        let (recorded_key, _) = self.main.record(runtime, &input);
         debug_assert_eq!(
             recorded_key, recorder.main_key,
             "qwen3 Main replay input must match the prepared replay key"
@@ -709,6 +708,7 @@ fn num_page_ids_per_block(num_tokens_per_block: usize, num_tokens_per_page: usiz
 
 #[cfg(test)]
 mod tests {
+    use inference_executor_core::model::ExecutionSubmission;
     use inference_executor_core::model::ReplayableDecoderModel;
     use inference_executor_core::model::qwen::v3::Qwen3ModelBatchRequest;
     use inference_executor_core::model::qwen::v3_asr::audio_output_rows;

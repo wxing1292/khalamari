@@ -14,7 +14,6 @@ use inference_executor_core::checkpoint::SafeTensorStore;
 use inference_executor_core::model::qwen::v3_5::init_qwen35_model_config;
 use inference_executor_core::model::qwen::v3_5::weight_layout::Qwen35ModelWeightBindings;
 use inference_executor_core::model::qwen::v3_5::weight_layout::resolve_qwen35_model_weight_bindings;
-use inference_executor_metal::def::replay_op::MetalReplayRuntime;
 use inference_executor_metal::model::qwen::v3_5::main::output::Qwen35GatherUnembed;
 use inference_executor_metal::model::qwen::v3_5::main::output::Qwen35GatherUnembedArgs;
 use inference_executor_metal::model::qwen::v3_5::main::output::Qwen35GatherUnembedReplayKey;
@@ -191,8 +190,8 @@ impl GatherUnembedFixture {
             logits: &self.logits,
         };
         let (expected_key, arguments) = self.replay.component().prepare_replay(num_rows);
-        let runtime = MetalReplayRuntime::new(&self.stream);
-        let (key, _) = self.replay.record(&runtime, &input);
+        let runtime = &self.stream;
+        let (key, _) = self.replay.record(runtime, &input);
         assert_eq!(
             key, expected_key,
             "GatherUnembed prepared and recorded replay keys must match"
@@ -201,7 +200,7 @@ impl GatherUnembedFixture {
     }
 
     fn run(&self, prepared: &PreparedReplay) {
-        MetalReplayRuntime::new(&self.stream)
+        self.stream
             .submit_replay_with_arguments(self.replay.replay(&prepared.key), &prepared.arguments)
             .wait();
     }

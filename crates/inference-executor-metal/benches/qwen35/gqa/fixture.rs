@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
 use std::mem::size_of;
 
+use inference_backend_metal::components::ReplayOp;
+use inference_backend_metal::components::ReplayRecorder;
 use inference_backend_metal::components::gqa::activation_gate as backend_activation_gate;
 use inference_backend_metal::components::gqa::kv_page_write as backend_kv_page_write;
 use inference_backend_metal::components::gqa::qgkv_split as backend_qgkv_split;
@@ -17,8 +19,6 @@ use inference_backend_metal::metal::ReplayU32;
 use inference_backend_metal::metal::Stream;
 use inference_backend_metal::operators::affine_quantized;
 use inference_executor_core::attn::GQACore;
-use inference_executor_core::attn::GQAPageTableLayout;
-use inference_executor_core::backend::recorder::Recorder;
 use inference_executor_metal::attn::gqa::backend::GQA;
 use inference_executor_metal::attn::gqa::backend::GQAInput;
 use inference_executor_metal::attn::gqa::backend::GQAKVCacheBindings;
@@ -26,12 +26,11 @@ use inference_executor_metal::attn::gqa::backend::GQAMetalConfig;
 use inference_executor_metal::attn::gqa::backend::GQAWeights;
 use inference_executor_metal::attn::gqa::batch_metadata::GQAMetadataBuffers;
 use inference_executor_metal::attn::gqa::batch_metadata::GQAReplayBucketPolicy;
+use inference_executor_metal::attn::gqa::request_page_table::GQAPageTableLayout;
 use inference_executor_metal::attn::gqa::scratch::GQAScratchBindings;
 use inference_executor_metal::attn::gqa::sdpa::RequestShape;
 use inference_executor_metal::attn::gqa::sdpa::Selector;
 use inference_executor_metal::def::layer::ReplayLayer;
-use inference_executor_metal::def::replay_op::MetalReplayRuntime;
-use inference_executor_metal::def::replay_op::ReplayOp;
 use safetensors::SafeTensors;
 
 use crate::Args;
@@ -173,7 +172,7 @@ fn measure_lookup(device: &Device, args: &Args, weights: &RealGQAWeights, counts
     let kv = Buffer::new_zeroed(device, num_reqs as usize * blocks as usize * config.page_bytes as usize);
     let pages = Buffer::from_slice(device, &page_table(num_reqs, blocks));
     let stream = Stream::new(device);
-    let mut recorder = MetalReplayRuntime::new(&stream).create_recorder();
+    let mut recorder = ReplayRecorder::new(stream.create_replay_program());
     <GQA as ReplayLayer>::record(
         &backend,
         &mut recorder,
@@ -210,7 +209,7 @@ fn measure_lookup(device: &Device, args: &Args, weights: &RealGQAWeights, counts
         args.max_tokens,
     );
     let samples = measure_runs(args.runs, args.warmup_iters, args.iters, || {
-        MetalReplayRuntime::new(&stream).submit_replay(&replay).wait();
+        stream.submit_replay(&replay).wait();
     });
     let uniform = contexts.iter().all(|&n| n == contexts[0]).then_some(contexts[0]);
     print_perf(num_tokens, num_reqs, uniform, Some("auto"), args.iters, &samples);
@@ -515,7 +514,7 @@ impl<'a> RealGQAFixture<'a> {
             device,
             num_tokens as usize * model.hidden_dim * Dtype::Bfloat16.item_size(),
         );
-        let mut recorder = MetalReplayRuntime::new(&stream).create_recorder();
+        let mut recorder = ReplayRecorder::new(stream.create_replay_program());
         let _ = <GQA as ReplayLayer>::record(
             &backend,
             &mut recorder,
@@ -578,7 +577,7 @@ impl<'a> RealGQAFixture<'a> {
             sliced_q_batch_metadata.variant(),
             sliced_q_shape,
         );
-        let mut sliced_q_builder = MetalReplayRuntime::new(&stream).create_recorder();
+        let mut sliced_q_builder = ReplayRecorder::new(stream.create_replay_program());
         sliced_q_builder.record_with_barrier_before(ReplayOp::opaque(qgkv_matmul.invoke(
             num_tokens,
             ReplayU32::Fixed(num_tokens),
@@ -739,13 +738,11 @@ impl<'a> RealGQAFixture<'a> {
     }
 
     fn run_sdpa_sliced_kv(&self) {
-        MetalReplayRuntime::new(&self.stream).submit_replay(&self.replay).wait();
+        self.stream.submit_replay(&self.replay).wait();
     }
 
     fn run_sdpa_sliced_q(&self) {
-        MetalReplayRuntime::new(&self.stream)
-            .submit_replay(&self.sliced_q_replay)
-            .wait();
+        self.stream.submit_replay(&self.sliced_q_replay).wait();
     }
 
     fn validate_sdpa_sliced_q_attention(&self) {
@@ -754,7 +751,7 @@ impl<'a> RealGQAFixture<'a> {
         let sdpa =
             backend_sliced_kv::Compute::new(&self.device, sdpa_config, self.batch_metadata.variant(), sdpa_shape);
         let sdpa_sliced_kv_replay = {
-            let mut recorder = MetalReplayRuntime::new(&self.stream).create_recorder();
+            let mut recorder = ReplayRecorder::new(self.stream.create_replay_program());
             recorder.record(ReplayOp::opaque(sdpa.invoke_map(
                 backend_sliced_kv::MapBuffers {
                     q: &self._q_norm_rope,
@@ -801,7 +798,7 @@ impl<'a> RealGQAFixture<'a> {
             sliced_q_shape,
         );
         let sliced_q_replay = {
-            let mut recorder = MetalReplayRuntime::new(&self.stream).create_recorder();
+            let mut recorder = ReplayRecorder::new(self.stream.create_replay_program());
             recorder.record(ReplayOp::opaque(tiled.invoke_map(
                 backend_sliced_q::MapBuffers {
                     q: &self._q_norm_rope,
@@ -833,7 +830,7 @@ impl<'a> RealGQAFixture<'a> {
             )));
             recorder.build()
         };
-        let runtime = MetalReplayRuntime::new(&self.stream);
+        let runtime = &self.stream;
         runtime.submit_replay(&sdpa_sliced_kv_replay).wait();
         runtime.submit_replay(&sliced_q_replay).wait();
 
@@ -1019,7 +1016,7 @@ impl<'a> RealGQAFixture<'a> {
             ),
         );
         let sdpa_sliced_kv_replay = {
-            let mut recorder = MetalReplayRuntime::new(&self.stream).create_recorder();
+            let mut recorder = ReplayRecorder::new(self.stream.create_replay_program());
             recorder.record(ReplayOp::opaque(sdpa.invoke_map(
                 backend_sliced_kv::MapBuffers {
                     q: &self._q_norm_rope,
@@ -1063,7 +1060,7 @@ impl<'a> RealGQAFixture<'a> {
             sliced_q_shape,
         );
         let sliced_q_replay = {
-            let mut recorder = MetalReplayRuntime::new(&self.stream).create_recorder();
+            let mut recorder = ReplayRecorder::new(self.stream.create_replay_program());
             recorder.record(ReplayOp::opaque(sliced_q_kernel.invoke_map(
                 backend_sliced_q::MapBuffers {
                     q: &self._q_norm_rope,
@@ -1095,7 +1092,7 @@ impl<'a> RealGQAFixture<'a> {
             )));
             recorder.build()
         };
-        let runtime = MetalReplayRuntime::new(&self.stream);
+        let runtime = &self.stream;
         runtime.submit_replay(&sdpa_sliced_kv_replay).wait();
         runtime.submit_replay(&sliced_q_replay).wait();
         let sdpa_sliced_kv_output = &self._attention_output;
@@ -1210,7 +1207,7 @@ impl<'a> RealGQAFixture<'a> {
             return;
         }
         let samples = measure_runs(runs, warmup_iters, iters, || {
-            MetalReplayRuntime::new(&self.stream).submit_replay(replay).wait();
+            self.stream.submit_replay(replay).wait();
         });
         print_named_perf(
             &format!("gqa.{name}"),

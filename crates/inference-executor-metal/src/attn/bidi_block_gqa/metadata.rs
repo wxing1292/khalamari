@@ -8,9 +8,9 @@ use inference_backend_metal::metal::Buffer;
 use inference_backend_metal::metal::Device;
 use inference_backend_metal::metal::Dtype;
 use inference_executor_core::attn::BiDiBlockGQAMetadata;
-use inference_executor_core::attn::GQAReplayShape;
 
 use crate::attn::bidi_block_gqa::capacity::BiDiBlockGQACapacity;
+use crate::attn::gqa::batch_metadata::GQAReplayShape;
 
 const NUM_SDPA_MAP_TASK_TEMPLATE_FIELDS: usize = 3;
 const NUM_VISIBLE_KV_TOKEN_RANGE_FIELDS: usize = 2;

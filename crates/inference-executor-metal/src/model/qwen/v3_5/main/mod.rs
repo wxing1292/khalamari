@@ -1,5 +1,7 @@
 use std::rc::Rc;
 
+use inference_backend_metal::components::ReplayOp;
+use inference_backend_metal::components::ReplayRecorder;
 use inference_backend_metal::components::check_finite;
 use inference_backend_metal::metal::Buffer;
 use inference_backend_metal::metal::Device;
@@ -7,9 +9,6 @@ use inference_backend_metal::metal::Dtype;
 use inference_backend_metal::metal::ReplayArguments;
 use inference_backend_metal::metal::ReplayParameterKey;
 use inference_backend_metal::metal::ReplayU32;
-use inference_executor_core::attn::GDNReplayShape;
-use inference_executor_core::attn::GQAReplayShape;
-use inference_executor_core::backend::recorder::Recorder;
 use inference_executor_core::def::ModelExecutorError;
 use inference_executor_core::model::qwen::v3_5::LayerType;
 use inference_executor_core::model::qwen::v3_5::Qwen35ModelConfig;
@@ -17,10 +16,10 @@ use inference_executor_core::model::qwen::v3_5::weight_layout::Qwen35MainWeightB
 use inference_executor_core::replay::ReplayBucketPolicy;
 
 use crate::attn::gdn::backend::GDNReplayTopology;
+use crate::attn::gdn::batch_metadata::GDNReplayShape;
 use crate::attn::gqa::backend::GQAReplayTopology;
+use crate::attn::gqa::batch_metadata::GQAReplayShape;
 use crate::checkpoint::SafeTensorStore;
-use crate::def::replay_op::ReplayOp;
-use crate::def::replay_op::ReplayRecorder;
 use crate::mlp::dense::scratch::DenseMLPScratch;
 use crate::mlp::moe::scratch::MoEScratch;
 use crate::model::main_residual_capture::MainResidualCapture;
@@ -211,16 +210,13 @@ impl Qwen35Main {
         (key, arguments)
     }
 
-    pub fn record<'a, R>(
+    pub fn record<'a>(
         &'a self,
-        recorder: &mut R,
+        recorder: &mut ReplayRecorder,
         num_total_tokens: u32,
         num_active_tokens: ReplayU32,
         args: Qwen35MainArgs<'a>,
-    ) -> &'a Buffer
-    where
-        R: Recorder<'a, Operator = ReplayOp<'a>>,
-    {
+    ) -> &'a Buffer {
         match num_active_tokens {
             ReplayU32::Fixed(value) => {
                 assert_eq!(value, args.num_tokens);

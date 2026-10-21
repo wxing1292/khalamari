@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 
 use half::bf16;
+use inference_backend_metal::components::ReplayRecorder;
 use inference_backend_metal::components::gqa::fp8::bf16_to_f32;
 use inference_backend_metal::components::gqa::fp8::bf16_to_fp8_e4m3;
 use inference_backend_metal::components::gqa::fp8::f32_to_bf16;
@@ -11,7 +12,6 @@ use inference_backend_metal::metal::Dtype;
 use inference_backend_metal::metal::ReplayArguments;
 use inference_backend_metal::metal::ReplayU32;
 use inference_backend_metal::metal::Stream;
-use inference_executor_core::attn::GQAPageTableLayout;
 
 use super::batch_metadata::QSASDPAMetadataBuffers;
 use super::sdpa::QSASDPA;
@@ -21,8 +21,7 @@ use super::sdpa::QSASDPAInput;
 use super::sdpa::QSASDPAReplay;
 use super::sdpa::QSASDPARequest;
 use super::sdpa::QSASDPAShape;
-use crate::def::replay_op::MetalReplayRuntime;
-use crate::def::replay_op::ReplayRecorder;
+use crate::attn::gqa::request_page_table::GQAPageTableLayout;
 use crate::replay::Replay;
 use crate::replay::ReplayComponent;
 
@@ -68,7 +67,7 @@ fn test_reference_attention_success() {
 fn test_replay_bucketing() {
     let device = Device::system_default();
     let stream = Stream::new(&device);
-    let runtime = MetalReplayRuntime::new(&stream);
+    let runtime = &stream;
     let config = fixture_config();
     let mut cache = KVCacheFixture::new(&device, config.page_table_layout);
     let sdpa = QSASDPA::new(&device, config);
@@ -110,7 +109,7 @@ fn test_replay_bucketing() {
     ];
     let expected_active = [(1, 1, 0), (4, 4, 0), (3, 2, 1), (2, 0, 2)];
     for (batch, expected) in batches.iter().zip(expected_active) {
-        let active = bindings.run(&runtime, &mut replay, &mut recorded_keys, batch);
+        let active = bindings.run(runtime, &mut replay, &mut recorded_keys, batch);
         assert_eq!(
             (
                 active.num_active_tokens,
@@ -129,7 +128,7 @@ fn test_replay_bucketing() {
     // One request crosses the dense/sparse cutoff at position 2055. This
     // batch also places both dense and sparse results in original output rows.
     let crossing_and_tail_batch = vec![request(2, 2053, 3), request(0, 2056, 1)];
-    let active = bindings.run(&runtime, &mut replay, &mut recorded_keys, &crossing_and_tail_batch);
+    let active = bindings.run(runtime, &mut replay, &mut recorded_keys, &crossing_and_tail_batch);
     assert_eq!(active.num_active_tokens, 4);
     assert_eq!(active.num_active_dense_queries, 2);
     assert_eq!(active.num_active_sparse_queries, 2);
@@ -165,7 +164,7 @@ fn test_replay_bucketing() {
         selected_groups: &single_split_groups,
         output: &single_split_output,
     };
-    single_split_bindings.run(&runtime, &mut replay, &mut recorded_keys, &single_split_batch);
+    single_split_bindings.run(runtime, &mut replay, &mut recorded_keys, &single_split_batch);
 
     let row_start = 2 * ROW_WIDTH;
     let before_omitted_group = single_split_output.read_typed::<u16>(row_start, 2 * ROW_WIDTH);
@@ -182,7 +181,7 @@ fn test_replay_bucketing() {
         selected_groups: &single_split_groups,
         output: &single_split_output,
     };
-    single_split_bindings.run(&runtime, &mut replay, &mut recorded_keys, &single_split_batch);
+    single_split_bindings.run(runtime, &mut replay, &mut recorded_keys, &single_split_batch);
     let after_omitted_group = single_split_output.read_typed::<u16>(row_start, 2 * ROW_WIDTH);
     assert_eq!(
         before_omitted_group, after_omitted_group,
@@ -194,7 +193,7 @@ fn test_replay_bucketing() {
 fn test_sparse_replay_success() {
     let device = Device::system_default();
     let stream = Stream::new(&device);
-    let runtime = MetalReplayRuntime::new(&stream);
+    let runtime = &stream;
     let mut config = fixture_config();
     // Groups near the causal tail cross a logical page-table block.
     config.page_table_layout.num_blocks = 2;
@@ -236,13 +235,13 @@ fn test_sparse_replay_success() {
             selected_groups: &groups,
             output: &output,
         };
-        let active = bindings.run(&runtime, &mut replay, &mut recorded_keys, &requests);
+        let active = bindings.run(runtime, &mut replay, &mut recorded_keys, &requests);
         assert_eq!(active.num_active_dense_tasks, 4);
         if capacity == 1 {
             assert!(active.num_active_dense_tasks > shape.num_total_tokens);
         }
         // The same replay must ignore inactive work after a smaller submission.
-        bindings.run(&runtime, &mut replay, &mut recorded_keys, &[request(1, 2058, 1)]);
+        bindings.run(runtime, &mut replay, &mut recorded_keys, &[request(1, 2058, 1)]);
     }
 }
 
@@ -284,7 +283,7 @@ struct TestBindings<'a> {
 impl TestBindings<'_> {
     fn run(
         &self,
-        runtime: &MetalReplayRuntime,
+        runtime: &Stream,
         replay: &mut Replay<TestQSASDPA>,
         recorded_keys: &mut HashSet<(u32, u32)>,
         requests: &[QSASDPARequest],

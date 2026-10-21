@@ -49,7 +49,7 @@ fn test_lookup_preserves_f32_execution_capability() {
         let selector = Selector::for_lookup(
             config,
             128,
-            inference_executor_core::attn::GQAPageTableLayout {
+            crate::attn::gqa::request_page_table::GQAPageTableLayout {
                 num_req_slots: 4,
                 num_gqa_layers: 1,
                 num_blocks: 1024,
@@ -86,7 +86,7 @@ fn test_lookup_preserves_single_query_kv_parallelism_across_short_context_bounda
                 tokens_per_page: 16,
             },
             128,
-            inference_executor_core::attn::GQAPageTableLayout {
+            crate::attn::gqa::request_page_table::GQAPageTableLayout {
                 num_req_slots: 8,
                 num_gqa_layers: 1,
                 num_blocks: 128,
@@ -138,7 +138,7 @@ fn test_lookup_covers_ragged_queries_and_continuous_context_within_replay_capaci
         let selector = Selector::for_lookup(
             config,
             2048,
-            inference_executor_core::attn::GQAPageTableLayout {
+            crate::attn::gqa::request_page_table::GQAPageTableLayout {
                 num_req_slots: 8,
                 num_gqa_layers: 1,
                 num_blocks: 16400,

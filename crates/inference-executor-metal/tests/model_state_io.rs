@@ -8,6 +8,7 @@ use std::time::Duration;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
+use inference_executor_core::model::ExecutionSubmission;
 use inference_executor_core::model::ReplayableDecoderModel;
 use inference_executor_metal::model::qwen::v3_5::executor::Qwen35ExecutorConfig;
 use inference_executor_metal::model::qwen::v3_5::executor::init_qwen_3_5_model_with_mtp;

@@ -3,6 +3,8 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use half::bf16;
+use inference_backend_metal::components::ReplayOp;
+use inference_backend_metal::components::ReplayRecorder;
 use inference_backend_metal::components::gqa::kv_page_write as backend_kv_page_write;
 use inference_backend_metal::components::gqa::sdpa as backend_sdpa;
 use inference_backend_metal::components::gqa::sdpa::sliced_kv as backend_sliced_kv;
@@ -15,12 +17,9 @@ use inference_backend_metal::metal::ReplayProgram;
 use inference_backend_metal::metal::ReplayU32;
 use inference_backend_metal::metal::Stream;
 use inference_backend_metal::operators::affine_quantized;
-use inference_executor_core::attn::GQAPageTableLayout;
 use inference_executor_core::attn::UngatedGQACore;
-use inference_executor_core::backend::recorder::Recorder;
 use inference_executor_core::checkpoint::QuantizedTensorBindings;
 use inference_executor_core::checkpoint::SafeTensorStore;
-use inference_executor_core::model::qwen::v3::QWEN3_PAGE_SIZE_BYTES;
 use inference_executor_core::model::qwen::v3::Qwen3ModelConfig;
 use inference_executor_core::model::qwen::v3::init_qwen3_model_config;
 use inference_executor_core::model::qwen::v3::weight_layout::resolve_qwen3_model_weight_bindings;
@@ -29,6 +28,7 @@ use inference_executor_metal::attn::gqa::backend::GQAKVCacheBindings;
 use inference_executor_metal::attn::gqa::backend::GQAMetalConfig;
 use inference_executor_metal::attn::gqa::batch_metadata::GQAMetadataBuffers;
 use inference_executor_metal::attn::gqa::batch_metadata::GQAReplayBucketPolicy;
+use inference_executor_metal::attn::gqa::request_page_table::GQAPageTableLayout;
 use inference_executor_metal::attn::gqa::sdpa::RequestShape;
 use inference_executor_metal::attn::gqa::sdpa::Selector;
 use inference_executor_metal::attn::gqa::ungated_backend::UngatedGQA;
@@ -36,8 +36,7 @@ use inference_executor_metal::attn::gqa::ungated_backend::UngatedGQAInput;
 use inference_executor_metal::attn::gqa::ungated_backend::UngatedGQAWeights;
 use inference_executor_metal::attn::gqa::ungated_scratch::UngatedGQAScratch;
 use inference_executor_metal::def::layer::ReplayLayer;
-use inference_executor_metal::def::replay_op::MetalReplayRuntime;
-use inference_executor_metal::def::replay_op::ReplayOp;
+use inference_executor_metal::model::qwen::v3::QWEN3_PAGE_SIZE_BYTES;
 
 const MAX_TOKENS: usize = 64;
 
@@ -675,7 +674,7 @@ fn full_replay(
     weights: &Weights,
     scratch: &UngatedGQAScratch,
 ) -> ReplayProgram {
-    let mut recorder = MetalReplayRuntime::new(stream).create_recorder();
+    let mut recorder = ReplayRecorder::new(stream.create_replay_program());
     let _ = <UngatedGQA as ReplayLayer>::record(
         backend,
         &mut recorder,
@@ -730,7 +729,7 @@ fn sdpa_sliced_kv_replay(
     };
     let kernels = backend_sliced_kv::Compute::new(device, sdpa_config, metadata.variant(), sdpa_shape);
     let scratch = scratch.bindings();
-    let mut recorder = MetalReplayRuntime::new(stream).create_recorder();
+    let mut recorder = ReplayRecorder::new(stream.create_replay_program());
     recorder.record(ReplayOp::opaque(kernels.invoke_map(
         backend_sliced_kv::MapBuffers {
             q: scratch.q_norm_rope,
@@ -793,7 +792,7 @@ fn sdpa_sliced_q_replay(
     };
     let kernels = backend_sliced_q::Compute::new(device, sliced_q_config, metadata.variant(), sliced_q_shape);
     let scratch = scratch.bindings();
-    let mut recorder = MetalReplayRuntime::new(stream).create_recorder();
+    let mut recorder = ReplayRecorder::new(stream.create_replay_program());
     recorder.record(ReplayOp::opaque(kernels.invoke_map(
         backend_sliced_q::MapBuffers {
             q: scratch.q_norm_rope,

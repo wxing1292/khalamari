@@ -1,5 +1,7 @@
 use std::rc::Rc;
 
+use inference_backend_metal::components::ReplayOp;
+use inference_backend_metal::components::ReplayRecorder;
 use inference_backend_metal::components::check_finite;
 use inference_backend_metal::components::dense_mlp;
 use inference_backend_metal::components::residual_add;
@@ -7,7 +9,6 @@ use inference_backend_metal::metal::Buffer;
 use inference_backend_metal::metal::Device;
 use inference_backend_metal::metal::Dtype;
 use inference_backend_metal::metal::ReplayU32;
-use inference_executor_core::backend::recorder::Recorder;
 use inference_executor_core::def::ModelExecutorError;
 use inference_executor_core::model::qwen::v3_5::LayerType;
 use inference_executor_core::model::qwen::v3_5::Qwen35ModelConfig;
@@ -19,7 +20,6 @@ use crate::attn::gdn::batch_metadata::GDNMetadataBuffers;
 use crate::attn::gqa::batch_metadata::GQAMetadataBuffers;
 use crate::checkpoint::SafeTensorStore;
 use crate::def::layer::ReplayLayer;
-use crate::def::replay_op::ReplayOp;
 use crate::mlp::dense::scratch::DenseMLPScratch;
 use crate::mlp::moe::backend::GatedMoEReplayTopology;
 use crate::mlp::moe::scratch::MoEScratch;
@@ -192,23 +192,20 @@ impl Qwen35MainLayer {
         self.mlp.replay_topology_boundaries()
     }
 
-    pub fn record<'a, R>(
+    pub fn record<'a>(
         &'a self,
-        recorder: &mut R,
+        recorder: &mut ReplayRecorder,
         num_total_tokens: u32,
         num_active_tokens: ReplayU32,
         input: Qwen35MainLayerInput<'a>,
-    ) -> &'a Buffer
-    where
-        R: Recorder<'a, Operator = ReplayOp<'a>>,
-    {
+    ) -> &'a Buffer {
         assert!(input.num_tokens > 0, "qwen3.5 Main replay requires active tokens");
         assert!(
             input.num_tokens <= num_total_tokens,
             "qwen3.5 Main active tokens must not exceed the replay capacity"
         );
         let hidden_dim = self.scratch.hidden_dim();
-        let check = |recorder: &mut R, stage: &str, buffer: &'a Buffer| {
+        let check = |recorder: &mut ReplayRecorder, stage: &str, buffer: &'a Buffer| {
             if let Some(check) = &self.finite_check {
                 recorder.record(ReplayOp::opaque(check.invoke(
                     check_finite::Input {
@@ -317,10 +314,7 @@ impl ReplayLayer for Qwen35MainLayer {
     type Input<'a> = Qwen35MainLayerInput<'a>;
     type Output<'a> = &'a Buffer;
 
-    fn record<'a, R>(&'a self, recorder: &mut R, input: Self::Input<'a>) -> Self::Output<'a>
-    where
-        R: Recorder<'a, Operator = ReplayOp<'a>>,
-    {
+    fn record<'a>(&'a self, recorder: &mut ReplayRecorder, input: Self::Input<'a>) -> Self::Output<'a> {
         Qwen35MainLayer::record(
             self,
             recorder,
@@ -462,16 +456,14 @@ impl Qwen35MainMLP {
         }
     }
 
-    fn record<'a, R>(
+    fn record<'a>(
         &'a self,
-        recorder: &mut R,
+        recorder: &mut ReplayRecorder,
         input: &'a Buffer,
         output: &'a Buffer,
         num_total_tokens: u32,
         num_active_tokens: ReplayU32,
-    ) where
-        R: Recorder<'a, Operator = ReplayOp<'a>>,
-    {
+    ) {
         match self {
             Self::Dense(component) => component.record(recorder, input, output, num_total_tokens, num_active_tokens),
             Self::MoE(component) => component.record(recorder, input, output, num_total_tokens, num_active_tokens),

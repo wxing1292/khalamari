@@ -1,3 +1,5 @@
+use inference_backend_metal::components::ReplayOp;
+use inference_backend_metal::components::ReplayRecorder;
 use inference_backend_metal::components::gqa::activation_gate as backend_activation_gate;
 use inference_backend_metal::components::gqa::kv_page_write as backend_kv_page_write;
 use inference_backend_metal::components::gqa::qgkv_split as backend_qgkv_split;
@@ -15,19 +17,17 @@ use inference_backend_metal::metal::ReplayParameterKey;
 use inference_backend_metal::metal::ReplayU32;
 use inference_backend_metal::operators::affine_quantized;
 use inference_executor_core::attn::GQACore;
-use inference_executor_core::attn::GQAPageTableLayout;
-use inference_executor_core::attn::GQAReplayShape;
-use inference_executor_core::backend::recorder::Recorder;
 
 use super::gqa_sdpa_config;
 use crate::attn::gqa::batch_metadata::GQAMetadataBuffers;
 use crate::attn::gqa::batch_metadata::GQAReplayBucketPolicy;
+use crate::attn::gqa::batch_metadata::GQAReplayShape;
+use crate::attn::gqa::request_page_table::GQAPageTableLayout;
 use crate::attn::gqa::scratch::GQAScratch;
 use crate::attn::gqa::scratch::GQAScratchBindings;
 use crate::attn::gqa::sdpa::RequestShape;
 use crate::attn::gqa::sdpa::Selector;
 use crate::def::layer::ReplayLayer;
-use crate::def::replay_op::ReplayOp;
 
 pub const GQA_NUM_ACTIVE_TOKENS: ReplayParameterKey = ReplayParameterKey::new("gqa.num_active_tokens");
 pub const GQA_NUM_ACTIVE_Q_TOKEN_TILES: ReplayParameterKey = ReplayParameterKey::new("gqa.num_active_q_token_tiles");
@@ -329,10 +329,7 @@ impl ReplayLayer for GQA {
     type Input<'a> = GQAInput<'a>;
     type Output<'a> = GQAOutput<'a>;
 
-    fn record<'a, R>(&'a self, recorder: &mut R, input: Self::Input<'a>) -> Self::Output<'a>
-    where
-        R: Recorder<'a, Operator = ReplayOp<'a>>,
-    {
+    fn record<'a>(&'a self, recorder: &mut ReplayRecorder, input: Self::Input<'a>) -> Self::Output<'a> {
         self.validate_input(&input);
         let shape = input.batch_metadata.replay_shape();
         let page_table_layout = input.page_table_layout;
@@ -438,10 +435,7 @@ impl ReplayLayer for GQA {
 }
 
 impl GQA {
-    fn record_sdpa<'a, R>(&'a self, recorder: &mut R, input: GQAInput<'a>) -> &'a Buffer
-    where
-        R: Recorder<'a, Operator = ReplayOp<'a>>,
-    {
+    fn record_sdpa<'a>(&'a self, recorder: &mut ReplayRecorder, input: GQAInput<'a>) -> &'a Buffer {
         let shape = input.batch_metadata.replay_shape();
         let page_table_layout = input.page_table_layout;
         let page_table_index = input.gqa_layer_index;

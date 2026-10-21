@@ -1,5 +1,7 @@
 use std::rc::Rc;
 
+use inference_backend_metal::components::ReplayOp;
+use inference_backend_metal::components::ReplayRecorder;
 use inference_backend_metal::metal::Buffer;
 use inference_backend_metal::metal::Device;
 use inference_backend_metal::metal::Dtype;
@@ -8,7 +10,6 @@ use inference_backend_metal::metal::ReplayParameterKey;
 use inference_backend_metal::metal::ReplayU32;
 use inference_backend_metal::operators::affine_quantized;
 use inference_backend_metal::operators::bf16_concat_rows;
-use inference_executor_core::backend::recorder::Recorder;
 use inference_executor_core::checkpoint::remove_tensor;
 use inference_executor_core::def::ModelExecutorError;
 use inference_executor_core::model::qwen::v3_5::Qwen35ModelConfig;
@@ -17,8 +18,6 @@ use inference_executor_core::replay::ReplayBucketPolicy;
 
 use crate::checkpoint::SafeTensorStore;
 use crate::def::layer::ReplayLayer;
-use crate::def::replay_op::ReplayOp;
-use crate::def::replay_op::ReplayRecorder;
 use crate::model::embedding::Embed;
 use crate::model::embedding::EmbedInput;
 use crate::model::qwen::v3_x::weight::remove_quant_weight;
@@ -183,18 +182,15 @@ impl Qwen35MTPEmbed {
             .expect("qwen3.5 MTP shared embed weights must be loaded before execution")
     }
 
-    fn record_projection<'a, R>(
+    fn record_projection<'a>(
         &'a self,
-        recorder: &mut R,
+        recorder: &mut ReplayRecorder,
         num_total_tokens: u32,
         num_active_tokens: ReplayU32,
         previous_hidden: &'a Buffer,
         shifted_embeddings: &'a Buffer,
         output: &'a Buffer,
-    ) -> &'a Buffer
-    where
-        R: Recorder<'a, Operator = ReplayOp<'a>>,
-    {
+    ) -> &'a Buffer {
         self.hidden_norm.record_with_barrier(
             recorder,
             num_total_tokens,
@@ -243,16 +239,13 @@ impl Qwen35MTPEmbed {
         (key, arguments)
     }
 
-    pub fn record<'a, R>(
+    pub fn record<'a>(
         &'a self,
-        recorder: &mut R,
+        recorder: &mut ReplayRecorder,
         num_total_tokens: u32,
         num_active_tokens: ReplayU32,
         args: Qwen35MTPEmbedArgs<'a>,
-    ) -> &'a Buffer
-    where
-        R: Recorder<'a, Operator = ReplayOp<'a>>,
-    {
+    ) -> &'a Buffer {
         match num_active_tokens {
             ReplayU32::Fixed(value) => {
                 assert_eq!(value, args.num_tokens);
@@ -428,7 +421,6 @@ mod tests {
     use safetensors::tensor::serialize_to_file;
 
     use super::*;
-    use crate::def::replay_op::MetalReplayRuntime;
     use crate::model::embedding::EmbedConfig;
     use crate::replay::Replay;
 
@@ -491,16 +483,16 @@ mod tests {
     fn test_replay_matches_cpu_reference_across_active_counts() {
         let device = Device::system_default();
         let stream = Stream::new(&device);
-        let runtime = MetalReplayRuntime::new(&stream);
+        let runtime = &stream;
         let (component, weights) = fixture_component(&device);
         let buffers = TestBuffers::new(&device);
         let input = buffers.input(NUM_TOTAL_TOKENS);
         let mut replay = Replay::new("qwen3.5 MTPEmbed component test", component);
-        let (recorded_key, cache_hit) = replay.record(&runtime, &input);
+        let (recorded_key, cache_hit) = replay.record(runtime, &input);
         assert!(!cache_hit);
 
         for num_active_tokens in [1_usize, 8, 3, 7, 2, 6, 4, 5] {
-            assert_eq!(replay.record(&runtime, &input), (recorded_key.clone(), true));
+            assert_eq!(replay.record(runtime, &input), (recorded_key.clone(), true));
             runtime
                 .submit_replay_with_arguments(
                     replay.replay(&recorded_key),

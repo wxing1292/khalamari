@@ -2,16 +2,17 @@ use std::mem::size_of;
 use std::path::PathBuf;
 
 use half::bf16;
+use inference_backend_metal::components::ReplayRecorder;
 use inference_backend_metal::metal::Device;
 use inference_backend_metal::metal::ReplayU32;
 use inference_executor_core::attn::GDNCore;
-use inference_executor_core::attn::GDNReplayShape;
 use inference_executor_core::attn::gdn::GDNOutputGate;
 use inference_runtime_core::compute::ExecutorHibernationPlan;
 
 use super::GDNRequestStateTable;
 use super::GDNStateCapacity;
 use crate::attn::gdn::batch_metadata::GDNMetadataBuffers;
+use crate::attn::gdn::batch_metadata::GDNReplayShape;
 use crate::attn::gdn::request_slots::GDNRequestSlots;
 use crate::model::state_snapshot::FullStateIO;
 use crate::model::state_snapshot::GDNStateSnapshotFiles;
@@ -525,11 +526,9 @@ fn test_commit_publish_restore_reuse_recording() {
     use inference_backend_metal::metal::ReplayParameterKey;
     use inference_backend_metal::metal::Stream;
 
-    use crate::def::replay_op::MetalReplayRuntime;
-
     let device = Device::system_default();
     let stream = Stream::new(&device);
-    let runtime = MetalReplayRuntime::new(&stream);
+    let runtime = &stream;
     let state = GDNRequestStateTable::new(
         &device,
         &[core(0), core(1)],
@@ -584,7 +583,7 @@ fn test_commit_publish_restore_reuse_recording() {
         let num_publishes = state.prepare_publish(&pages);
         assert!(num_publishes > 0);
         let replay = replay.get_or_insert_with(|| {
-            let mut recorder = runtime.create_recorder();
+            let mut recorder = ReplayRecorder::new(runtime.create_replay_program());
             state.record_commit(&mut recorder, jobs.len() as u32, ReplayU32::Parameter(active_jobs));
             state.record_publish(
                 &mut recorder,
@@ -647,7 +646,7 @@ fn test_commit_publish_restore_reuse_recording() {
         let num_restores = state.prepare_restore(&pages);
         assert_eq!(num_restores, 1);
         let restore_replay = restore_replay.get_or_insert_with(|| {
-            let mut recorder = runtime.create_recorder();
+            let mut recorder = ReplayRecorder::new(runtime.create_replay_program());
             state.record_restore(
                 &mut recorder,
                 &pages,

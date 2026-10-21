@@ -1,3 +1,5 @@
+use inference_backend_metal::components::ReplayOp;
+use inference_backend_metal::components::ReplayRecorder;
 use inference_backend_metal::components::gdn::compute as backend_compute;
 use inference_backend_metal::metal::Buffer;
 use inference_backend_metal::metal::Device;
@@ -7,17 +9,15 @@ use inference_backend_metal::metal::ReplayParameterKey;
 use inference_backend_metal::metal::ReplayU32;
 use inference_backend_metal::operators::affine_quantized;
 use inference_executor_core::attn::GDNCore;
-use inference_executor_core::attn::GDNReplayShape;
 use inference_executor_core::attn::gdn::GDNOutputGate;
-use inference_executor_core::backend::recorder::Recorder;
 use inference_executor_core::replay::ReplayBucketPolicy;
 
 use crate::attn::gdn::batch_metadata::GDNMetadataBuffers;
+use crate::attn::gdn::batch_metadata::GDNReplayShape;
 use crate::attn::gdn::scratch::GDNScratch;
 use crate::attn::gdn::scratch::GDNScratchBindings;
 use crate::attn::gdn::state_table::GDNPreparedRequestState;
 use crate::def::layer::ReplayLayer;
-use crate::def::replay_op::ReplayOp;
 
 pub const GDN_NUM_ACTIVE_REQUESTS: ReplayParameterKey = ReplayParameterKey::new("gdn.num_active_requests");
 pub const GDN_NUM_ACTIVE_TOKENS: ReplayParameterKey = ReplayParameterKey::new("gdn.num_active_tokens");
@@ -268,10 +268,7 @@ impl ReplayLayer for GDN {
     type Input<'a> = GDNInput<'a>;
     type Output<'a> = GDNOutput<'a>;
 
-    fn record<'a, R>(&'a self, recorder: &mut R, input: Self::Input<'a>) -> Self::Output<'a>
-    where
-        R: Recorder<'a, Operator = ReplayOp<'a>>,
-    {
+    fn record<'a>(&'a self, recorder: &mut ReplayRecorder, input: Self::Input<'a>) -> Self::Output<'a> {
         let shape = input.batch_metadata.replay_shape();
         shape.validate();
         match input.num_active_tokens {

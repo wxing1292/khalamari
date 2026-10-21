@@ -1,13 +1,14 @@
 use std::rc::Rc;
 
+use inference_backend_metal::components::ReplayRecorder;
 use inference_backend_metal::metal::Buffer;
 use inference_backend_metal::metal::Device;
 use inference_backend_metal::metal::ReplayArguments;
 use inference_backend_metal::metal::ReplayParameterKey;
+use inference_backend_metal::metal::ReplaySubmission;
 use inference_backend_metal::metal::ReplayU32;
 use inference_backend_metal::metal::Stream;
 use inference_executor_core::attn::GDNCore;
-use inference_executor_core::attn::GDNReplayShape;
 use inference_executor_core::replay::ReplayBucketPolicy;
 use inference_runtime_core::runtime::RawRequestSlot;
 
@@ -17,14 +18,12 @@ use crate::attn::gdn::backend::GDNReplayTopology;
 use crate::attn::gdn::backend::add_gdn_private_replay_arguments;
 use crate::attn::gdn::backend::add_gdn_replay_arguments;
 use crate::attn::gdn::batch_metadata::GDNMetadataBuffers;
+use crate::attn::gdn::batch_metadata::GDNReplayShape;
 use crate::attn::gdn::scratch::GDNScratch;
 use crate::attn::gdn::state_table::GDNPreparedRequestState;
 use crate::attn::gdn::state_table::GDNRequestStateResources;
 use crate::attn::gdn::state_table::GDNRequestStateTable;
 use crate::attn::gdn::state_table::GDNStateCapacity;
-use crate::def::replay_op::MetalReplayRuntime;
-use crate::def::replay_op::MetalReplaySubmission;
-use crate::def::replay_op::ReplayRecorder;
 use crate::replay::Replay;
 use crate::replay::ReplayComponent;
 use crate::trace;
@@ -51,7 +50,7 @@ pub struct Qwen3xGDNState {
     state_restore: Replay<GDNStateRestore>,
     state_commit: Replay<GDNStateCommit>,
     commit_stream: Stream,
-    pending_commit: Option<MetalReplaySubmission>,
+    pending_commit: Option<ReplaySubmission>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -264,7 +263,7 @@ impl Qwen3xGDNState {
         );
     }
 
-    pub fn restore(&mut self, runtime: &MetalReplayRuntime<'_>, pages: &Buffer) {
+    pub fn restore(&mut self, runtime: &Stream, pages: &Buffer) {
         let num_active_state_io_requests = self.request_state_table.prepare_restore(pages);
         if num_active_state_io_requests == 0 {
             trace::gdn_state(|| "event=gdn_restore skipped=true".to_string());
@@ -306,8 +305,8 @@ impl Qwen3xGDNState {
                 num_total_state_io_requests: num_active_state_io_requests,
             },
         };
-        let runtime = MetalReplayRuntime::new(&self.commit_stream);
-        let (key, cache_hit) = self.state_commit.record(&runtime, &input);
+        let runtime = &self.commit_stream;
+        let (key, cache_hit) = self.state_commit.record(runtime, &input);
         trace::gdn_state(|| format!("event=gdn_commit key={key:?} cache_hit={cache_hit}"));
         let mut arguments = ReplayArguments::new();
         if num_active_replay_jobs > 0 {

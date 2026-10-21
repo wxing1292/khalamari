@@ -3,8 +3,6 @@ use std::rc::Rc;
 use inference_backend_metal::metal::Device;
 use inference_backend_metal::metal::ReplayArguments;
 use inference_executor_core::attn::GQACore;
-use inference_executor_core::attn::GQAPageTableLayout;
-use inference_executor_core::attn::GQAReplayShape;
 use inference_runtime_core::runtime::RawRequestSlot;
 
 use crate::attn::gqa::backend::GQA;
@@ -14,6 +12,8 @@ use crate::attn::gqa::backend::add_gqa_private_replay_arguments;
 use crate::attn::gqa::backend::add_gqa_replay_arguments;
 use crate::attn::gqa::batch_metadata::GQAMetadataBuffers;
 use crate::attn::gqa::batch_metadata::GQAReplayBucketPolicy;
+use crate::attn::gqa::batch_metadata::GQAReplayShape;
+use crate::attn::gqa::request_page_table::GQAPageTableLayout;
 use crate::attn::gqa::request_page_table::GQARequestPageTable;
 use crate::attn::gqa::scratch::GQAScratch;
 
@@ -201,11 +201,11 @@ mod tests {
     use inference_backend_metal::metal::Device;
     use inference_backend_metal::metal::Dtype;
     use inference_executor_core::attn::GQACore;
-    use inference_executor_core::attn::GQAPageTableLayout;
     use inference_runtime_core::compute::ExecutorHibernationPlan;
 
     use super::Qwen3xGQAState;
     use crate::attn::gqa::backend::GQAMetalConfig;
+    use crate::attn::gqa::request_page_table::GQAPageTableLayout;
     use crate::model::state_snapshot::FullStateIO;
     use crate::model::state_snapshot::GQAStateSnapshotFiles;
     use crate::model::state_snapshot::StateSnapshotFile;

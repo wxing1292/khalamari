@@ -2,6 +2,8 @@ use std::cell::RefCell;
 use std::mem::size_of;
 use std::rc::Rc;
 
+use inference_backend_metal::components::ReplayOp;
+use inference_backend_metal::components::ReplayRecorder;
 use inference_backend_metal::components::gdn::compute::ReplayBuffers;
 use inference_backend_metal::components::gdn::state_pages as backend_state_pages;
 use inference_backend_metal::components::gdn::state_replay as backend_state_replay;
@@ -10,14 +12,12 @@ use inference_backend_metal::metal::Device;
 use inference_backend_metal::metal::ReplayU32;
 use inference_executor_core::attn::GDNCore;
 use inference_executor_core::attn::gdn::state::GDNStateTxn;
-use inference_executor_core::backend::recorder::Recorder;
 use inference_runtime_core::runtime::RawRequestSlot;
 
 use crate::attn::gdn::request_slots::GDNRequestSlots;
 use crate::attn::gdn::request_slots::GDNStatePages;
 use crate::attn::gdn::request_slots::GDNStatePublish;
 use crate::attn::gdn::request_slots::GDNStateRestore;
-use crate::def::replay_op::ReplayOp;
 use crate::trace;
 
 mod file_io;
@@ -362,15 +362,13 @@ impl GDNRequestStateTable {
         restores.len() as u32
     }
 
-    pub fn record_restore<'a, R>(
+    pub fn record_restore<'a>(
         &'a self,
-        recorder: &mut R,
+        recorder: &mut ReplayRecorder,
         pages: &'a Buffer,
         num_total_state_io_requests: u32,
         num_active_state_io_requests: ReplayU32,
-    ) where
-        R: Recorder<'a, Operator = ReplayOp<'a>>,
-    {
+    ) {
         let resources = self.resources();
         resources.page_io.record_restore(
             recorder,
@@ -403,15 +401,13 @@ impl GDNRequestStateTable {
         publishes.len() as u32
     }
 
-    pub fn record_publish<'a, R>(
+    pub fn record_publish<'a>(
         &'a self,
-        recorder: &mut R,
+        recorder: &mut ReplayRecorder,
         pages: &'a Buffer,
         num_total_state_io_requests: u32,
         num_active_state_io_requests: ReplayU32,
-    ) where
-        R: Recorder<'a, Operator = ReplayOp<'a>>,
-    {
+    ) {
         let resources = self.resources();
         resources.page_io.record_publish(
             recorder,
@@ -606,14 +602,12 @@ impl GDNRequestStateTable {
         replay_jobs
     }
 
-    pub fn record_commit<'a, R>(
-        &'a self,
-        recorder: &mut R,
+    pub fn record_commit(
+        &self,
+        recorder: &mut ReplayRecorder,
         num_total_replay_jobs: u32,
         num_active_replay_jobs: ReplayU32,
-    ) where
-        R: Recorder<'a, Operator = ReplayOp<'a>>,
-    {
+    ) {
         let resources = self.resources();
         recorder.record(ReplayOp::opaque(resources.replay_commit.invoke(
             num_total_replay_jobs,
@@ -883,17 +877,15 @@ impl GDNStatePageIO {
         }
     }
 
-    fn record_restore<'a, R>(
+    fn record_restore<'a>(
         &'a self,
-        recorder: &mut R,
+        recorder: &mut ReplayRecorder,
         pages: &'a Buffer,
         recurrent_states: &'a Buffer,
         conv_states: &'a Buffer,
         num_total_state_io_requests: u32,
         num_active_state_io_requests: ReplayU32,
-    ) where
-        R: Recorder<'a, Operator = ReplayOp<'a>>,
-    {
+    ) {
         recorder.record(ReplayOp::opaque(self.read.invoke(
             Self::shape(num_total_state_io_requests),
             num_active_state_io_requests,
@@ -908,17 +900,15 @@ impl GDNStatePageIO {
         )));
     }
 
-    fn record_publish<'a, R>(
+    fn record_publish<'a>(
         &'a self,
-        recorder: &mut R,
+        recorder: &mut ReplayRecorder,
         pages: &'a Buffer,
         recurrent_states: &'a Buffer,
         conv_states: &'a Buffer,
         num_total_state_io_requests: u32,
         num_active_state_io_requests: ReplayU32,
-    ) where
-        R: Recorder<'a, Operator = ReplayOp<'a>>,
-    {
+    ) {
         recorder.record(ReplayOp::opaque(self.write.invoke(
             Self::shape(num_total_state_io_requests),
             num_active_state_io_requests,

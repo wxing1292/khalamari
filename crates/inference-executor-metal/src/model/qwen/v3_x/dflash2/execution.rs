@@ -6,7 +6,7 @@ use inference_backend_metal::metal::Device;
 use inference_backend_metal::metal::Dtype;
 use inference_backend_metal::metal::ReplayArguments;
 use inference_backend_metal::metal::ReplayExecution;
-use inference_executor_core::attn::GQAPageTableLayout;
+use inference_backend_metal::metal::Stream;
 use inference_executor_core::def::ModelExecutorError;
 use inference_executor_core::model::qwen::v3_x::dflash2::Qwen3xDFlash2Config;
 use inference_executor_core::model::qwen::v3_x::dflash2::Qwen3xDFlash2WeightBindings;
@@ -15,8 +15,8 @@ use inference_runtime_core::runtime::RawRequestSlot;
 
 use crate::attn::bidi_block_gqa::state::BiDiBlockGQAState;
 use crate::attn::gqa::batch_metadata::GQAMetadataBuffers;
+use crate::attn::gqa::request_page_table::GQAPageTableLayout;
 use crate::checkpoint::SafeTensorStore;
-use crate::def::replay_op::MetalReplayRuntime;
 use crate::model::embedding::Embed;
 use crate::model::qwen::v3_x::SpecReplayStageEnds;
 use crate::model::qwen::v3_x::dflash2::embed::Qwen3xDFlash2Embed;
@@ -240,7 +240,7 @@ impl Qwen3xDFlash2Execution {
 
     pub fn record_spec_prefill(
         &mut self,
-        runtime: &MetalReplayRuntime<'_>,
+        runtime: &Stream,
         spec_prefill: &GQAMetadataBuffers,
         pages: &Buffer,
     ) -> Qwen3xDFlash2PrefillRecording {
@@ -259,7 +259,7 @@ impl Qwen3xDFlash2Execution {
     #[allow(clippy::too_many_arguments)]
     pub fn record_decode_prepare(
         &mut self,
-        runtime: &MetalReplayRuntime<'_>,
+        runtime: &Stream,
         token_ids: &Buffer,
         rejection_sampling: SparseRejectionSamplingOutput<'_>,
         req_slots: &[u32],
@@ -295,7 +295,7 @@ impl Qwen3xDFlash2Execution {
     #[allow(clippy::too_many_arguments)]
     pub fn record_spec_decode(
         &mut self,
-        runtime: &MetalReplayRuntime<'_>,
+        runtime: &Stream,
         token_ids: &Buffer,
         decode_prepare: SpecDecodeInputRecording,
         num_requests: u32,

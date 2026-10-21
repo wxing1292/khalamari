@@ -8,8 +8,6 @@ use inference_backend_metal::metal::ReplayArguments;
 use inference_executor_core::attn::BiDiBlockCapacity;
 use inference_executor_core::attn::BiDiBlockGQACore;
 use inference_executor_core::attn::BiDiBlockGQAMetadata;
-use inference_executor_core::attn::GQAPageTableLayout;
-use inference_executor_core::attn::GQAReplayShape;
 use inference_runtime_core::runtime::RawRequestSlot;
 
 use crate::attn::bidi_block_gqa::backend::BiDiBlockGQA;
@@ -20,6 +18,8 @@ use crate::attn::bidi_block_gqa::kv_cache_write::BiDiBlockGQAKVCacheWriteScratch
 use crate::attn::bidi_block_gqa::metadata::BiDiBlockGQAMetadataBuffers;
 use crate::attn::bidi_block_gqa::scratch::BiDiBlockGQAScratch;
 use crate::attn::bidi_block_gqa::sdpa::Selector as SDPASelector;
+use crate::attn::gqa::batch_metadata::GQAReplayShape;
+use crate::attn::gqa::request_page_table::GQAPageTableLayout;
 use crate::attn::gqa::request_page_table::GQARequestPageTable;
 
 mod file_io;
@@ -251,10 +251,10 @@ mod tests {
     use inference_backend_metal::metal::Dtype;
     use inference_executor_core::attn::BiDiBlockCapacity;
     use inference_executor_core::attn::BiDiBlockGQACore;
-    use inference_executor_core::attn::GQAPageTableLayout;
     use inference_executor_core::attn::UngatedGQACore;
 
     use super::BiDiBlockGQAState;
+    use crate::attn::gqa::request_page_table::GQAPageTableLayout;
 
     #[test]
     fn test_write_read_page_ids_uses_complete_bidi_block_gqa_block() {

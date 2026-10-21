@@ -2,8 +2,9 @@ use inference_backend_metal::metal::Buffer;
 use inference_backend_metal::metal::Device;
 use inference_backend_metal::metal::Dtype;
 use inference_executor_core::sampling::SamplerConfig;
-use inference_executor_core::sampling::TopKSamplingBounds;
-use inference_executor_core::sampling::TopKSamplingShape;
+
+use crate::sampling::top_k_sampling::config::TopKSamplingBounds;
+use crate::sampling::top_k_sampling::config::TopKSamplingShape;
 
 const PARAM_STRIDE: usize = 4;
 

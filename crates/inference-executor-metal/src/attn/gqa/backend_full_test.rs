@@ -2,6 +2,7 @@ use std::collections::HashSet;
 use std::mem::size_of;
 
 use half::bf16;
+use inference_backend_metal::components::ReplayRecorder;
 use inference_backend_metal::components::gqa::fp8::bf16_to_f32;
 use inference_backend_metal::components::gqa::fp8::bf16_to_fp8_e4m3;
 use inference_backend_metal::components::gqa::fp8::f32_to_bf16;
@@ -14,7 +15,6 @@ use inference_backend_metal::metal::ReplayArguments;
 use inference_backend_metal::metal::ReplayU32;
 use inference_backend_metal::metal::Stream;
 use inference_executor_core::attn::GQACore;
-use inference_executor_core::attn::GQAPageTableLayout;
 use inference_executor_core::attn::gqa::reference::GQAReferenceInput;
 use inference_executor_core::attn::gqa::reference::projected_gqa_reference;
 use inference_executor_core::mlp::dense::reference::QuantizedAffineReferenceShape;
@@ -28,9 +28,8 @@ use super::GQAMetalConfig;
 use super::GQAReplayTopology;
 use super::GQAWeights;
 use super::add_gqa_replay_arguments;
+use crate::attn::gqa::request_page_table::GQAPageTableLayout;
 use crate::def::layer::ReplayLayer;
-use crate::def::replay_op::MetalReplayRuntime;
-use crate::def::replay_op::ReplayRecorder;
 use crate::replay::Replay;
 use crate::replay::ReplayComponent;
 
@@ -58,7 +57,7 @@ fn test_direct_output_replay_and_output_mode_cache_identity() {
 fn run_replay_reference(head_dim: usize, output_modes: Option<&[bool]>) {
     let device = Device::system_default();
     let stream = Stream::new(&device);
-    let runtime = MetalReplayRuntime::new(&stream);
+    let runtime = &stream;
     let core = fixture_core(head_dim);
     let config = fixture_config(head_dim);
     let page_table_layout = GQAPageTableLayout {
@@ -143,7 +142,7 @@ fn run_replay_reference(head_dim: usize, output_modes: Option<&[bool]>) {
                 scratch: scratch.bindings(),
                 num_active_tokens: ReplayU32::Parameter(GQA_NUM_ACTIVE_TOKENS),
             };
-            let (key, cache_hit) = replay.record(&runtime, &input);
+            let (key, cache_hit) = replay.record(runtime, &input);
             let seen = !recorded_keys.insert(key);
             assert_eq!(cache_hit, seen);
 

@@ -1,5 +1,7 @@
 use std::rc::Rc;
 
+use inference_backend_metal::components::ReplayOp;
+use inference_backend_metal::components::ReplayRecorder;
 use inference_backend_metal::components::check_finite;
 use inference_backend_metal::metal::Buffer;
 use inference_backend_metal::metal::Device;
@@ -8,12 +10,9 @@ use inference_backend_metal::metal::ReplayArguments;
 use inference_backend_metal::metal::ReplayParameterKey;
 use inference_backend_metal::metal::ReplayU32;
 use inference_backend_metal::operators::affine_quantized;
-use inference_executor_core::backend::recorder::Recorder;
 use inference_executor_core::replay::ReplayBucketPolicy;
 
 use crate::def::layer::ReplayLayer;
-use crate::def::replay_op::ReplayOp;
-use crate::def::replay_op::ReplayRecorder;
 use crate::model::gather::Gather;
 use crate::model::unembedding::Unembed;
 use crate::model::unembedding::UnembedInput;
@@ -87,16 +86,13 @@ impl Qwen35GatherUnembed {
         self.replay_bucket_policy.max_capacity()
     }
 
-    pub fn record<'a, R>(
+    pub fn record<'a>(
         &'a self,
-        recorder: &mut R,
+        recorder: &mut ReplayRecorder,
         num_total_rows: u32,
         num_active_rows: ReplayU32,
         args: Qwen35GatherUnembedArgs<'a>,
-    ) -> &'a Buffer
-    where
-        R: Recorder<'a, Operator = ReplayOp<'a>>,
-    {
+    ) -> &'a Buffer {
         match num_active_rows {
             ReplayU32::Fixed(value) => {
                 assert_eq!(value, args.num_rows);
@@ -206,7 +202,6 @@ mod tests {
     use inference_executor_core::mlp::dense::reference::quantized_affine_reference;
 
     use super::*;
-    use crate::def::replay_op::MetalReplayRuntime;
     use crate::model::unembedding::UnembedConfig;
     use crate::model::unembedding::fixture_unembed;
     use crate::replay::Replay;
@@ -221,7 +216,7 @@ mod tests {
     fn test_nonfinite_hidden_reports_gather_before_unembed() {
         let device = Device::system_default();
         let stream = Stream::new(&device);
-        let runtime = MetalReplayRuntime::new(&stream);
+        let runtime = &stream;
         let (mut component, _) = fixture_component(&device);
         component.finite_checks = Some((
             check_finite::Compute::new(&device, Dtype::Bfloat16, HIDDEN_DIM),
@@ -232,7 +227,7 @@ mod tests {
         buffers.hidden_input.write_typed(source_index, &[bf16::NAN.to_bits()]);
         let input = buffers.input(NUM_TOTAL_ROWS);
         let mut replay = Replay::new("Qwen35 numerical diagnostic test", component);
-        let (key, _) = replay.record(&runtime, &input);
+        let (key, _) = replay.record(runtime, &input);
         let failure = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             runtime
                 .submit_replay_with_arguments(
@@ -254,16 +249,16 @@ mod tests {
     fn test_replay_matches_cpu_reference_across_active_counts() {
         let device = Device::system_default();
         let stream = Stream::new(&device);
-        let runtime = MetalReplayRuntime::new(&stream);
+        let runtime = &stream;
         let (component, weights) = fixture_component(&device);
         let buffers = TestBuffers::new(&device);
         let input = buffers.input(NUM_TOTAL_ROWS);
         let mut replay = Replay::new("qwen3.5 GatherUnembed component test", component);
-        let (recorded_key, cache_hit) = replay.record(&runtime, &input);
+        let (recorded_key, cache_hit) = replay.record(runtime, &input);
         assert!(!cache_hit);
 
         for num_active_rows in [1_u32, 8, 3, 7, 2, 6, 4, 5] {
-            assert_eq!(replay.record(&runtime, &input), (recorded_key.clone(), true));
+            assert_eq!(replay.record(runtime, &input), (recorded_key.clone(), true));
             runtime
                 .submit_replay_with_arguments(
                     replay.replay(&recorded_key),

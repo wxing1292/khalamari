@@ -1,11 +1,11 @@
 use std::rc::Rc;
 
+use inference_backend_metal::components::ReplayRecorder;
 use inference_backend_metal::components::dense_mlp;
 use inference_backend_metal::metal::Buffer;
 use inference_backend_metal::metal::Device;
 use inference_backend_metal::metal::Dtype;
 use inference_backend_metal::metal::ReplayU32;
-use inference_executor_core::backend::recorder::Recorder;
 use inference_executor_core::def::ModelExecutorError;
 use inference_executor_core::model::qwen::v3::Qwen3TextConfig;
 use inference_executor_core::model::qwen::v3::weight_layout::Qwen3LayerWeightBindings;
@@ -13,7 +13,6 @@ use inference_executor_core::model::qwen::v3::weight_layout::Qwen3LayerWeightBin
 use crate::attn::gqa::batch_metadata::GQAMetadataBuffers;
 use crate::checkpoint::SafeTensorStore;
 use crate::def::layer::ReplayLayer;
-use crate::def::replay_op::ReplayOp;
 use crate::mlp::dense::scratch::DenseMLPScratch;
 use crate::model::qwen::v3::main::component_config::Qwen3MainConfig;
 use crate::model::qwen::v3::main::component_config::derive_qwen3_dense_mlp_configs;
@@ -138,16 +137,13 @@ impl Qwen3MainLayer {
         self.mlp.replay_topology(num_total_tokens)
     }
 
-    pub fn record<'a, R>(
+    pub fn record<'a>(
         &'a self,
-        recorder: &mut R,
+        recorder: &mut ReplayRecorder,
         num_total_tokens: u32,
         num_active_tokens: ReplayU32,
         input: Qwen3MainLayerInput<'a>,
-    ) -> &'a Buffer
-    where
-        R: Recorder<'a, Operator = ReplayOp<'a>>,
-    {
+    ) -> &'a Buffer {
         assert!(input.num_tokens > 0, "qwen3 Main replay requires active tokens");
         assert!(
             input.num_tokens <= num_total_tokens,
@@ -210,10 +206,7 @@ impl ReplayLayer for Qwen3MainLayer {
     type Input<'a> = Qwen3MainLayerInput<'a>;
     type Output<'a> = &'a Buffer;
 
-    fn record<'a, R>(&'a self, recorder: &mut R, input: Self::Input<'a>) -> Self::Output<'a>
-    where
-        R: Recorder<'a, Operator = ReplayOp<'a>>,
-    {
+    fn record<'a>(&'a self, recorder: &mut ReplayRecorder, input: Self::Input<'a>) -> Self::Output<'a> {
         Qwen3MainLayer::record(
             self,
             recorder,

@@ -1,6 +1,4 @@
-use inference_executor_core::backend::recorder::Recorder;
-
-use crate::def::replay_op::ReplayOp;
+use inference_backend_metal::components::ReplayRecorder;
 
 /// Replay-recording abstraction for semantic model layers/components.
 ///
@@ -17,7 +15,5 @@ pub trait ReplayLayer {
     where
         Self: 'a;
 
-    fn record<'a, R>(&'a self, recorder: &mut R, input: Self::Input<'a>) -> Self::Output<'a>
-    where
-        R: Recorder<'a, Operator = ReplayOp<'a>>;
+    fn record<'a>(&'a self, recorder: &mut ReplayRecorder, input: Self::Input<'a>) -> Self::Output<'a>;
 }

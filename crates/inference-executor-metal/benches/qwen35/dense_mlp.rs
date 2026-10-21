@@ -6,6 +6,8 @@ use std::time::Duration;
 use std::time::Instant;
 
 use half::bf16;
+use inference_backend_metal::components::ReplayOp;
+use inference_backend_metal::components::ReplayRecorder;
 use inference_backend_metal::components::dense_mlp;
 use inference_backend_metal::metal::Buffer;
 use inference_backend_metal::metal::Device;
@@ -15,12 +17,9 @@ use inference_backend_metal::metal::ReplayProgram;
 use inference_backend_metal::metal::ReplayU32;
 use inference_backend_metal::metal::Stream;
 use inference_backend_metal::operators::affine_quantized;
-use inference_executor_core::backend::recorder::Recorder;
 use inference_executor_core::mlp::dense::DenseMLPCore;
 use inference_executor_metal::def::layer::ReplayLayer;
 use inference_executor_metal::def::quantized_affine::QuantizedAffineLayout;
-use inference_executor_metal::def::replay_op::MetalReplayRuntime;
-use inference_executor_metal::def::replay_op::ReplayOp;
 use inference_executor_metal::mlp::dense::backend::DenseMLP;
 use inference_executor_metal::mlp::dense::backend::DenseMLPInput;
 use inference_executor_metal::mlp::dense::backend::DenseMLPMetalConfig;
@@ -340,7 +339,7 @@ impl<'a> RealDenseMLPFixture<'a> {
     }
 
     fn forward_replay(&self) -> ReplayProgram {
-        let mut recorder = MetalReplayRuntime::new(&self.stream).create_recorder();
+        let mut recorder = ReplayRecorder::new(self.stream.create_replay_program());
         let _ = <DenseMLP as ReplayLayer>::record(
             &self.backend,
             &mut recorder,
@@ -357,33 +356,29 @@ impl<'a> RealDenseMLPFixture<'a> {
     }
 
     fn submit_replay(&self, replay: &ReplayProgram) {
-        MetalReplayRuntime::new(&self.stream).submit_replay(replay).wait();
+        self.stream.submit_replay(replay).wait();
     }
 
     fn forced_full_replay(&self, policy: DenseAffinePolicy) -> ReplayProgram {
-        let mut recorder = MetalReplayRuntime::new(&self.stream).create_recorder();
+        let mut recorder = ReplayRecorder::new(self.stream.create_replay_program());
         self.record_forced_gate_up(&mut recorder, policy);
         self.record_forced_down(&mut recorder, policy);
         recorder.build()
     }
 
     fn forced_gate_up_replay(&self, policy: DenseAffinePolicy) -> ReplayProgram {
-        let mut recorder = MetalReplayRuntime::new(&self.stream).create_recorder();
+        let mut recorder = ReplayRecorder::new(self.stream.create_replay_program());
         self.record_forced_gate_up(&mut recorder, policy);
         recorder.build()
     }
 
     fn forced_down_replay(&self, policy: DenseAffinePolicy) -> ReplayProgram {
-        let mut recorder = MetalReplayRuntime::new(&self.stream).create_recorder();
+        let mut recorder = ReplayRecorder::new(self.stream.create_replay_program());
         self.record_forced_down(&mut recorder, policy);
         recorder.build()
     }
 
-    fn record_forced_gate_up<'b>(
-        &'b self,
-        recorder: &mut impl Recorder<'b, Operator = ReplayOp<'b>>,
-        policy: DenseAffinePolicy,
-    ) {
+    fn record_forced_gate_up(&self, recorder: &mut ReplayRecorder, policy: DenseAffinePolicy) {
         let kernel = match policy {
             DenseAffinePolicy::QmvBn8Bk32 => &self.gate_up_swiglu_qmv_bn8_bk32,
             DenseAffinePolicy::QmmBm8Bn32 => &self.gate_up_swiglu_qmm_bm8_bn16,
@@ -407,11 +402,7 @@ impl<'a> RealDenseMLPFixture<'a> {
         )));
     }
 
-    fn record_forced_down<'b>(
-        &'b self,
-        recorder: &mut impl Recorder<'b, Operator = ReplayOp<'b>>,
-        policy: DenseAffinePolicy,
-    ) {
+    fn record_forced_down(&self, recorder: &mut ReplayRecorder, policy: DenseAffinePolicy) {
         let kernel = match policy {
             DenseAffinePolicy::QmvBn8Bk32 => &self.down_qmv_bn8_bk32,
             DenseAffinePolicy::QmmBm8Bn32 => &self.down_qmm_bm8_bn32,
@@ -645,7 +636,7 @@ fn build_single_invocation_replay<I>(stream: &Stream, invocation: I) -> ReplayPr
 where
     I: Operator,
 {
-    let mut recorder = MetalReplayRuntime::new(stream).create_recorder();
+    let mut recorder = ReplayRecorder::new(stream.create_replay_program());
     recorder.record(ReplayOp::opaque(invocation));
     recorder.build()
 }

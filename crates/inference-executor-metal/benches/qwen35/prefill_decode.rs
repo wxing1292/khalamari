@@ -5,6 +5,7 @@ use std::process::Command;
 use std::time::Duration;
 use std::time::Instant;
 
+use inference_executor_core::model::ExecutionSubmission;
 use inference_executor_core::model::ModelOutputTiming;
 use inference_executor_core::model::ReplayableDecoderModel;
 use inference_executor_core::model::qwen::v3_5::init_qwen35_model_config;

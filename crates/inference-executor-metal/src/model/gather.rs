@@ -1,11 +1,10 @@
+use inference_backend_metal::components::ReplayOp;
+use inference_backend_metal::components::ReplayRecorder;
 use inference_backend_metal::metal::Buffer;
 use inference_backend_metal::metal::Device;
 use inference_backend_metal::metal::Dtype;
 use inference_backend_metal::metal::ReplayU32;
 use inference_backend_metal::operators::row_gather;
-use inference_executor_core::backend::recorder::Recorder;
-
-use crate::def::replay_op::ReplayOp;
 
 pub struct Gather {
     compute: row_gather::Kernel,
@@ -24,17 +23,15 @@ impl Gather {
         }
     }
 
-    pub fn record<'a, R>(
+    pub fn record<'a>(
         &'a self,
-        recorder: &mut R,
+        recorder: &mut ReplayRecorder,
         num_total_rows: u32,
         num_active_rows: ReplayU32,
         input: &'a Buffer,
         row_indices: &'a Buffer,
         output: &'a Buffer,
-    ) where
-        R: Recorder<'a, Operator = ReplayOp<'a>>,
-    {
+    ) {
         let shape = row_gather::Shape { num_total_rows };
         let buffers = row_gather::Buffers {
             input,

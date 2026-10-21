@@ -1,13 +1,11 @@
 use std::rc::Rc;
 
+use inference_backend_metal::components::ReplayRecorder;
 use inference_backend_metal::metal::Buffer;
 use inference_executor_core::replay::ReplayBucketPolicy;
 use inference_executor_core::sampling::SamplerConfig;
 use inference_executor_core::sampling::SamplingDomain;
-use inference_executor_core::sampling::TopKSamplingLogitsDtype;
-use inference_executor_core::sampling::TopKSamplingShape;
 
-use crate::def::replay_op::ReplayRecorder;
 use crate::replay::ReplayComponent;
 use crate::sampling::top_k_sampling::TopKSampling;
 use crate::sampling::top_k_sampling::TopKSamplingDraw;
@@ -15,6 +13,8 @@ use crate::sampling::top_k_sampling::TopKSamplingInputs;
 use crate::sampling::top_k_sampling::TopKSamplingOutput;
 use crate::sampling::top_k_sampling::TopKSamplingSampleAndWriteDistributionOutput;
 use crate::sampling::top_k_sampling::TopKSamplingWriteDistributionOutput;
+use crate::sampling::top_k_sampling::config::TopKSamplingLogitsDtype;
+use crate::sampling::top_k_sampling::config::TopKSamplingShape;
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct TopKSamplingReplayKey {

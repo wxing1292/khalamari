@@ -2,6 +2,8 @@
 
 use std::mem::size_of;
 
+use inference_backend_metal::components::ReplayOp;
+use inference_backend_metal::components::ReplayRecorder;
 use inference_backend_metal::components::gqa::bidi_block_sdpa as backend_bidi_block_sdpa;
 use inference_backend_metal::components::gqa::kv_page_write as backend_kv_page_write;
 use inference_backend_metal::components::gqa::sdpa as backend_sdpa;
@@ -17,17 +19,15 @@ use inference_backend_metal::metal::ReplayParameterKey;
 use inference_backend_metal::metal::ReplayU32;
 use inference_backend_metal::operators::affine_quantized;
 use inference_executor_core::attn::BiDiBlockGQACore;
-use inference_executor_core::attn::GQAPageTableLayout;
-use inference_executor_core::attn::GQAReplayShape;
-use inference_executor_core::backend::recorder::Recorder;
 
 use crate::attn::bidi_block_gqa::metadata::BiDiBlockGQAMetadataBuffers;
 use crate::attn::bidi_block_gqa::scratch::BiDiBlockGQAScratchBindings;
 use crate::attn::gqa::backend::GQAKVCacheBindings;
+use crate::attn::gqa::batch_metadata::GQAReplayShape;
+use crate::attn::gqa::request_page_table::GQAPageTableLayout;
 use crate::def::layer::ReplayLayer;
 use crate::def::quantized_affine::QuantizedAffineLayout;
 use crate::def::quantized_affine::QuantizedAffineWeights;
-use crate::def::replay_op::ReplayOp;
 
 pub const BIDI_BLOCK_GQA_NUM_ACTIVE_SDPA_MAP_TASK_TEMPLATES: ReplayParameterKey =
     ReplayParameterKey::new("bidi_block_gqa.num_active_sdpa_map_task_templates");
@@ -293,15 +293,13 @@ impl BiDiBlockGQA {
         }
     }
 
-    fn record_bidi_block_sdpa<'a, R>(
+    fn record_bidi_block_sdpa<'a>(
         &'a self,
-        recorder: &mut R,
+        recorder: &mut ReplayRecorder,
         shape: GQAReplayShape,
         metadata: &'a BiDiBlockGQAMetadataBuffers,
         scratch: BiDiBlockGQAScratchBindings<'a>,
-    ) where
-        R: Recorder<'a, Operator = ReplayOp<'a>>,
-    {
+    ) {
         recorder.record(ReplayOp::opaque(self.bidi_block_sdpa.invoke(
             backend_bidi_block_sdpa::Shape {
                 num_total_tokens: shape.num_total_tokens,
@@ -327,10 +325,7 @@ impl ReplayLayer for BiDiBlockGQA {
     type Input<'a> = BiDiBlockGQAInput<'a>;
     type Output<'a> = &'a Buffer;
 
-    fn record<'a, R>(&'a self, recorder: &mut R, input: Self::Input<'a>) -> Self::Output<'a>
-    where
-        R: Recorder<'a, Operator = ReplayOp<'a>>,
-    {
+    fn record<'a>(&'a self, recorder: &mut ReplayRecorder, input: Self::Input<'a>) -> Self::Output<'a> {
         let shape = self.validate_input(&input);
         let sdpa_execution = self.sdpa_execution;
         let attention = &self.core.attention;
@@ -526,11 +521,11 @@ fn norm_rope_config(
 #[cfg(test)]
 mod tests {
     use inference_backend_metal::metal::ReplayArguments;
-    use inference_executor_core::attn::GQAReplayShape;
 
     use super::BIDI_BLOCK_GQA_NUM_ACTIVE_Q_TOKEN_RANGES;
     use super::BIDI_BLOCK_GQA_NUM_ACTIVE_SDPA_MAP_TASK_TEMPLATES;
     use super::add_bidi_block_gqa_replay_arguments;
+    use crate::attn::gqa::batch_metadata::GQAReplayShape;
 
     #[test]
     fn test_replay_arguments_success() {

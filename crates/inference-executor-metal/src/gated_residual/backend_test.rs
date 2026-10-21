@@ -1,4 +1,5 @@
 use half::bf16;
+use inference_backend_metal::components::ReplayRecorder;
 use inference_backend_metal::metal::Dtype;
 use inference_backend_metal::metal::ReplayArguments;
 use inference_backend_metal::metal::ReplayParameterKey;
@@ -6,8 +7,6 @@ use inference_backend_metal::metal::Stream;
 use inference_executor_core::gated_residual::reference;
 
 use super::*;
-use crate::def::replay_op::MetalReplayRuntime;
-use crate::def::replay_op::ReplayRecorder;
 use crate::replay::Replay;
 use crate::replay::ReplayComponent;
 
@@ -17,7 +16,7 @@ const ACTIVE: ReplayParameterKey = ReplayParameterKey::new("test.gr.num_active_t
 fn test_read_write_replay() {
     let device = Device::system_default();
     let stream = Stream::new(&device);
-    let runtime = MetalReplayRuntime::new(&stream);
+    let runtime = &stream;
     for (hidden, rank, total) in [(37, 17, 4), (256, 32, 4), (256, 32, 17)] {
         let core = GatedResidualCore {
             num_branches: 4,
@@ -42,10 +41,10 @@ fn test_read_write_replay() {
                 write: fixture_buffer(&device, wide * core.num_branches, 0.02, 23),
             },
         );
-        let (key, hit) = replay.record(&runtime, &(total as u32));
+        let (key, hit) = replay.record(runtime, &(total as u32));
         assert!(!hit);
         for active in [1, total, total - 1, 2] {
-            assert!(replay.record(&runtime, &(total as u32)).1);
+            assert!(replay.record(runtime, &(total as u32)).1);
             runtime
                 .submit_replay_with_arguments(
                     replay.replay(&key),
@@ -92,7 +91,7 @@ fn test_read_write_replay() {
                 &final_read.hidden_state,
             );
         }
-        assert!(!replay.record(&runtime, &2).1);
+        assert!(!replay.record(runtime, &2).1);
     }
 }
 

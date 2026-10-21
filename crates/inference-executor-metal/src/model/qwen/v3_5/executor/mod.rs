@@ -48,10 +48,8 @@ use inference_backend_metal::metal::Buffer;
 use inference_backend_metal::metal::ReplayArguments;
 use inference_backend_metal::metal::ReplayExecution;
 use inference_backend_metal::metal::ReplayProgram;
-use inference_executor_core::attn::GQAPageTableLayout;
-use inference_executor_core::attn::GQAReplayShape;
-use inference_executor_core::backend::runtime::Runtime;
 use inference_executor_core::def::ModelExecutorError;
+use inference_executor_core::model::ExecutionSubmission;
 use inference_executor_core::model::ModelOutputTiming;
 use inference_executor_core::model::ReplayableDecoderModel;
 use inference_executor_core::model::qwen::v3_5::Qwen35DecodeDecision;
@@ -74,8 +72,6 @@ use inference_executor_core::model::qwen::v3_5::weight_layout::resolve_qwen35_mt
 use inference_executor_core::model::qwen::v3_x::dflash2::Qwen3xDFlash2Config;
 use inference_executor_core::sampling::RequestSamplingState;
 use inference_executor_core::sampling::SamplerConfig;
-use inference_executor_core::sampling::SparseRejectionSamplingReqParams;
-use inference_executor_core::sampling::TopKSamplingBounds;
 use inference_runtime_core::compute::BatchDevReq;
 use inference_runtime_core::compute::BatchDeviceRequest;
 use inference_runtime_core::compute::BatchDeviceResponse;
@@ -85,10 +81,10 @@ use inference_runtime_core::runtime::RawComputeSlotSeq;
 use inference_runtime_core::runtime::RawRequestSlot;
 use inference_runtime_core::runtime::Token;
 
+use crate::attn::gqa::batch_metadata::GQAReplayShape;
+use crate::attn::gqa::request_page_table::GQAPageTableLayout;
 use crate::checkpoint::SafeTensorStore;
-use crate::def::replay_op::MetalReplayRuntime;
-use crate::def::replay_op::MetalReplaySubmission;
-use crate::def::replay_op::ReplayRecorder;
+use crate::def::submission::MetalReplaySubmission;
 use crate::model::embedding::Embed;
 use crate::model::main_residual_capture::MainResidualCapture;
 use crate::model::main_resource_embed::MainResourceEmbed;
@@ -139,6 +135,7 @@ use crate::sampling::rejection_replay::RejectionReplayKey;
 use crate::sampling::rejection_replay::RejectionSamplerInput;
 use crate::sampling::rejection_replay::RejectionSampling;
 use crate::sampling::rejection_replay::RejectionSamplingInput;
+use crate::sampling::rejection_sampling::SparseRejectionSamplingReqParams;
 use crate::sampling::spec_probs::SpecProbsStore;
 use crate::sampling::top_k_replay::DraftSampling;
 use crate::sampling::top_k_replay::DraftSamplingInput;
@@ -148,6 +145,7 @@ use crate::sampling::top_k_replay::TopKSamplingReplayKey;
 use crate::sampling::top_k_sampling::TopKSampling;
 use crate::sampling::top_k_sampling::TopKSamplingOutputBuffers;
 use crate::sampling::top_k_sampling::TopKSamplingWriteDistributionOutput;
+use crate::sampling::top_k_sampling::config::TopKSamplingBounds;
 use crate::trace;
 
 mod load;
@@ -604,7 +602,7 @@ pub struct Qwen35Executor {
 
 impl Qwen35Executor {
     fn record_spec(&mut self, recorder: &mut Qwen35ModelOpsRecorder, microbatch: &Qwen35Microbatch) {
-        let runtime = MetalReplayRuntime::new(self.runtime.stream());
+        let runtime = self.runtime.stream();
         let pages = self.pages.buffer();
         // Spec Prefill consumes every Main row. Main GQA metadata already owns
         // the expanded per-row request slots and token indices.
@@ -633,13 +631,13 @@ impl Qwen35Executor {
             Qwen35Speculator::DFlash2(dflash2) => {
                 assert!(recorder.dflash2_spec_prefill.is_none() && recorder.dflash2_spec_decode.is_none());
                 recorder.dflash2_spec_prefill =
-                    Some(dflash2.execution.record_spec_prefill(&runtime, spec_prefill, pages));
+                    Some(dflash2.execution.record_spec_prefill(runtime, spec_prefill, pages));
                 if recorder.rejection_prepared.is_none() {
                     return;
                 }
                 let rejection_sampling = dflash2.common.rejection_sampling.component().rejector().output();
                 let (decode_prepare, num_requests) = dflash2.execution.record_decode_prepare(
-                    &runtime,
+                    runtime,
                     token_ids,
                     rejection_sampling,
                     &req_slots,
@@ -648,7 +646,7 @@ impl Qwen35Executor {
                     &dflash2.common.spec_probs,
                 );
                 recorder.dflash2_spec_decode = Some(dflash2.execution.record_spec_decode(
-                    &runtime,
+                    runtime,
                     token_ids,
                     decode_prepare,
                     num_requests,
@@ -1267,8 +1265,8 @@ impl ReplayableDecoderModel for Qwen35Executor {
             token_ids: &self.token_ids,
             hidden_output: &self.token_hidden_input,
         };
-        let runtime = MetalReplayRuntime::new(self.runtime.stream());
-        let (recorded_key, cache_hit) = self.main_text_embed.record(&runtime, &input);
+        let runtime = self.runtime.stream();
+        let (recorded_key, cache_hit) = self.main_text_embed.record(runtime, &input);
         debug_assert_eq!(
             recorded_key, recorder.main_text_embed_key,
             "qwen3.5 MainTextEmbed replay input must match the prepared replay key"
@@ -1277,7 +1275,7 @@ impl ReplayableDecoderModel for Qwen35Executor {
         let resource_embed_key = self
             .main_resource_embed
             .as_mut()
-            .and_then(|main_resource_embed| main_resource_embed.record(&runtime, &self.token_hidden_input));
+            .and_then(|main_resource_embed| main_resource_embed.record(runtime, &self.token_hidden_input));
         debug_assert_eq!(
             resource_embed_key, recorder.resource_embed_key,
             "Qwen3.8 ResourceEmbed replay input must match the prepared replay key"
@@ -1309,8 +1307,8 @@ impl ReplayableDecoderModel for Qwen35Executor {
             gdn_replay_topology: self.main_gdn_state.replay_topology(),
             pages: self.pages.buffer(),
         };
-        let runtime = MetalReplayRuntime::new(self.runtime.stream());
-        let (recorded_key, cache_hit) = self.main.record(&runtime, &input);
+        let runtime = self.runtime.stream();
+        let (recorded_key, cache_hit) = self.main.record(runtime, &input);
         debug_assert_eq!(
             recorded_key, recorder.main_key,
             "qwen3.5 Main replay input must match the prepared replay key"

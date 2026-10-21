@@ -1,13 +1,12 @@
 use std::rc::Rc;
 
+use inference_backend_metal::components::ReplayRecorder;
 use inference_backend_metal::metal::Buffer;
 use inference_backend_metal::metal::Device;
 use inference_backend_metal::metal::Dtype;
 use inference_backend_metal::metal::ReplayArguments;
 use inference_backend_metal::metal::ReplayParameterKey;
 use inference_backend_metal::metal::ReplayU32;
-use inference_executor_core::attn::GQAReplayShape;
-use inference_executor_core::backend::recorder::Recorder;
 use inference_executor_core::def::ModelExecutorError;
 use inference_executor_core::mlp::dense::DenseMLPCore;
 use inference_executor_core::model::qwen::v3_x::dflash2::Qwen3xDFlash2Config;
@@ -16,9 +15,8 @@ use inference_executor_core::model::qwen::v3_x::dflash2::Qwen3xDFlash2MainFeatur
 
 use crate::attn::bidi_block_gqa::metadata::BiDiBlockGQAMetadataBuffers;
 use crate::attn::bidi_block_gqa::state::BiDiBlockGQAState;
+use crate::attn::gqa::batch_metadata::GQAReplayShape;
 use crate::checkpoint::SafeTensorStore;
-use crate::def::replay_op::ReplayOp;
-use crate::def::replay_op::ReplayRecorder;
 use crate::mlp::dense::scratch::DenseMLPScratch;
 use crate::model::qwen::v3_x::dflash2::layer::Qwen3xDFlash2Layer;
 use crate::model::qwen::v3_x::dflash2::layer::Qwen3xDFlash2LayerInput;
@@ -217,15 +215,13 @@ impl Qwen3xDFlash2Model {
         )
     }
 
-    fn record_prefill<'a, R>(
+    fn record_prefill<'a>(
         &'a self,
-        recorder: &mut R,
+        recorder: &mut ReplayRecorder,
         num_total_tokens: u32,
         num_active_tokens: ReplayU32,
         args: Qwen3xDFlash2PrefillArgs<'a>,
-    ) where
-        R: Recorder<'a, Operator = ReplayOp<'a>>,
-    {
+    ) {
         let main_feature = self
             .main_feature_projector
             .as_ref()
@@ -244,17 +240,14 @@ impl Qwen3xDFlash2Model {
         }
     }
 
-    fn record_body<'a, R>(
+    fn record_body<'a>(
         &'a self,
-        recorder: &mut R,
+        recorder: &mut ReplayRecorder,
         num_total_tokens: u32,
         num_active_tokens: ReplayU32,
         num_active_query_blocks: ReplayU32,
         args: Qwen3xDFlash2BodyArgs<'a>,
-    ) -> &'a Buffer
-    where
-        R: Recorder<'a, Operator = ReplayOp<'a>>,
-    {
+    ) -> &'a Buffer {
         let mut hidden = args.hidden_input;
         for layer in &self.layers {
             let residual_output = layer.residual_output();
@@ -393,9 +386,8 @@ fn dflash2_body_replay_key(shape: GQAReplayShape) -> Qwen3xDFlash2BodyReplayKey 
 
 #[cfg(test)]
 mod tests {
-    use inference_executor_core::attn::GQAReplayShape;
-
     use super::dflash2_body_replay_key;
+    use crate::attn::gqa::batch_metadata::GQAReplayShape;
 
     #[test]
     fn test_replay_key_success() {

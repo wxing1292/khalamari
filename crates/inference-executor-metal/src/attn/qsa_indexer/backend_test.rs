@@ -1,4 +1,5 @@
 use half::bf16;
+use inference_backend_metal::components::ReplayRecorder;
 use inference_backend_metal::components::qsa_indexer::CacheLayout;
 use inference_backend_metal::components::qsa_indexer::Shape;
 use inference_backend_metal::metal::ReplayArguments;
@@ -11,8 +12,6 @@ use inference_executor_core::mlp::dense::reference::quantized_affine_reference;
 
 use super::*;
 use crate::attn::qsa_indexer::batch_metadata::QSAIndexerRequest;
-use crate::def::replay_op::MetalReplayRuntime;
-use crate::def::replay_op::ReplayRecorder;
 use crate::replay::Replay;
 use crate::replay::ReplayComponent;
 
@@ -122,7 +121,7 @@ fn test_update_success() {
 fn test_replay_restore() {
     let device = Device::system_default();
     let stream = Stream::new(&device);
-    let runtime = MetalReplayRuntime::new(&stream);
+    let runtime = &stream;
     let core = QSAIndexerCore {
         hidden_dim: 32,
         num_q_heads: 2,
@@ -250,7 +249,7 @@ fn test_replay_restore() {
         );
         assert_eq!(metadata_active.num_active_score_task_templates, 0);
         let before_states = values(&states);
-        let (key, hit) = replay.record(&runtime, &input);
+        let (key, hit) = replay.record(runtime, &input);
         assert_eq!(hit, iteration != 0);
         runtime
             .submit_replay_with_arguments(replay.replay(&key), &ReplayArguments::new().with_u32(ACTIVE, active))
@@ -273,7 +272,7 @@ fn test_replay_restore() {
         );
     }
     let (smaller_key, hit) = replay.record(
-        &runtime,
+        runtime,
         &Input {
             shape: Shape {
                 num_total_tokens: 2,
@@ -305,7 +304,7 @@ fn test_replay_restore() {
     );
     assert_eq!(metadata_active.num_active_score_task_templates, 0);
     let restored_source = values(&states)[core.state_dim()..2 * core.state_dim()].to_vec();
-    let (key, hit) = replay.record(&runtime, &input);
+    let (key, hit) = replay.record(runtime, &input);
     assert!(hit);
     runtime
         .submit_replay_with_arguments(replay.replay(&key), &ReplayArguments::new().with_u32(ACTIVE, 3))
@@ -371,7 +370,7 @@ fn test_replay_restore() {
     let mut expected_pages = values(&pages);
     let mut expected_states = values(&states);
     let input = Input { shape, ..input };
-    let (key, hit) = replay.record(&runtime, &input);
+    let (key, hit) = replay.record(runtime, &input);
     assert!(!hit);
     runtime
         .submit_replay_with_arguments(

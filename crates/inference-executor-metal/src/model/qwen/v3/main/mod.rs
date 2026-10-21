@@ -1,22 +1,20 @@
 use std::rc::Rc;
 
+use inference_backend_metal::components::ReplayRecorder;
 use inference_backend_metal::components::dense_mlp;
 use inference_backend_metal::metal::Buffer;
 use inference_backend_metal::metal::Device;
 use inference_backend_metal::metal::ReplayArguments;
 use inference_backend_metal::metal::ReplayParameterKey;
 use inference_backend_metal::metal::ReplayU32;
-use inference_executor_core::attn::GQAReplayShape;
-use inference_executor_core::backend::recorder::Recorder;
 use inference_executor_core::def::ModelExecutorError;
 use inference_executor_core::model::qwen::v3::Qwen3TextConfig;
 use inference_executor_core::model::qwen::v3::weight_layout::Qwen3MainWeightBindings;
 
 use self::component_config::Qwen3MainConfig;
+use crate::attn::gqa::batch_metadata::GQAReplayShape;
 use crate::attn::gqa::ungated_backend::UngatedGQAReplayTopology;
 use crate::checkpoint::SafeTensorStore;
-use crate::def::replay_op::ReplayOp;
-use crate::def::replay_op::ReplayRecorder;
 use crate::mlp::dense::scratch::DenseMLPScratch;
 use crate::model::qwen::v3::main::gqa::Qwen3MainGQAState;
 use crate::model::qwen::v3::main::layer::Qwen3MainLayer;
@@ -136,16 +134,13 @@ impl Qwen3Main {
         (key, arguments)
     }
 
-    pub fn record<'a, R>(
+    pub fn record<'a>(
         &'a self,
-        recorder: &mut R,
+        recorder: &mut ReplayRecorder,
         num_total_tokens: u32,
         num_active_tokens: ReplayU32,
         args: Qwen3MainArgs<'a>,
-    ) -> &'a Buffer
-    where
-        R: Recorder<'a, Operator = ReplayOp<'a>>,
-    {
+    ) -> &'a Buffer {
         match num_active_tokens {
             ReplayU32::Fixed(value) => {
                 assert_eq!(value, args.num_tokens);

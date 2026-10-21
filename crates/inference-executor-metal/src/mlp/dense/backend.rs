@@ -1,14 +1,14 @@
+use inference_backend_metal::components::ReplayOp;
+use inference_backend_metal::components::ReplayRecorder;
 use inference_backend_metal::components::dense_mlp;
 use inference_backend_metal::metal::Buffer;
 use inference_backend_metal::metal::Device;
 use inference_backend_metal::metal::Dtype;
 use inference_backend_metal::metal::ReplayU32;
-use inference_executor_core::backend::recorder::Recorder;
 use inference_executor_core::mlp::dense::DenseMLPCore;
 
 use crate::def::layer::ReplayLayer;
 use crate::def::quantized_affine::QuantizedAffineLayout;
-use crate::def::replay_op::ReplayOp;
 use crate::mlp::dense::scratch::DenseMLPScratchBindings;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -66,10 +66,7 @@ impl ReplayLayer for DenseMLP {
     type Input<'a> = DenseMLPInput<'a>;
     type Output<'a> = &'a Buffer;
 
-    fn record<'a, R>(&'a self, recorder: &mut R, input: Self::Input<'a>) -> Self::Output<'a>
-    where
-        R: Recorder<'a, Operator = ReplayOp<'a>>,
-    {
+    fn record<'a>(&'a self, recorder: &mut ReplayRecorder, input: Self::Input<'a>) -> Self::Output<'a> {
         let buffers = dense_mlp::Buffers {
             hidden_state: input.hidden_state,
             next_hidden_state: input.next_hidden_state,

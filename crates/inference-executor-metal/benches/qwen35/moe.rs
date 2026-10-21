@@ -7,6 +7,8 @@ use std::time::Duration;
 use std::time::Instant;
 
 use half::bf16;
+use inference_backend_metal::components::ReplayOp;
+use inference_backend_metal::components::ReplayRecorder;
 use inference_backend_metal::components::dense_mlp;
 use inference_backend_metal::components::moe::combine;
 use inference_backend_metal::components::moe::expert_major;
@@ -20,9 +22,6 @@ use inference_backend_metal::metal::ReplayU32;
 use inference_backend_metal::metal::Stream;
 use inference_backend_metal::operators::affine_quantized;
 use inference_backend_metal::operators::softmax;
-use inference_executor_core::backend::recorder::Recorder;
-use inference_executor_metal::def::replay_op::MetalReplayRuntime;
-use inference_executor_metal::def::replay_op::ReplayOp;
 use inference_executor_metal::mlp::dense::scratch::DenseMLPScratchBindings;
 use inference_executor_metal::mlp::moe::scratch::MoERoutingScratchBindings;
 use inference_executor_metal::mlp::moe::scratch::MoEScratchBindings;
@@ -208,9 +207,9 @@ impl ForcedMoEKernels {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn record<'a, R>(
+    fn record<'a>(
         &'a self,
-        recorder: &mut R,
+        recorder: &mut ReplayRecorder,
         implementation: MoERealImpl,
         num_tokens: u32,
         input: &'a Buffer,
@@ -218,9 +217,7 @@ impl ForcedMoEKernels {
         scratch: MoEScratchBindings<'a>,
         shared_scratch: SharedExpertsScratchBindings<'a>,
         weights: ForcedMoEWeights<'a>,
-    ) where
-        R: Recorder<'a, Operator = ReplayOp<'a>>,
-    {
+    ) {
         let routing_shape = routing_shape(num_tokens);
         let num_active_tokens = ReplayU32::Fixed(num_tokens);
         recorder.record_with_barrier_before(ReplayOp::opaque(self.router.invoke(
@@ -357,16 +354,14 @@ impl ForcedMoEKernels {
         }
     }
 
-    fn record_shared<'a, R>(
+    fn record_shared<'a>(
         &'a self,
-        recorder: &mut R,
+        recorder: &mut ReplayRecorder,
         num_tokens: u32,
         input: &'a Buffer,
         scratch: SharedExpertsScratchBindings<'a>,
         weights: ForcedMoEWeights<'a>,
-    ) where
-        R: Recorder<'a, Operator = ReplayOp<'a>>,
-    {
+    ) {
         recorder.record(ReplayOp::opaque(self.shared_experts.invoke(
             dense_mlp::Shape {
                 num_total_tokens: num_tokens,
@@ -484,7 +479,7 @@ impl<'a> RealMoEFixture<'a> {
             swiglu: Buffer::new_zeroed(device, dense_config.swiglu_bytes(dense_shape)),
         };
         let kernels = ForcedMoEKernels::new(device);
-        let mut recorder = MetalReplayRuntime::new(&stream).create_recorder();
+        let mut recorder = ReplayRecorder::new(stream.create_replay_program());
         kernels.record(
             &mut recorder,
             implementation,
@@ -525,7 +520,7 @@ impl<'a> RealMoEFixture<'a> {
             },
         );
         let replay = recorder.build();
-        let mut recorder = MetalReplayRuntime::new(&stream).create_recorder();
+        let mut recorder = ReplayRecorder::new(stream.create_replay_program());
         let scratch = sparse_mlp::Scratch { swiglu: &sparse_swiglu };
         let num_active_tokens = ReplayU32::Fixed(num_tokens);
         match implementation {
@@ -594,7 +589,7 @@ impl<'a> RealMoEFixture<'a> {
     }
 
     fn run_replay(&self) {
-        MetalReplayRuntime::new(&self.stream).submit_replay(&self.replay).wait();
+        self.stream.submit_replay(&self.replay).wait();
     }
 
     fn measure(&self, sparse_only: bool, warmup_iters: usize, iters: usize, runs: usize) -> Vec<f64> {
@@ -605,7 +600,7 @@ impl<'a> RealMoEFixture<'a> {
             &self.replay
         };
         measure_runs(runs, warmup_iters, iters, || {
-            MetalReplayRuntime::new(&self.stream).submit_replay(replay).wait();
+            self.stream.submit_replay(replay).wait();
         })
     }
 

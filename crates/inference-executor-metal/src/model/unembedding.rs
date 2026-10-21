@@ -1,18 +1,18 @@
 use std::rc::Rc;
 
+use inference_backend_metal::components::ReplayOp;
+use inference_backend_metal::components::ReplayRecorder;
 use inference_backend_metal::metal::Buffer;
 use inference_backend_metal::metal::Device;
 use inference_backend_metal::metal::Dtype;
 use inference_backend_metal::metal::ReplayU32;
 use inference_backend_metal::operators::affine_quantized;
-use inference_executor_core::backend::recorder::Recorder;
 use inference_executor_core::checkpoint::QuantizedTensorBindings;
 use inference_executor_core::checkpoint::remove_tensor;
 use inference_executor_core::def::ModelExecutorError;
 
 use crate::checkpoint::SafeTensorStore;
 use crate::def::layer::ReplayLayer;
-use crate::def::replay_op::ReplayOp;
 use crate::model::embedding::QuantizedEmbeddingWeights;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -188,10 +188,7 @@ impl ReplayLayer for Unembed {
     type Input<'a> = UnembedInput<'a>;
     type Output<'a> = &'a Buffer;
 
-    fn record<'a, R>(&'a self, recorder: &mut R, input: Self::Input<'a>) -> Self::Output<'a>
-    where
-        R: Recorder<'a, Operator = ReplayOp<'a>>,
-    {
+    fn record<'a>(&'a self, recorder: &mut ReplayRecorder, input: Self::Input<'a>) -> Self::Output<'a> {
         self.validate_num_rows(input.num_total_rows);
         let (weight, scales, biases) = self.weight_buffers();
         let invocation = self.compute.invoke(
@@ -289,6 +286,7 @@ pub fn fixture_unembed(device: &Device, config: UnembedConfig) -> (Unembed, Vec<
 #[cfg(test)]
 mod tests {
     use half::bf16;
+    use inference_backend_metal::components::ReplayRecorder;
     use inference_backend_metal::metal::Buffer;
     use inference_backend_metal::metal::Device;
     use inference_backend_metal::metal::ReplayArguments;
@@ -304,8 +302,6 @@ mod tests {
     use super::UnembedInput;
     use super::fixture_unembed;
     use crate::def::layer::ReplayLayer;
-    use crate::def::replay_op::MetalReplayRuntime;
-    use crate::def::replay_op::ReplayRecorder;
     use crate::replay::Replay;
     use crate::replay::ReplayComponent;
 
@@ -315,7 +311,7 @@ mod tests {
     fn test_replay_matches_cpu_reference_across_active_counts() {
         let device = Device::system_default();
         let stream = Stream::new(&device);
-        let runtime = MetalReplayRuntime::new(&stream);
+        let runtime = &stream;
         let config = fixture_config(8);
         let (unembed, weight_values, scale_values, bias_values) = fixture_unembed(&device, config);
         let num_values_per_hidden_row = config.hidden_dim as usize;
@@ -334,11 +330,11 @@ mod tests {
             logits: &logits,
         };
         let mut replay = Replay::new("test Unembed", TestUnembed(unembed));
-        let (key, cache_hit) = replay.record(&runtime, &input);
+        let (key, cache_hit) = replay.record(runtime, &input);
         assert!(!cache_hit);
 
         for num_active_rows in [1_usize, 8, 3, 7, 2, 6, 4, 5] {
-            assert_eq!(replay.record(&runtime, &input), (key, true));
+            assert_eq!(replay.record(runtime, &input), (key, true));
             runtime
                 .submit_replay_with_arguments(
                     replay.replay(&key),

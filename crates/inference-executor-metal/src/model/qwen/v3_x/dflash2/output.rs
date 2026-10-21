@@ -1,5 +1,7 @@
 use std::rc::Rc;
 
+use inference_backend_metal::components::ReplayOp;
+use inference_backend_metal::components::ReplayRecorder;
 use inference_backend_metal::components::sampling::dflash2_selector;
 use inference_backend_metal::components::sampling::top_k;
 use inference_backend_metal::metal::Buffer;
@@ -9,7 +11,6 @@ use inference_backend_metal::metal::ReplayArguments;
 use inference_backend_metal::metal::ReplayParameterKey;
 use inference_backend_metal::metal::ReplayU32;
 use inference_backend_metal::operators::affine_quantized;
-use inference_executor_core::backend::recorder::Recorder;
 use inference_executor_core::checkpoint::remove_tensor;
 use inference_executor_core::def::ModelExecutorError;
 use inference_executor_core::model::qwen::v3_x::dflash2::Qwen3xDFlash2Config;
@@ -17,8 +18,6 @@ use inference_executor_core::model::qwen::v3_x::dflash2::Qwen3xDFlash2SelectorWe
 
 use crate::checkpoint::SafeTensorStore;
 use crate::def::layer::ReplayLayer;
-use crate::def::replay_op::ReplayOp;
-use crate::def::replay_op::ReplayRecorder;
 use crate::model::embedding::Embed;
 use crate::model::embedding::EmbedConfig;
 use crate::model::embedding::EmbedInput;

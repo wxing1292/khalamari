@@ -1,3 +1,5 @@
+use inference_backend_metal::components::ReplayOp;
+use inference_backend_metal::components::ReplayRecorder;
 use inference_backend_metal::components::dense_mlp;
 use inference_backend_metal::components::moe::combine;
 use inference_backend_metal::components::moe::expert_major;
@@ -9,12 +11,10 @@ use inference_backend_metal::metal::Dtype;
 use inference_backend_metal::metal::ReplayU32;
 use inference_backend_metal::operators::affine_quantized;
 use inference_backend_metal::operators::softmax;
-use inference_executor_core::backend::recorder::Recorder;
 use inference_executor_core::mlp::dense::DenseMLPCore;
 use inference_executor_core::mlp::moe::GatedMoECore;
 
 use crate::def::layer::ReplayLayer;
-use crate::def::replay_op::ReplayOp;
 use crate::mlp::moe::scratch::MoERoutingScratchBindings;
 use crate::mlp::moe::scratch::MoEScratchBindings;
 use crate::mlp::moe::scratch::SharedExpertsScratchBindings;
@@ -336,10 +336,7 @@ impl GatedMoE {
     }
 
     /// Records only `router affine -> softmax -> top-k routing`.
-    pub fn record_routing<'a, R>(&'a self, recorder: &mut R, input: GatedMoERoutingInput<'a>)
-    where
-        R: Recorder<'a, Operator = ReplayOp<'a>>,
-    {
+    pub fn record_routing<'a>(&'a self, recorder: &mut ReplayRecorder, input: GatedMoERoutingInput<'a>) {
         let num_total_tokens = input.num_total_tokens;
         let scratch = input.scratch;
         let weights = input.weights;
@@ -382,7 +379,7 @@ impl GatedMoE {
     fn record_token_major<'a>(
         &'a self,
         combine: &'a combine::Compute,
-        recorder: &mut impl Recorder<'a, Operator = ReplayOp<'a>>,
+        recorder: &mut ReplayRecorder,
         input: GatedMoEInput<'a>,
     ) {
         let num_total_tokens = input.num_total_tokens;
@@ -460,7 +457,7 @@ impl GatedMoE {
     fn record_expert_major<'a>(
         &'a self,
         expert_major: &'a expert_major::Compute,
-        recorder: &mut impl Recorder<'a, Operator = ReplayOp<'a>>,
+        recorder: &mut ReplayRecorder,
         input: GatedMoEInput<'a>,
     ) {
         let num_total_tokens = input.num_total_tokens;
@@ -568,17 +565,15 @@ impl GatedMoE {
         }
     }
 
-    fn record_shared_experts<'a, I>(
+    fn record_shared_experts<'a>(
         &'a self,
-        recorder: &mut I,
+        recorder: &mut ReplayRecorder,
         num_total_tokens: u32,
         num_active_tokens: ReplayU32,
         input: &'a Buffer,
         scratch: SharedExpertsScratchBindings<'a>,
         weights: GatedMoESharedExpertsWeights<'a>,
-    ) where
-        I: Recorder<'a, Operator = ReplayOp<'a>>,
-    {
+    ) {
         let shared_experts = self
             .shared_experts
             .as_ref()
@@ -626,10 +621,7 @@ impl ReplayLayer for GatedMoE {
     type Input<'a> = GatedMoEInput<'a>;
     type Output<'a> = &'a Buffer;
 
-    fn record<'a, R>(&'a self, recorder: &mut R, input: Self::Input<'a>) -> Self::Output<'a>
-    where
-        R: Recorder<'a, Operator = ReplayOp<'a>>,
-    {
+    fn record<'a>(&'a self, recorder: &mut ReplayRecorder, input: Self::Input<'a>) -> Self::Output<'a> {
         self.validate_input(&input);
         let next_hidden_state = input.next_hidden_state;
         let (_, variant) = Selector::select(&self.registry, input.num_total_tokens);

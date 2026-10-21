@@ -16,8 +16,8 @@ impl Qwen35Executor {
             logits: &self.unembed_logits,
             output: self.sampler_output.as_output(),
         };
-        let runtime = MetalReplayRuntime::new(self.runtime.stream());
-        let (sample_key, _) = self.sampling.record(&runtime, &input);
+        let runtime = self.runtime.stream();
+        let (sample_key, _) = self.sampling.record(runtime, &input);
         self.sampler.prepare(sample_req_slots, sample_positions);
         let mut replay_arguments = ReplayArguments::new();
         self.sampler.add_replay_arguments(sample_shape, &mut replay_arguments);
@@ -54,8 +54,8 @@ impl Qwen35Executor {
                 num_output_distributions: mtp.common.spec_probs.num_draft_distributions(),
             },
         };
-        let runtime = MetalReplayRuntime::new(self.runtime.stream());
-        let (sample_key, _) = mtp.sampling.record(&runtime, &input);
+        let runtime = self.runtime.stream();
+        let (sample_key, _) = mtp.sampling.record(runtime, &input);
         self.sampler.prepare(sample_req_slots, sample_positions);
         let mut replay_arguments = ReplayArguments::new();
         self.sampler.add_replay_arguments(sample_shape, &mut replay_arguments);
@@ -194,8 +194,8 @@ impl Qwen35Executor {
         };
         {
             let rejection_build_start = Instant::now();
-            let runtime = MetalReplayRuntime::new(self.runtime.stream());
-            let (rejection_key, rejection_cache_hit) = rejection_sampling.record(&runtime, &component_input);
+            let runtime = self.runtime.stream();
+            let (rejection_key, rejection_cache_hit) = rejection_sampling.record(runtime, &component_input);
             if !rejection_cache_hit {
                 recorder.rejection_build_elapsed += rejection_build_start.elapsed();
             }
