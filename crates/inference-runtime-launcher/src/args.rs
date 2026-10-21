@@ -298,7 +298,7 @@ mod tests {
         assert_eq!(args.max_requests.get(), 2);
         assert_eq!(args.max_tokens.get(), 128);
         assert_eq!(args.max_tokens_per_request.get(), 64);
-        assert_eq!(args.num_cache_pages.get(), 320 * 1024);
+        assert_eq!(args.num_cache_pages.get(), 384 * 1024);
         assert_eq!(args.executor_hibernation_timeout_secs.get(), 300);
         assert_eq!(args.executor_hibernation_mode, QwenHibernationMode::Selected);
     }
@@ -312,7 +312,7 @@ mod tests {
         assert_eq!(args.max_requests.get(), 2);
         assert_eq!(args.max_tokens.get(), 128);
         assert_eq!(args.max_tokens_per_request.get(), 64);
-        assert_eq!(args.num_cache_pages.get(), 320 * 1024);
+        assert_eq!(args.num_cache_pages.get(), 384 * 1024);
         assert_eq!(args.executor_hibernation_timeout_secs.get(), 300);
         assert_eq!(args.executor_hibernation_mode, QwenHibernationMode::Selected);
     }
