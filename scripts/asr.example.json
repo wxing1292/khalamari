@@ -1,0 +1,8 @@
+{
+  "service": {
+    "context": "Software engineering discussion. Vocabulary: cache, KV cache, cached data, memory."
+  },
+  "streaming": {
+    "enabled": true
+  }
+}
