@@ -10,36 +10,36 @@ use super::*;
 fn test_request_validation() {
     let mut sampling = fixture_sampling(1);
     assert!(matches!(
-        DecodeRequest::new(vec![], None, vec![], sampling.clone()),
+        DecodeRequest::new(vec![], vec![], sampling.clone()),
         Err(Error::InvalidArgument(_))
     ));
     sampling.max_sampled_tokens = 0;
     assert!(matches!(
-        DecodeRequest::new(vec![fixture_token(1)], None, vec![], sampling.clone()),
+        DecodeRequest::new(vec![fixture_token(1)], vec![], sampling.clone()),
         Err(Error::InvalidArgument(_))
     ));
     sampling.max_sampled_tokens = 1;
     sampling.temperature = f32::NAN;
     assert!(matches!(
-        DecodeRequest::new(vec![fixture_token(1)], None, vec![], sampling.clone()),
+        DecodeRequest::new(vec![fixture_token(1)], vec![], sampling.clone()),
         Err(Error::InvalidArgument(_))
     ));
     sampling.temperature = 1.0;
     sampling.top_k = 0;
     assert!(matches!(
-        DecodeRequest::new(vec![fixture_token(1)], None, vec![], sampling.clone()),
+        DecodeRequest::new(vec![fixture_token(1)], vec![], sampling.clone()),
         Err(Error::InvalidArgument(_))
     ));
     sampling.top_k = 1;
     sampling.top_p = 2.0;
     assert!(matches!(
-        DecodeRequest::new(vec![fixture_token(1)], None, vec![], sampling.clone()),
+        DecodeRequest::new(vec![fixture_token(1)], vec![], sampling.clone()),
         Err(Error::InvalidArgument(_))
     ));
     sampling.top_p = 1.0;
     sampling.stop_sequences.push(vec![]);
     assert!(matches!(
-        DecodeRequest::new(vec![fixture_token(1)], None, vec![], sampling),
+        DecodeRequest::new(vec![fixture_token(1)], vec![], sampling),
         Err(Error::InvalidArgument(_))
     ));
 }

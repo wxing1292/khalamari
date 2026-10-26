@@ -113,7 +113,6 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             window: tokens.len() - depth,
         },
         DecoderSyncBlocks::new(0, kv, states),
-        None,
         vec![],
         SamplingConfig::default(),
     );

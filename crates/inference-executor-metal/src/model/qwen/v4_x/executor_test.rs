@@ -540,7 +540,6 @@ impl Cache {
                     .chain(self.mtp_state.iter().cloned())
                     .collect(),
             ),
-            None,
             vec![],
             SamplingConfig {
                 seed: Some(1),

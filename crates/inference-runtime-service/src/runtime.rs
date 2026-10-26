@@ -29,7 +29,6 @@ use inference_runtime_core::runtime::InternalRequest;
 use inference_runtime_core::runtime::RawRequestID;
 use inference_runtime_core::runtime::RawRequestSlot;
 use inference_runtime_core::runtime::RequestSlotAllocator;
-use inference_runtime_core::runtime::RequestTokenPositions;
 use inference_runtime_core::runtime::Resource;
 use inference_runtime_core::runtime::ResourcePlacement;
 use inference_runtime_core::runtime::Token;
@@ -254,7 +253,6 @@ impl<const N: usize, const L: usize, const P: usize> InferenceRuntime<N, L, P> {
                 history_tokens: Vec<Token>,
                 prompt_tokens: Vec<Token>,
                 sampled_tokens: Vec<Token>,
-                token_positions: Option<RequestTokenPositions>,
                 resource_entries: Vec<(Resource, ResourcePlacement)>,
                 sampling_config: SamplingConfig,
             ) -> Result<ExternalRequest>;
@@ -448,7 +446,6 @@ mod tests {
                 vec![],
                 vec![],
                 vec![],
-                None,
                 vec![],
                 SamplingConfig::default(),
             ),
@@ -463,7 +460,6 @@ mod tests {
                 vec![],
                 vec![Token::new(1), Token::new(2)],
                 vec![],
-                None,
                 vec![],
                 SamplingConfig::default(),
             ),
@@ -476,7 +472,6 @@ mod tests {
                     vec![],
                     vec![Token::new(1), Token::new(2), Token::new(3)],
                     vec![],
-                    None,
                     vec![],
                     SamplingConfig::default(),
                 )
@@ -498,7 +493,6 @@ mod tests {
                 vec![Token::new(1)],
                 vec![Token::new(2), Token::new(3)],
                 vec![Token::new(4)],
-                None,
                 vec![],
                 sampling,
             ),
@@ -521,7 +515,6 @@ mod tests {
                 vec![],
                 vec![Token::new(1)],
                 vec![Token::new(2), Token::new(3)],
-                None,
                 vec![],
                 sampling,
             ),
@@ -541,15 +534,7 @@ mod tests {
         };
         let (mut request, external_request) = runtime
             .sessions
-            .initialize(
-                1,
-                vec![],
-                vec![Token::new(1), Token::new(2)],
-                vec![],
-                None,
-                vec![],
-                sampling,
-            )
+            .initialize(1, vec![], vec![Token::new(1), Token::new(2)], vec![], vec![], sampling)
             .unwrap();
 
         let first_query = prepare_decode(&mut request, 2);
@@ -604,13 +589,7 @@ mod tests {
         };
         let mut response = inference
             .create_session(
-                DecodeRequest::new(
-                    vec![Token::new(1), Token::new(2), Token::new(3)],
-                    None,
-                    vec![],
-                    sampling,
-                )
-                .unwrap(),
+                DecodeRequest::new(vec![Token::new(1), Token::new(2), Token::new(3)], vec![], sampling).unwrap(),
             )
             .unwrap();
 
@@ -670,7 +649,6 @@ mod tests {
                 vec![],
                 vec![Token::new(1)],
                 vec![],
-                None,
                 vec![],
                 SamplingConfig {
                     max_sampled_tokens: 1,
@@ -830,7 +808,6 @@ mod tests {
                 vec![],
                 vec![Token::new(1), Token::new(2), Token::new(3)],
                 vec![],
-                None,
                 vec![],
                 sampling,
             )

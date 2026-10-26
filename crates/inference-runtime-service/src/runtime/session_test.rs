@@ -158,7 +158,6 @@ async fn shutdown_runtime(runtime: Arc<TestRuntime>, shutdown: Shutdown) {
 fn request(token: u32) -> DecodeRequest {
     DecodeRequest::new(
         vec![Token::new(token)],
-        None,
         Vec::new(),
         SamplingConfig {
             max_sampled_tokens: 1,

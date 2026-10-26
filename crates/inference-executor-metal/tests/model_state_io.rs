@@ -252,7 +252,6 @@ fn run_one_decode(model: &mut inference_executor_metal::model::qwen::v3_5::execu
                 spec_tokens: Vec::new(),
             },
             DecoderSyncBlocks::new(0, kv_page_ids, Vec::new()),
-            None,
             vec![],
             Default::default(),
         )],

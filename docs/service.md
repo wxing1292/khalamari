@@ -474,9 +474,9 @@ The service exports four symmetric RPCs:
 | Model-ready token IDs | `GenerateTokens` | `GenerateTokensStream` |
 | Structured messages | `GenerateMessages` | `GenerateMessagesStream` |
 
-`GenerateTokensRequest` contains token IDs and generation fields. The internal service API can also contain explicit
-token positions for model-specific inputs such as M-RoPE. The gRPC request derives normal sequential token positions
-and does not expose this field.
+`GenerateTokensRequest` and the internal service API contain token IDs and generation fields.
+Requests use normal sequential token positions. Explicit model-owned token positions are not connected to requests.
+See [future work](future_work.md#multimodal-input) for the deferred M-RoPE transport.
 
 The service must reject each input token ID outside `[0, model.vocab_size)` with `InvalidArgument`.
 The model executor supplies its vocabulary size when the service starts.

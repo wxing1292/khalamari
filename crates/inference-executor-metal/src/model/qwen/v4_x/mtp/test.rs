@@ -67,7 +67,6 @@ fn test_mtp_head_cpu_reference_fixed_random_and_batch() {
                     window: count,
                 },
                 DecoderSyncBlocks::new(0, vec![vec![], vec![kv]], vec![vec![], vec![aux]]),
-                None,
                 vec![],
                 SamplingConfig::default(),
             ));

@@ -484,7 +484,6 @@ mod tests {
                     ],
                     vec![Vec::new(); 4],
                 ),
-                None,
                 vec![],
                 SamplingConfig::default(),
             )],

@@ -9,7 +9,6 @@ use inference_runtime_core::runtime::ExternalRequest;
 use inference_runtime_core::runtime::RawRequestID;
 use inference_runtime_core::runtime::RequestEvent;
 use inference_runtime_core::runtime::RequestStatus;
-use inference_runtime_core::runtime::RequestTokenPositions;
 use inference_runtime_core::runtime::Resource;
 use inference_runtime_core::runtime::ResourcePlacement;
 use inference_runtime_core::runtime::Token;
@@ -25,22 +24,15 @@ impl<const N: usize, const L: usize, const P: usize> Inference<N, L, P> {
 
         let DecodeRequest {
             tokens,
-            token_positions,
             resource_entries,
             mut sampling,
         } = request;
         let num_history_tokens = tokens.len();
         merge_stop_sequences(&mut sampling.stop_sequences, &self.default_stop_sequences);
 
-        let external_request = self.runtime.create_session(
-            request_id,
-            vec![],
-            tokens,
-            vec![],
-            token_positions,
-            resource_entries,
-            sampling,
-        )?;
+        let external_request =
+            self.runtime
+                .create_session(request_id, vec![], tokens, vec![], resource_entries, sampling)?;
         Ok(DecodeSession::new(external_request, num_history_tokens))
     }
 
@@ -52,16 +44,10 @@ impl<const N: usize, const L: usize, const P: usize> Inference<N, L, P> {
         self.validate_input_tokens(&request.tokens)?;
         let DecodeRequest {
             tokens,
-            token_positions,
             resource_entries,
             mut sampling,
         } = request;
         let num_prompt_tokens = tokens.len();
-        if token_positions.is_some() {
-            return Err(Error::invalid_argument(
-                "a resumed decode turn cannot set explicit token positions",
-            ));
-        }
         if !resource_entries.is_empty() {
             return Err(Error::invalid_argument(
                 "a resumed decode turn cannot add resource entries",
@@ -87,7 +73,6 @@ impl<const N: usize, const L: usize, const P: usize> Inference<N, L, P> {
 
 pub struct DecodeRequest {
     tokens: Vec<Token>,
-    token_positions: Option<RequestTokenPositions>,
     resource_entries: Vec<(Resource, ResourcePlacement)>,
     sampling: SamplingConfig,
 }
@@ -95,7 +80,6 @@ pub struct DecodeRequest {
 impl DecodeRequest {
     pub fn new(
         tokens: Vec<Token>,
-        token_positions: Option<RequestTokenPositions>,
         resource_entries: Vec<(Resource, ResourcePlacement)>,
         sampling: SamplingConfig,
     ) -> Result<Self> {
@@ -132,7 +116,6 @@ impl DecodeRequest {
         }
         Ok(Self {
             tokens,
-            token_positions,
             resource_entries,
             sampling,
         })

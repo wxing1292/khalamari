@@ -58,7 +58,6 @@ fn new_request(query_tokens: QueryTokens, resource_placements: Vec<DeviceResourc
         0,
         query_tokens,
         DecoderSyncBlocks::new(0, vec![], vec![]),
-        None,
         resource_placements,
         SamplingConfig::default(),
     )

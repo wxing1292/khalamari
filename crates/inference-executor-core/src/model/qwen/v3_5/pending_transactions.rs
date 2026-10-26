@@ -142,7 +142,6 @@ mod tests {
                 spec_tokens: spec_tokens.into_iter().map(Token::new).collect(),
             },
             DecoderSyncBlocks::new(0, vec![], vec![]),
-            None,
             vec![],
             SamplingConfig::default(),
         );
@@ -161,7 +160,6 @@ mod tests {
                 window,
             },
             DecoderSyncBlocks::new(0, vec![], vec![]),
-            None,
             vec![],
             SamplingConfig::default(),
         );

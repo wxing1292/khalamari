@@ -563,7 +563,6 @@ fn test_prepare_resource_not_found_single_lane() {
         request_slot,
         AtomicRequestStatus::new(),
         blocks,
-        None,
         Arc::new(ResourceProcessors::new()),
         token_prob_tx,
         SamplingConfig::default(),

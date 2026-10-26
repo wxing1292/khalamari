@@ -47,7 +47,7 @@ impl<const N: usize, const L: usize, const P: usize> MessageGenerator<N, L, P> {
             true,
         )?;
         let num_input_tokens = tokens.len();
-        let decode_request = DecodeRequest::new(tokens, None, vec![], request.sampling)?;
+        let decode_request = DecodeRequest::new(tokens, vec![], request.sampling)?;
         let decode_session = self.inference.create_session(decode_request)?;
         let request_id = decode_session.request_id();
         Ok(MessageSession {
@@ -89,7 +89,7 @@ impl<const N: usize, const L: usize, const P: usize> MessageGenerator<N, L, P> {
         )?;
         let mut decode_session = session.decode_session.lock().await;
         let num_input_tokens = decode_session.num_history_tokens() + prompt_tokens.len();
-        let decode_request = DecodeRequest::new(prompt_tokens, None, vec![], request.sampling)?;
+        let decode_request = DecodeRequest::new(prompt_tokens, vec![], request.sampling)?;
         self.inference
             .resume_session(&mut decode_session, decode_request)
             .await?;

@@ -629,7 +629,6 @@ impl VanillaFixture {
                             window: chunk_tokens,
                         },
                         self.pages.sync_blocks(req_index, final_context),
-                        None,
                         vec![],
                         self.sampling_config.clone(),
                     )
@@ -687,7 +686,6 @@ impl VanillaFixture {
                             spec_tokens: Vec::new(),
                         },
                         self.pages.sync_blocks(req_index, final_context),
-                        None,
                         vec![],
                         self.sampling_config.clone(),
                     )
@@ -725,7 +723,6 @@ impl VanillaFixture {
                         spec_tokens: Vec::new(),
                     },
                     self.pages.sync_blocks(req_index, final_context),
-                    None,
                     vec![],
                     self.sampling_config.clone(),
                 )

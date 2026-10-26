@@ -789,7 +789,6 @@ mod tests {
                     window: 2,
                 },
                 DecoderSyncBlocks::new(0, vec![vec![page_ids]], vec![]),
-                None,
                 vec![DeviceResourcePlacement::new(
                     allocation.offset_bytes(),
                     allocation.len_bytes(),

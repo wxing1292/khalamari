@@ -108,6 +108,9 @@ python3 scripts/qsa_indexer_score_matrix.py --mode report \
 
 ## Multimodal Input
 
+- Restore explicit token-position transport only when a model executor consumes it. Keep the standalone `RequestTokenPositions` definition.
+  Pass model-owned positions through `DecodeRequest`, `Sessions`, `InternalRequest`, and `DeviceRequest` to executor batch metadata.
+  Validate initial-token coverage and continuation bounds before admission. Keep positions aligned through query slicing and request reordering.
 - Measure resource-level early unload: peak arena bytes, rematerialization, and repeated audio/image/video placements.
 - Add long-audio chunking/streaming after collected Qwen3-ASR parity. Define timestamps, overlap, context carry, and output merging first.
 - Add model-owned image processing, Vision Tower, spatial merger, and true T/H/W M-RoPE.

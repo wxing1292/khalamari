@@ -4,6 +4,7 @@ use crate::compute::QueryTokens;
 ///
 /// Runtime core stores and slices this data. It does not interpret an axis or
 /// calculate model-specific token positions.
+// TODO(token-positions): Restore request transport after the executor consumes model-owned positions.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RequestTokenPositions {
     initial: Vec<[u32; 3]>,

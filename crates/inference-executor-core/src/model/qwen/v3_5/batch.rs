@@ -1149,7 +1149,6 @@ mod tests {
             req_slot,
             tokens,
             DecoderSyncBlocks::new(block_index, vec![], vec![]),
-            None,
             vec![],
             SamplingConfig::default(),
         )

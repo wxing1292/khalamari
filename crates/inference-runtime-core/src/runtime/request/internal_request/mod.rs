@@ -8,7 +8,6 @@ use crate::config::SamplingConfig;
 use crate::runtime::RawRequestID;
 use crate::runtime::RawRequestSlot;
 use crate::runtime::RequestSlot;
-use crate::runtime::RequestTokenPositions;
 use crate::runtime::Token;
 use crate::runtime::decoder::trie_cache::MultiLaneBlockCache;
 use crate::runtime::decoder::trie_cache::TrieDecoderBlocks;
@@ -32,7 +31,6 @@ where
     req_slot: RequestSlot,
     req_status: AtomicRequestStatus,
     decoder_blocks: TrieDecoderBlocks<N, P, L, DBC>,
-    token_positions: Option<RequestTokenPositions>,
     resource_processors: Arc<ResourceProcessors>,
     in_flight_computes: VecDeque<ComputePhase>,
     num_in_flight_blocking_async_tasks: usize,
@@ -55,7 +53,6 @@ where
         req_slot: RequestSlot,
         req_status: AtomicRequestStatus,
         decoder_blocks: TrieDecoderBlocks<N, P, L, DBC>,
-        token_positions: Option<RequestTokenPositions>,
         resource_processors: Arc<ResourceProcessors>,
         event_tx: Sender<RequestEvent>,
         sampling_config: SamplingConfig,
@@ -66,7 +63,6 @@ where
             req_slot,
             req_status,
             decoder_blocks,
-            token_positions,
             resource_processors,
             in_flight_computes: VecDeque::new(),
             num_in_flight_blocking_async_tasks: 0,

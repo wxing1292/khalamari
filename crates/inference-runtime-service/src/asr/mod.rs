@@ -138,7 +138,7 @@ impl Qwen3ASRService {
             top_p: 1.0,
             ..SamplingConfig::default()
         };
-        let request = DecodeRequest::new(tokens, None, vec![(resource, placement)], sampling)?;
+        let request = DecodeRequest::new(tokens, vec![(resource, placement)], sampling)?;
         let mut response = inference.create_session(request)?;
         let mut output_tokens = vec![];
         loop {

@@ -1393,7 +1393,6 @@ mod tests {
                     window: 1,
                 },
                 DecoderSyncBlocks::new(0, Vec::new(), Vec::new()),
-                None,
                 vec![],
                 Default::default(),
             )],

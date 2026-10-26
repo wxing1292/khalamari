@@ -223,13 +223,7 @@ fn message_response_stream<const N: usize, const L: usize, const P: usize>(
 
 fn map_token_request(request: ProtoGenerateTokensRequest) -> Result<DecodeRequest, Status> {
     let sampling = map_generation(request.generation)?;
-    DecodeRequest::new(
-        request.tokens.into_iter().map(Token::new).collect(),
-        None,
-        vec![],
-        sampling,
-    )
-    .map_err(map_error)
+    DecodeRequest::new(request.tokens.into_iter().map(Token::new).collect(), vec![], sampling).map_err(map_error)
 }
 
 fn map_message_request(request: ProtoGenerateMessagesRequest) -> Result<MessageRequest, Status> {

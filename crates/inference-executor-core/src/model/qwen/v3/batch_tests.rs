@@ -233,7 +233,6 @@ fn device_request(req_id: usize, req_slot: RawRequestSlot, tokens: QueryTokens, 
         req_slot,
         tokens,
         DecoderSyncBlocks::new(block_index, vec![], vec![]),
-        None,
         vec![],
         SamplingConfig::default(),
     )

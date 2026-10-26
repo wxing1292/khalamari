@@ -23,7 +23,6 @@ use inference_runtime_core::runtime::RequestEvent;
 use inference_runtime_core::runtime::RequestSlotAllocationResult;
 use inference_runtime_core::runtime::RequestSlotAllocator;
 use inference_runtime_core::runtime::RequestStatus;
-use inference_runtime_core::runtime::RequestTokenPositions;
 use inference_runtime_core::runtime::Resource;
 use inference_runtime_core::runtime::ResourcePlacement;
 use inference_runtime_core::runtime::Token;
@@ -121,7 +120,6 @@ impl<const N: usize, const L: usize, const P: usize> Sessions<N, L, P> {
         history_tokens: Vec<Token>,
         prompt_tokens: Vec<Token>,
         sampled_tokens: Vec<Token>,
-        token_positions: Option<RequestTokenPositions>,
         resource_entries: Vec<(Resource, ResourcePlacement)>,
         sampling_config: SamplingConfig,
     ) -> Result<ExternalRequest> {
@@ -130,7 +128,6 @@ impl<const N: usize, const L: usize, const P: usize> Sessions<N, L, P> {
             history_tokens,
             prompt_tokens,
             sampled_tokens,
-            token_positions,
             resource_entries,
             sampling_config,
         )?;
@@ -188,18 +185,11 @@ impl<const N: usize, const L: usize, const P: usize> Sessions<N, L, P> {
         history_tokens: Vec<Token>,
         prompt_tokens: Vec<Token>,
         sampled_tokens: Vec<Token>,
-        token_positions: Option<RequestTokenPositions>,
         resource_entries: Vec<(Resource, ResourcePlacement)>,
         sampling_config: SamplingConfig,
     ) -> Result<(InternalRequest<N, P, L, RuntimeBlockCache<P, L>>, ExternalRequest)> {
         let (resources, resource_placements): (Vec<_>, Vec<_>) = resource_entries.into_iter().unzip();
         let num_initial_tokens = history_tokens.len() + prompt_tokens.len() + sampled_tokens.len();
-        assert!(
-            token_positions
-                .as_ref()
-                .is_none_or(|positions| positions.initial().len() == num_initial_tokens),
-            "explicit request token positions must match the initial token count"
-        );
         let min_initial_tokens = usize::max(1, L - 1);
         if num_initial_tokens < min_initial_tokens {
             return Err(Error::invalid_argument(format!(
@@ -212,16 +202,6 @@ impl<const N: usize, const L: usize, const P: usize> Sessions<N, L, P> {
                 "decode request initial token count={num_initial_tokens} must be less than context window={}",
                 self.context_window
             )));
-        }
-        if let Some(token_positions) = &token_positions {
-            let max_continuation_index = self.context_window - 1 - num_initial_tokens;
-            assert!(
-                token_positions
-                    .continuation_start()
-                    .iter()
-                    .all(|&position| max_continuation_index <= u32::MAX as usize - position as usize),
-                "explicit request continuation token positions must fit u32 through the context window"
-            );
         }
         if sampled_tokens.len() >= sampling_config.max_sampled_tokens {
             return Err(Error::invalid_argument(format!(
@@ -252,7 +232,6 @@ impl<const N: usize, const L: usize, const P: usize> Sessions<N, L, P> {
             request_slot,
             req_status.clone(),
             decoder_blocks,
-            token_positions,
             self.resource_processors.clone(),
             event_tx,
             sampling_config,
