@@ -1,7 +1,7 @@
 struct Qwen4xLayer {
     attention: Qwen4xAttention,
     attention_residual: Option<GRWeights>,
-    mlp: Qwen3xMoE,
+    mlp: Qwen4xMLP,
     mlp_residual: Option<GRWeights>,
     ple: Option<Qwen4xPLE>,
 }
@@ -49,7 +49,7 @@ pub struct Qwen4xMainReplayKey {
     sdpa: crate::attn::qsa::sdpa::QSASDPAShape,
     indexer: qsa_indexer::Shape,
     attention: Box<[crate::attn::qsa::backend::QSAReplayTopology]>,
-    mlp: Box<[crate::mlp::moe::backend::GatedMoEReplayTopology]>,
+    mlp: Box<[Qwen4xMLPReplayTopology]>,
     ple: Box<[crate::ple::backend::PLEReplayTopology]>,
     lookup: Box<[ngram_embedding::KernelKind]>,
 }
@@ -69,8 +69,7 @@ impl Qwen4xMain {
         let mut gdn_index = 0;
         let mut qsa_index = 0;
         let mut ple_index = 0;
-        let (moe_core, moe_metal) = moe_configs(config, 0, &bindings.layers[0].mlp)?;
-        let moe_scratch = Rc::new(MoEScratch::new(device, &moe_core, moe_metal, max_tokens as usize));
+        let mlp_scratch = Qwen4xMLPScratch::new(device, config, &bindings.layers[0].mlp, max_tokens as usize)?;
         let mut qsa_scratch = None;
         let mut boundaries = gdn.replay_token_topology_boundaries().into_vec();
         for (index, bindings) in bindings.layers.iter().enumerate() {
@@ -113,8 +112,7 @@ impl Qwen4xMain {
                     attention
                 },
             };
-            let (core, metal) = moe_configs(config, index, &bindings.mlp)?;
-            let mlp = Qwen3xMoE::new(device, core, metal, Rc::clone(&moe_scratch));
+            let mlp = Qwen4xMLP::new(device, config, index, &bindings.mlp, &mlp_scratch)?;
             boundaries.extend(mlp.replay_topology_boundaries());
             let ple = bindings
                 .ple
@@ -237,6 +235,9 @@ impl Qwen4xMain {
             }
         }
     }
+    pub fn channels(&self) -> &Buffer {
+        &self.channels
+    }
     pub fn capacity(&self, num_active_tokens: u32) -> u32 {
         self.replay_bucket_policy.capacity(num_active_tokens)
     }
@@ -285,12 +286,7 @@ impl Qwen4xMain {
             },
         );
     }
-    fn write(
-        &self,
-        recorder: &mut ReplayRecorder,
-        num_total_tokens: u32,
-        num_active_tokens: ReplayU32,
-    ) {
+    fn write(&self, recorder: &mut ReplayRecorder, num_total_tokens: u32, num_active_tokens: ReplayU32) {
         self.residual.write(
             recorder,
             WriteInput {

@@ -32,10 +32,24 @@ pub struct Qwen4xTextConfig {
     pub linear_key_head_dim: usize,
     pub linear_value_head_dim: usize,
     pub linear_conv_kernel_dim: usize,
+    #[serde(default)]
     pub num_experts: usize,
+    #[serde(default)]
     pub num_experts_per_tok: usize,
+    #[serde(default)]
     pub shared_expert_intermediate_size: usize,
+    #[serde(default)]
     pub moe_intermediate_size: usize,
+    #[serde(default)]
+    pub intermediate_size: usize,
+    #[serde(default)]
+    pub mtp: Option<Qwen4xMTPConfig>,
+    #[serde(default)]
+    pub mtp_num_experts: Option<usize>,
+    #[serde(default)]
+    pub mtp_num_experts_per_tok: Option<usize>,
+    #[serde(default)]
+    pub mtp_use_dedicated_embeddings: bool,
     pub rms_norm_eps: f32,
     pub vocab_size: usize,
     pub max_position_embeddings: usize,
@@ -89,6 +103,18 @@ pub struct Qwen4xTextConfig {
     pub tie_word_embeddings: bool,
     #[serde(default = "default_rope_parameters")]
     pub rope_parameters: RopeParameters,
+}
+
+/// One trained MTP head. Logical proposal depth is an executor setting.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct Qwen4xMTPConfig {
+    pub num_hidden_layers: usize,
+    #[serde(default)]
+    pub mtp_use_hidden_state_from_layer: Option<usize>,
+    #[serde(default)]
+    pub layer_types: Vec<String>,
+    #[serde(default)]
+    pub rope_theta: Option<f32>,
 }
 
 fn default_hc_count() -> usize {
@@ -178,7 +204,55 @@ pub enum LayerType {
     QSA,
 }
 
+fn validate_mlp_config(text: &Qwen4xTextConfig) -> Result<(), ModelExecutorError> {
+    if text.num_experts_per_tok > text.num_experts
+        || (text.num_experts == 0 && (text.intermediate_size == 0 || text.num_experts_per_tok != 0))
+        || (text.num_experts > 0 && (text.num_experts_per_tok == 0 || text.moe_intermediate_size == 0))
+    {
+        return Err(ModelExecutorError::custom(
+            "Qwen4x requires complete dense or MoE dimensions",
+        ));
+    }
+    Ok(())
+}
+
 impl Qwen4xModelConfig {
+    /// Derive the trained QSA head after Main configuration validation.
+    pub fn mtp_config(&self) -> Result<Self, ModelExecutorError> {
+        let mtp = self
+            .text_config
+            .mtp
+            .as_ref()
+            .ok_or_else(|| ModelExecutorError::custom("Qwen4x checkpoint has no native MTP configuration"))?;
+        if mtp.num_hidden_layers != 1
+            || mtp.mtp_use_hidden_state_from_layer.is_some()
+            || self.text_config.mtp_use_dedicated_embeddings
+            || (!mtp.layer_types.is_empty()
+                && (mtp.layer_types.len() != 1
+                    || !matches!(mtp.layer_types[0].as_str(), "full_attention" | "qwen_sparse_attention")))
+            || mtp.rope_theta.is_some_and(|theta| !theta.is_finite() || theta <= 0.0)
+        {
+            return Err(ModelExecutorError::custom(
+                "Qwen4x MTP requires one QSA layer and valid rotary geometry",
+            ));
+        }
+        let mut config = self.clone();
+        config.text_config.num_hidden_layers = 1;
+        config.text_config.layer_types = vec!["full_attention".to_owned()];
+        config.text_config.ple_layer_ids.clear();
+        if let Some(num_experts) = self.text_config.mtp_num_experts {
+            config.text_config.num_experts = num_experts;
+        }
+        if let Some(num_experts_per_tok) = self.text_config.mtp_num_experts_per_tok {
+            config.text_config.num_experts_per_tok = num_experts_per_tok;
+        }
+        if let Some(theta) = mtp.rope_theta {
+            config.text_config.rope_parameters.rope_theta = Some(theta);
+        }
+        validate_mlp_config(&config.text_config)?;
+        Ok(config)
+    }
+
     pub fn normalize(&mut self) -> Result<(), ModelExecutorError> {
         let text = &mut self.text_config;
         if text.hidden_size == 0
@@ -213,9 +287,6 @@ impl Qwen4xModelConfig {
             text.linear_key_head_dim,
             text.linear_value_head_dim,
             text.linear_conv_kernel_dim,
-            text.num_experts,
-            text.num_experts_per_tok,
-            text.moe_intermediate_size,
             text.vocab_size,
             text.max_position_embeddings,
             text.hc_count,
@@ -226,7 +297,6 @@ impl Qwen4xModelConfig {
         ];
         if dimensions.contains(&0)
             || text.hc_count < 2
-            || text.num_experts_per_tok > text.num_experts
             || !text.num_attention_heads.is_multiple_of(text.num_key_value_heads)
             || !text.linear_num_value_heads.is_multiple_of(text.linear_num_key_heads)
             || text.hc_count.checked_mul(text.hidden_size).is_none()
@@ -235,6 +305,7 @@ impl Qwen4xModelConfig {
                 "Qwen4x has invalid model dimensions or head/expert relationships",
             ));
         }
+        validate_mlp_config(text)?;
         let theta = text.rope_parameters.rope_theta.unwrap_or(0.0);
         let rotary = text.rope_parameters.partial_rotary_factor.unwrap_or(0.0);
         let rope_dim = text.head_dim as f32 * rotary;

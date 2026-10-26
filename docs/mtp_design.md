@@ -1,5 +1,9 @@
 # Qwen3.5 MTP Protocol
 
+This guide owns the existing Qwen3.5 protocol.
+[Qwen4x native MTP](executor_qwen4x.md#native-mtp) has an independent wide-hidden graph and retained QSA carry.
+
+
 This document defines the current scheduler/executor protocol.
 Examples use three logical MTP modules, `K = 3`, and two tokens per cache block, `N = 2`.
 The block size is illustrative, not a production default.

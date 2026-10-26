@@ -62,33 +62,50 @@ pub enum StateSnapshotFile {
     Qwen4xAuxState,
     #[wincode(tag = 9)]
     Qwen4xRequestState,
+    #[wincode(tag = 10)]
+    Qwen4xMTPPageTable(u32),
+    #[wincode(tag = 11)]
+    Qwen4xMTPAuxState(u32),
+    #[wincode(tag = 12)]
+    Qwen4xMTPRequestState(u32),
+    #[wincode(tag = 13)]
+    Qwen4xMTPCarryHistory(u32),
 }
 
 impl StateSnapshotFile {
-    fn file_name(self) -> &'static str {
+    fn file_name(self) -> String {
         match self {
-            Self::PageArena => "page-arena",
-            Self::MainGQARequestPageTable => "main-gqa-request-page-table",
-            Self::MainGDNRequestStateTable => "main-gdn-request-state-table",
-            Self::MainGDNRecurrentState => "main-gdn-recurrent-state",
-            Self::MainGDNConvState => "main-gdn-conv-state",
-            Self::MTPGQARequestPageTable => "mtp-gqa-request-page-table",
-            Self::DFlash2GQARequestPageTable => "dflash2-gqa-request-page-table",
-            Self::Qwen4xAuxState => "qwen4x-aux-state",
-            Self::Qwen4xRequestState => "qwen4x-request-state",
+            Self::PageArena => "page-arena".to_owned(),
+            Self::MainGQARequestPageTable => "main-gqa-request-page-table".to_owned(),
+            Self::MainGDNRequestStateTable => "main-gdn-request-state-table".to_owned(),
+            Self::MainGDNRecurrentState => "main-gdn-recurrent-state".to_owned(),
+            Self::MainGDNConvState => "main-gdn-conv-state".to_owned(),
+            Self::MTPGQARequestPageTable => "mtp-gqa-request-page-table".to_owned(),
+            Self::DFlash2GQARequestPageTable => "dflash2-gqa-request-page-table".to_owned(),
+            Self::Qwen4xAuxState => "qwen4x-aux-state".to_owned(),
+            Self::Qwen4xRequestState => "qwen4x-request-state".to_owned(),
+            Self::Qwen4xMTPPageTable(module) => format!("qwen4x-mtp-{module}-page-table"),
+            Self::Qwen4xMTPAuxState(module) => format!("qwen4x-mtp-{module}-aux-state"),
+            Self::Qwen4xMTPRequestState(module) => format!("qwen4x-mtp-{module}-request-state"),
+            Self::Qwen4xMTPCarryHistory(module) => format!("qwen4x-mtp-{module}-carry-history"),
         }
     }
 
     fn kind(self) -> StateSnapshotFileKind {
         match self {
-            Self::MainGDNRequestStateTable | Self::Qwen4xRequestState => StateSnapshotFileKind::Metadata,
+            Self::MainGDNRequestStateTable | Self::Qwen4xRequestState | Self::Qwen4xMTPRequestState(_) => {
+                StateSnapshotFileKind::Metadata
+            },
             Self::PageArena
             | Self::MainGQARequestPageTable
             | Self::MainGDNRecurrentState
             | Self::MainGDNConvState
             | Self::MTPGQARequestPageTable
             | Self::DFlash2GQARequestPageTable
-            | Self::Qwen4xAuxState => StateSnapshotFileKind::Buffer,
+            | Self::Qwen4xAuxState
+            | Self::Qwen4xMTPPageTable(_)
+            | Self::Qwen4xMTPAuxState(_)
+            | Self::Qwen4xMTPCarryHistory(_) => StateSnapshotFileKind::Buffer,
         }
     }
 }
@@ -789,7 +806,7 @@ fn validate_snapshot_directory(path: &Path, files: &[StateSnapshotManifestEntry]
         .iter()
         .map(|entry| entry.file.file_name())
         .collect::<BTreeSet<_>>();
-    expected_names.insert(MANIFEST_FILE_NAME);
+    expected_names.insert(MANIFEST_FILE_NAME.to_owned());
 
     for entry in std::fs::read_dir(path).map_err(|error| {
         ModelExecutorError::custom(format!("unable to enumerate model state snapshot {path:?}: {error}"))

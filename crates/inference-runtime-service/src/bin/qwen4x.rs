@@ -1,3 +1,3 @@
 fn main() {
-    inference_runtime_service::qwen_server::qwen4x::run();
+    inference_runtime_launcher::launch_qwen4x();
 }

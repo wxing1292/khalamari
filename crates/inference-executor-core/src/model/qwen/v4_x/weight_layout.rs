@@ -6,6 +6,7 @@ use crate::checkpoint::QuantizedTensorBindings;
 use crate::def::ModelExecutorError;
 use crate::model::qwen::v3_x::TensorPathLayout;
 use crate::model::qwen::v3_x::tensor_path_layout_candidates;
+use crate::model::qwen::v3_x::weight_layout::Qwen3xDenseMLPWeightBindings;
 use crate::model::qwen::v3_x::weight_layout::Qwen3xGDNWeightBindings;
 use crate::model::qwen::v3_x::weight_layout::Qwen3xGQAWeightBindings;
 use crate::model::qwen::v3_x::weight_layout::Qwen3xMoEWeightBindings;
@@ -35,9 +36,34 @@ pub struct Qwen4xGRWeightBindings {
 pub struct Qwen4xLayerWeightBindings {
     pub attention: Qwen4xAttentionWeightBindings,
     pub attention_residual: Qwen4xGRWeightBindings,
-    pub mlp: Qwen3xMoEWeightBindings,
+    pub mlp: Qwen4xMLPWeightBindings,
     pub mlp_residual: Qwen4xGRWeightBindings,
     pub ple: Option<Qwen4xPLEWeightBindings>,
+}
+
+#[derive(Clone, Debug)]
+pub enum Qwen4xMLPWeightBindings {
+    Dense(Box<Qwen3xDenseMLPWeightBindings>),
+    MoE(Box<Qwen3xMoEWeightBindings>),
+}
+
+impl Qwen4xMLPWeightBindings {
+    pub fn push_tensor_names<'a>(&'a self, names: &mut Vec<&'a str>) {
+        match self {
+            Self::Dense(bindings) => bindings.push_tensor_names(names),
+            Self::MoE(bindings) => bindings.push_tensor_names(names),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct Qwen4xMTPWeightBindings {
+    pub hidden_norm: String,
+    pub token_norm: String,
+    pub hidden: QuantizedTensorBindings,
+    pub token: QuantizedTensorBindings,
+    pub layer: Qwen4xLayerWeightBindings,
+    pub mixer: Qwen4xGRWeightBindings,
 }
 
 #[derive(Clone, Debug)]
@@ -190,17 +216,21 @@ fn bind(config: &Qwen4xModelConfig, layout: TensorPathLayout, gdn_component: &st
                 attention,
                 attention_residual: Qwen4xGRWeightBindings::new(&format!("{prefix}.attn_hyper_connection"), true),
                 mlp_residual: Qwen4xGRWeightBindings::new(&format!("{prefix}.mlp_hyper_connection"), true),
-                mlp: Qwen3xMoEWeightBindings {
-                    router: quantized(&mlp, "gate"),
-                    experts: Qwen3xSparseExpertWeightBindings {
-                        gate: quantized(&mlp, "switch_mlp.gate_proj"),
-                        up: quantized(&mlp, "switch_mlp.up_proj"),
-                        down: quantized(&mlp, "switch_mlp.down_proj"),
-                    },
-                    shared_expert_gate: (text.shared_expert_intermediate_size > 0)
-                        .then(|| quantized(&mlp, "shared_expert_gate")),
-                    shared_expert: (text.shared_expert_intermediate_size > 0)
-                        .then(|| dense_mlp_bindings(&format!("{mlp}.shared_expert"))),
+                mlp: if text.num_experts == 0 {
+                    Qwen4xMLPWeightBindings::Dense(Box::new(dense_mlp_bindings(&mlp)))
+                } else {
+                    Qwen4xMLPWeightBindings::MoE(Box::new(Qwen3xMoEWeightBindings {
+                        router: quantized(&mlp, "gate"),
+                        experts: Qwen3xSparseExpertWeightBindings {
+                            gate: quantized(&mlp, "switch_mlp.gate_proj"),
+                            up: quantized(&mlp, "switch_mlp.up_proj"),
+                            down: quantized(&mlp, "switch_mlp.down_proj"),
+                        },
+                        shared_expert_gate: (text.shared_expert_intermediate_size > 0)
+                            .then(|| quantized(&mlp, "shared_expert_gate")),
+                        shared_expert: (text.shared_expert_intermediate_size > 0)
+                            .then(|| dense_mlp_bindings(&format!("{mlp}.shared_expert"))),
+                    }))
                 },
                 ple,
             }
@@ -235,3 +265,55 @@ pub fn resolve_qwen4x_model_weight_bindings<'a>(
 #[cfg(test)]
 #[path = "weight_layout_test.rs"]
 mod tests;
+
+impl Qwen4xMTPWeightBindings {
+    pub fn tensor_names(&self) -> Vec<&str> {
+        let mut names = vec![self.hidden_norm.as_str(), self.token_norm.as_str()];
+        push_quantized_tensor_names(&self.hidden, &mut names);
+        push_quantized_tensor_names(&self.token, &mut names);
+        self.layer.attention_residual.push_tensor_names(&mut names);
+        self.layer.mlp_residual.push_tensor_names(&mut names);
+        self.layer.mlp.push_tensor_names(&mut names);
+        let Qwen4xAttentionWeightBindings::QSA { main, indexer } = &self.layer.attention else {
+            unreachable!("MTP bindings contain one QSA layer")
+        };
+        main.push_tensor_names(&mut names);
+        push_quantized_tensor_names(&indexer.qk, &mut names);
+        names.extend([indexer.q_norm.as_str(), indexer.k_norm.as_str()]);
+        self.mixer.push_tensor_names(&mut names);
+        names
+    }
+}
+
+pub fn resolve_qwen4x_mtp_weight_bindings<'a>(
+    config: &Qwen4xModelConfig,
+    tensor_names: impl IntoIterator<Item = &'a str>,
+) -> Result<Qwen4xMTPWeightBindings, ModelExecutorError> {
+    let names: HashSet<_> = tensor_names.into_iter().collect();
+    let head = config.mtp_config()?;
+    for prefix in ["language_model.mtp.", "mtp.", ""] {
+        let main = bind(
+            &head,
+            TensorPathLayout {
+                container_prefix: prefix,
+                model_prefix: "",
+            },
+            "linear_attn",
+        );
+        let path = |suffix: &str| format!("{prefix}{suffix}");
+        let bindings = Qwen4xMTPWeightBindings {
+            hidden_norm: path("pre_fc_norm_hidden.weight"),
+            token_norm: path("pre_fc_norm_embedding.weight"),
+            hidden: quantized_path(path("fc_hidden")),
+            token: quantized_path(path("fc_embedding")),
+            layer: main.layers.into_iter().next().unwrap(),
+            mixer: main.mixer,
+        };
+        if bindings.tensor_names().iter().all(|name| names.contains(name)) {
+            return Ok(bindings);
+        }
+    }
+    Err(ModelExecutorError::custom(
+        "Qwen4x checkpoint does not contain one complete MTP head",
+    ))
+}

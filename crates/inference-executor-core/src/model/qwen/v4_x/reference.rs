@@ -19,7 +19,6 @@ use crate::ngram_embedding::reference as ngram;
 use crate::ple::core::PLECore;
 use crate::ple::reference as ple;
 use crate::reference::sigmoid_reference as sigmoid;
-use crate::reference::silu_reference as silu;
 use crate::reference::softmax_reference;
 
 /// One complete request from position zero. Call independently for each batched request.
@@ -29,6 +28,95 @@ pub fn forward(
     weights: &HashMap<String, Vec<f32>>,
     tokens: &[u32],
 ) -> Vec<f32> {
+    forward_with_channels(config, bindings, weights, tokens).0
+}
+
+/// Main output and pre-mixer `[T,C,H]` streams.
+pub fn forward_with_channels(
+    config: &Qwen4xModelConfig,
+    bindings: &Qwen4xModelWeightBindings,
+    weights: &HashMap<String, Vec<f32>>,
+    tokens: &[u32],
+) -> (Vec<f32>, Vec<f32>) {
+    let t = &config.text_config;
+    let embed = &weights[&bindings.embed.weight];
+    let residual = tokens
+        .iter()
+        .flat_map(|&id| {
+            (0..t.hc_count).flat_map(move |_| {
+                embed[id as usize * t.hidden_size..(id as usize + 1) * t.hidden_size]
+                    .iter()
+                    .copied()
+            })
+        })
+        .collect();
+    graph(config, &bindings.layers, &bindings.mixer, weights, tokens, residual)
+}
+
+/// Native MTP output and streams. Inputs use decoded BF16 values.
+pub fn mtp(
+    config: &Qwen4xModelConfig,
+    bindings: &Qwen4xMTPWeightBindings,
+    weights: &HashMap<String, Vec<f32>>,
+    previous_hidden: &[f32],
+    token_embedding: &[f32],
+) -> (Vec<f32>, Vec<f32>) {
+    let t = &config.text_config;
+    let count = token_embedding.len() / t.hidden_size;
+    let normalize = |input: &[f32], norm: &[f32], width: usize| -> Vec<f32> {
+        input
+            .chunks_exact(width)
+            .flat_map(|row| {
+                let inv = (row.iter().map(|x| x * x).sum::<f32>() / width as f32 + t.rms_norm_eps)
+                    .sqrt()
+                    .recip();
+                row.iter().zip(norm).map(move |(&x, &w)| round(x * inv * (1.0 + w)))
+            })
+            .collect()
+    };
+    let hidden = normalize(
+        previous_hidden,
+        &weights[&bindings.hidden_norm],
+        t.hidden_size * t.hc_count,
+    );
+    let token = normalize(token_embedding, &weights[&bindings.token_norm], t.hidden_size);
+    let hidden = linear(
+        &hidden,
+        &weights[&bindings.hidden.weight],
+        count * t.hc_count,
+        t.hidden_size,
+        t.hidden_size,
+    );
+    let token = linear(
+        &token,
+        &weights[&bindings.token.weight],
+        count,
+        t.hidden_size,
+        t.hidden_size,
+    );
+    let residual = hidden
+        .iter()
+        .enumerate()
+        .map(|(i, &x)| round(x + token[i / (t.hc_count * t.hidden_size) * t.hidden_size + i % t.hidden_size]))
+        .collect();
+    graph(
+        config,
+        std::slice::from_ref(&bindings.layer),
+        &bindings.mixer,
+        weights,
+        &vec![0; count],
+        residual,
+    )
+}
+
+fn graph(
+    config: &Qwen4xModelConfig,
+    layers: &[Qwen4xLayerWeightBindings],
+    mixer: &Qwen4xGRWeightBindings,
+    weights: &HashMap<String, Vec<f32>>,
+    tokens: &[u32],
+    mut residual: Vec<f32>,
+) -> (Vec<f32>, Vec<f32>) {
     let t = &config.text_config;
     let hidden = t.hidden_size;
     let count = tokens.len();
@@ -38,13 +126,6 @@ pub fn forward(
             .expect("reference checkpoint tensor must exist")
             .as_slice()
     };
-    let embed = get(&bindings.embed.weight);
-    let mut residual: Vec<f32> = tokens
-        .iter()
-        .flat_map(|&id| {
-            (0..t.hc_count).flat_map(move |_| embed[id as usize * hidden..(id as usize + 1) * hidden].iter().copied())
-        })
-        .collect();
     let core = GatedResidualCore {
         num_branches: t.hc_count,
         hidden_dim: hidden,
@@ -76,7 +157,7 @@ pub fn forward(
         })
     };
     let mut ple_index = 0;
-    for (layer_index, layer) in bindings.layers.iter().enumerate() {
+    for (layer_index, layer) in layers.iter().enumerate() {
         if let Some(p) = &layer.ple {
             let nc = NGramEmbeddingCore {
                 vocab_size: t.vocab_size as u32,
@@ -175,7 +256,12 @@ pub fn forward(
                 );
                 let value: Vec<_> = gdn::gdn_output_norm_gate_reference(
                     &c,
-                    &recurrent.recurrent_output,
+                    &recurrent
+                        .recurrent_output
+                        .iter()
+                        .copied()
+                        .map(round)
+                        .collect::<Vec<_>>(),
                     &z,
                     get(&b.norm_weight),
                     t.rms_norm_eps,
@@ -298,7 +384,7 @@ pub fn forward(
                                     .map(|(&p, &prob)| prob * v[(p * t.num_key_value_heads + kv) * t.head_dim + d])
                                     .sum(),
                             );
-                            output[at] = round(value * sigmoid(gate[at]));
+                            output[at] = round(value * attention_sigmoid(gate[at]));
                         }
                     }
                 }
@@ -313,10 +399,34 @@ pub fn forward(
         };
         residual = gr_write(&residual, &read.normalized_residual, &branch, &layer.attention_residual);
         let read = gr_read(&residual, &layer.mlp_residual);
-        let branch = moe(config, &layer.mlp, &get, &read.hidden_state, count);
+        let branch = match &layer.mlp {
+            Qwen4xMLPWeightBindings::MoE(b) => moe(config, b, &get, &read.hidden_state, count),
+            Qwen4xMLPWeightBindings::Dense(b) => {
+                let gate = linear(
+                    &read.hidden_state,
+                    get(&b.gate.weight),
+                    count,
+                    hidden,
+                    t.intermediate_size,
+                );
+                let up = linear(
+                    &read.hidden_state,
+                    get(&b.up.weight),
+                    count,
+                    hidden,
+                    t.intermediate_size,
+                );
+                let value: Vec<_> = gate
+                    .iter()
+                    .zip(up)
+                    .map(|(&g, u)| round(round(g * round(sigmoid(g))) * u))
+                    .collect();
+                linear(&value, get(&b.down.weight), count, t.intermediate_size, hidden)
+            },
+        };
         residual = gr_write(&residual, &read.normalized_residual, &branch, &layer.mlp_residual);
     }
-    gr_read(&residual, &bindings.mixer).hidden_state
+    (gr_read(&residual, mixer).hidden_state, residual)
 }
 
 fn linear(input: &[f32], weight: &[f32], tokens: usize, k: usize, n: usize) -> Vec<f32> {
@@ -373,7 +483,11 @@ fn moe<'a>(
                 h,
                 n,
             );
-            let value: Vec<_> = gate.iter().zip(up).map(|(&g, u)| round(silu(g) * u)).collect();
+            let value: Vec<_> = gate
+                .iter()
+                .zip(up)
+                .map(|(&g, u)| round(round(g * round(sigmoid(g))) * u))
+                .collect();
             let value = linear(&value, w(&b.experts.down.weight, n, h), 1, n, h);
             for d in 0..h {
                 output[token * h + d] += round(routes.expert_probs[route]) * value[d];
@@ -385,7 +499,11 @@ fn moe<'a>(
         let n = t.shared_expert_intermediate_size;
         let gate = linear(input, get(&shared.gate.weight), tokens, h, n);
         let up = linear(input, get(&shared.up.weight), tokens, h, n);
-        let value: Vec<_> = gate.iter().zip(up).map(|(&g, u)| round(silu(g) * u)).collect();
+        let value: Vec<_> = gate
+            .iter()
+            .zip(up)
+            .map(|(&g, u)| round(round(g * round(sigmoid(g))) * u))
+            .collect();
         let value = linear(&value, get(&shared.down.weight), tokens, n, h);
         let gate = linear(input, get(&b.shared_expert_gate.as_ref().unwrap().weight), tokens, h, 1);
         for (token, &gate) in gate.iter().enumerate() {
@@ -396,6 +514,15 @@ fn moe<'a>(
         }
     }
     output
+}
+// The BF16 attention gate stores exp, denominator, reciprocal, and the negative branch.
+fn attention_sigmoid(value: f32) -> f32 {
+    let probability = round(round(1.0 + round((-value.abs()).exp())).recip());
+    if value < 0.0 {
+        round(1.0 - probability)
+    } else {
+        probability
+    }
 }
 fn norm_rope(input: &[f32], heads: usize, dim: usize, norm: &[f32], rotary: usize, theta: f32, eps: f32) -> Vec<f32> {
     let mut output = input.to_vec();

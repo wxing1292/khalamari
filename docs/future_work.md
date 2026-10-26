@@ -7,11 +7,12 @@ Current behavior and completed designs belong in the [owning documents](README.m
 ## Qwen4x integration
 
 - Run `bash scripts/qwen4x_validate.sh` when the GPU is available. Check fixed/random first8 parity, mixed requests, chunked decode, prefix restore, and selected hibernation.
-- Compare real first8 hidden states with oMLX or TensorFold. Then validate full Main and the external HTTP service path.
+- Compare real first8 hidden states with oMLX or TensorFold. Then validate full Main and the HTTP service with real weights.
 - Finish and optimize PLE after wiring validation. Compare grouped norm, gate, convolution, and projection paths through the production component.
 - Evaluate overlap of token-only n-gram lookup and PLE preparation with layer 0. The current schedule is serial.
 - Discuss runtime cache-block sizing separately after wiring. Compare the current 2048-token block, 32 KiB physical pages, and QSA four-token groups. The executor owns their mapping.
-- Keep MTP, external speculative acceptance, vision, and SSD offload outside this integration. Define retained QSA carry and PLE history before adding speculation.
+- Validate native Qwen4x MTP with a trained head checkpoint. The current native-head and combined Spec tests use fixed/random fixtures. Measure accepted-token throughput, proposal latency, and sparse-selection reuse separately.
+- Keep external speculators, vision, and SSD offload outside this integration.
 
 ## Agent Integration
 

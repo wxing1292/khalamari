@@ -1,11 +1,33 @@
-struct AffineWeights {
-    weight: Buffer,
-    scales: Buffer,
-    biases: Buffer,
+use inference_backend_metal::components::gated_residual;
+use inference_backend_metal::metal::Buffer;
+use inference_backend_metal::metal::Device;
+use inference_backend_metal::metal::Dtype;
+use inference_executor_core::attn::GQACore;
+use inference_executor_core::attn::qsa_indexer::core::QSAIndexerCore;
+use inference_executor_core::checkpoint::QuantizedTensorBindings;
+use inference_executor_core::def::ModelExecutorError;
+use inference_executor_core::model::qwen::v4_x::Qwen4xModelConfig;
+use inference_executor_core::model::qwen::v4_x::weight_layout::Qwen4xGRWeightBindings;
+use inference_executor_core::model::qwen::v4_x::weight_layout::Qwen4xIndexerWeightBindings;
+
+use crate::attn::qsa_indexer::backend::QSAIndexerWeights;
+use crate::checkpoint::SafeTensorStore;
+use crate::def::quantized_affine::QuantizedAffineLayout;
+use crate::def::quantized_affine::QuantizedAffineWeights;
+use crate::model::qwen::v3_x::weight::load_qwen3x_norm_weight;
+use crate::model::qwen::v3_x::weight::validate_len;
+use crate::model::qwen::v3_x::weight::validate_shape;
+use crate::model::qwen::v4_x::component_config::gr_core;
+use crate::model::qwen::v4_x::component_config::uniform_layout;
+
+pub struct AffineWeights {
+    pub weight: Buffer,
+    pub scales: Buffer,
+    pub biases: Buffer,
 }
 
 impl AffineWeights {
-    fn load(
+    pub fn load(
         device: &Device,
         store: &mut SafeTensorStore,
         bindings: &QuantizedTensorBindings,
@@ -36,19 +58,19 @@ impl AffineWeights {
             )?,
         })
     }
-    fn bindings(&self) -> QuantizedAffineWeights<'_> {
+    pub fn bindings(&self) -> QuantizedAffineWeights<'_> {
         QuantizedAffineWeights::new(&self.weight, &self.scales, &self.biases)
     }
 }
 
-struct GRWeights {
+pub struct GRWeights {
     norm: Buffer,
     down: Buffer,
     up: Buffer,
-    write: Option<Buffer>,
+    pub write: Option<Buffer>,
 }
 impl GRWeights {
-    fn load(
+    pub fn load(
         device: &Device,
         store: &mut SafeTensorStore,
         config: &Qwen4xModelConfig,
@@ -69,7 +91,7 @@ impl GRWeights {
                 .transpose()?,
         })
     }
-    fn read(&self) -> gated_residual::ReadWeights<'_> {
+    pub fn read(&self) -> gated_residual::ReadWeights<'_> {
         gated_residual::ReadWeights {
             norm: &self.norm,
             down: &self.down,
@@ -78,7 +100,7 @@ impl GRWeights {
     }
 }
 
-struct QSAWeights {
+pub struct QSAWeights {
     qgkv: AffineWeights,
     output: AffineWeights,
     indexer: AffineWeights,
@@ -88,7 +110,7 @@ struct QSAWeights {
     indexer_k_norm: Buffer,
 }
 impl QSAWeights {
-    fn load(
+    pub fn load(
         device: &Device,
         store: &mut SafeTensorStore,
         config: &Qwen4xModelConfig,
@@ -178,7 +200,7 @@ impl QSAWeights {
             indexer_k_norm: load_qwen3x_norm_weight(device, store, &index.k_norm, &[index_core.head_dim])?,
         })
     }
-    fn bindings(&self) -> crate::attn::qsa::backend::QSAWeights<'_> {
+    pub fn bindings(&self) -> crate::attn::qsa::backend::QSAWeights<'_> {
         crate::attn::qsa::backend::QSAWeights {
             qgkv_weight: &self.qgkv.weight,
             qgkv_scales: &self.qgkv.scales,

@@ -217,7 +217,16 @@ cargo run --release -p inference-runtime-service --bin qwen4x -- \
 ```
 
 `qwen4x` uses the shared hybrid-server CLI and 2048-token logical cache blocks.
-It rejects speculative model flags and resource inputs.
+Native MTP startup requires a checkpoint that contains the trained Qwen4x head:
+
+```sh
+cargo run --release -p inference-runtime-service --bin qwen4x -- \
+  --hf-model-dir /path/to/Qwen4x-affine \
+  --hf-spec-model-dir /path/to/Qwen4x-native-head --spec-type mtp --num-spec-tokens 3
+```
+
+The launcher builds the configured cache-lane specialization, as the Qwen3.5 launcher does.
+DFlash2 and resource inputs remain unsupported.
 The executor owns the main KV, index K, and auxiliary-state page layout.
 The complete resident n-gram table must fit memory.
 See [Qwen4x](executor_qwen4x.md) for composition and validation limits.

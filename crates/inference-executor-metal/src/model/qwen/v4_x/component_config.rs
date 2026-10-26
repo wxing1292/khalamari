@@ -1,4 +1,25 @@
-fn gr_core(config: &Qwen4xModelConfig) -> GatedResidualCore {
+use inference_backend_metal::components::rms_norm_rope::RopeScaling;
+use inference_backend_metal::metal::Dtype;
+use inference_executor_core::attn::GDNCore;
+use inference_executor_core::attn::GQACore;
+use inference_executor_core::attn::qsa_indexer::core::QSAIndexerCore;
+use inference_executor_core::def::ModelExecutorError;
+use inference_executor_core::gated_residual::core::GatedResidualCore;
+use inference_executor_core::mlp::dense::DenseMLPCore;
+use inference_executor_core::mlp::moe::GatedMoECore;
+use inference_executor_core::model::qwen::v3_x::weight_layout::Qwen3xDenseMLPWeightBindings;
+use inference_executor_core::model::qwen::v4_x::Qwen4xModelConfig;
+use inference_executor_core::model::qwen::v4_x::weight_layout::Qwen4xIndexerWeightBindings;
+
+use crate::attn::gdn::backend::GDNMetalConfig;
+use crate::attn::qsa::backend::QSAMetalConfig;
+use crate::attn::qsa_indexer::backend::QSAIndexerMetalConfig;
+use crate::def::quantized_affine::QuantizedAffineLayout;
+use crate::mlp::dense::backend::DenseMLPMetalConfig;
+use crate::mlp::moe::backend::GatedMoEMetalConfig;
+use crate::model::qwen::v3_x::weight::resolve_uniform_quantization;
+
+pub fn gr_core(config: &Qwen4xModelConfig) -> GatedResidualCore {
     let text = &config.text_config;
     GatedResidualCore {
         num_branches: text.hc_count,
@@ -49,7 +70,7 @@ pub fn gdn_configs(
     ))
 }
 
-fn qsa_configs(
+pub fn qsa_configs(
     config: &Qwen4xModelConfig,
     model_layer_index: usize,
     main: &inference_executor_core::model::qwen::v3_x::weight_layout::Qwen3xGQAWeightBindings,
@@ -109,7 +130,7 @@ fn qsa_configs(
     ))
 }
 
-fn moe_configs(
+pub fn moe_configs(
     config: &Qwen4xModelConfig,
     model_layer_index: usize,
     bindings: &inference_executor_core::model::qwen::v3_x::weight_layout::Qwen3xMoEWeightBindings,
@@ -183,4 +204,27 @@ pub fn uniform_layout(
         bits: layout.bits as u32,
         scale_bias_dtype: Dtype::Bfloat16,
     })
+}
+
+pub fn dense_configs(
+    config: &Qwen4xModelConfig,
+    model_layer_index: usize,
+    bindings: &Qwen3xDenseMLPWeightBindings,
+) -> Result<(DenseMLPCore, DenseMLPMetalConfig), ModelExecutorError> {
+    Ok((
+        DenseMLPCore {
+            model_layer_index,
+            hidden_dim: config.text_config.hidden_size,
+            intermediate_dim: config.text_config.intermediate_size,
+        },
+        DenseMLPMetalConfig {
+            gate_up: uniform_layout(
+                config,
+                &[&bindings.gate.weight, &bindings.up.weight],
+                "Qwen4x dense gate/up",
+            )?,
+            down: uniform_layout(config, &[&bindings.down.weight], "Qwen4x dense down")?,
+            io_dtype: Dtype::Bfloat16,
+        },
+    ))
 }

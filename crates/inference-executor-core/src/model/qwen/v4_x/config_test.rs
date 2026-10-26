@@ -112,3 +112,59 @@ fn test_eos_list_retains_all_stops_and_rejects_invalid_ids() {
     config.text_config.eos_token_id = Some(serde_json::json!([0, 256]));
     assert!(config.normalize().is_err());
 }
+
+#[test]
+fn test_dense_checkpoint_and_native_mtp_boundaries() {
+    let mut value: serde_json::Value = serde_json::from_str(include_str!("config_fixture.json")).unwrap();
+    let text = value["text_config"].as_object_mut().unwrap();
+    for field in [
+        "num_experts",
+        "num_experts_per_tok",
+        "moe_intermediate_size",
+        "shared_expert_intermediate_size",
+    ] {
+        text.remove(field);
+    }
+    text.insert("intermediate_size".to_owned(), 64.into());
+    let mut config: Qwen4xModelConfig = serde_json::from_value(value).unwrap();
+    config.normalize().unwrap();
+    assert_eq!(config.text_config.num_experts, 0);
+    assert!(config.mtp_config().is_err());
+    config.text_config.mtp = Some(Qwen4xMTPConfig {
+        num_hidden_layers: 1,
+        rope_theta: Some(500_000.0),
+        ..Default::default()
+    });
+    let head = config.mtp_config().unwrap();
+    assert_eq!(head.text_config.num_hidden_layers, 1);
+    assert_eq!(head.layer_type_at(0), LayerType::QSA);
+    assert!(head.text_config.ple_layer_ids.is_empty());
+    assert_eq!(head.text_config.rope_parameters.rope_theta, Some(500_000.0));
+    for invalid in ["layer_count", "hidden_source", "embedding_source", "rotary"] {
+        let mut model = config.clone();
+        let mtp = model.text_config.mtp.as_mut().unwrap();
+        match invalid {
+            "layer_count" => mtp.num_hidden_layers = 2,
+            "hidden_source" => mtp.mtp_use_hidden_state_from_layer = Some(3),
+            "embedding_source" => model.text_config.mtp_use_dedicated_embeddings = true,
+            "rotary" => mtp.rope_theta = Some(0.0),
+            _ => unreachable!(),
+        }
+        // Main-only can use the checkpoint independently of optional Spec capabilities.
+        model.normalize().unwrap();
+        assert!(model.mtp_config().is_err(), "{invalid}");
+    }
+    let mut pruned = fixture();
+    pruned.text_config.mtp = config.text_config.mtp.clone();
+    pruned.text_config.mtp_num_experts = Some(2);
+    pruned.text_config.mtp_num_experts_per_tok = Some(1);
+    let head = pruned.mtp_config().unwrap();
+    assert_eq!(head.text_config.num_experts, 2);
+    assert_eq!(head.text_config.num_experts_per_tok, 1);
+    assert_eq!(pruned.text_config.num_experts, 4);
+    pruned.text_config.mtp_num_experts_per_tok = Some(3);
+    pruned.normalize().unwrap();
+    assert!(pruned.mtp_config().is_err());
+    config.text_config.intermediate_size = 0;
+    assert!(config.normalize().is_err());
+}

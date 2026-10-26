@@ -48,6 +48,7 @@ use crate::def::submission::MetalReplaySubmission;
 use crate::model::embedding::Embed;
 use crate::model::embedding::EmbedConfig;
 use crate::model::page_arena::PageArena;
+use crate::model::qwen::apply_main_gpu_timing;
 use crate::model::qwen::v3_5::main::output::Qwen35GatherUnembed;
 use crate::model::qwen::v3_5::main::output::Qwen35GatherUnembedArgs;
 use crate::model::qwen::v3_5::main::output::Qwen35GatherUnembedReplayKey;
@@ -55,11 +56,11 @@ use crate::model::qwen::v3_5::main::text_embed::Qwen35MainTextEmbed;
 use crate::model::qwen::v3_5::main::text_embed::Qwen35MainTextEmbedArgs;
 use crate::model::qwen::v3_5::main::text_embed::Qwen35MainTextEmbedReplayKey;
 use crate::model::qwen::v3_x::state::Qwen3xGDNState;
+use crate::model::qwen::v4_x::component_config::gdn_configs;
+use crate::model::qwen::v4_x::component_config::uniform_layout;
 use crate::model::qwen::v4_x::main::Qwen4xMain;
 use crate::model::qwen::v4_x::main::Qwen4xMainArgs;
 use crate::model::qwen::v4_x::main::Qwen4xMainReplayKey;
-use crate::model::qwen::v4_x::main::gdn_configs;
-use crate::model::qwen::v4_x::main::uniform_layout;
 use crate::model::qwen::v4_x::state::Qwen4xRequestState;
 use crate::model::qwen::v4_x::state::Qwen4xState;
 use crate::model::state_snapshot::FullStateIO;
@@ -117,6 +118,8 @@ pub struct Qwen4xExecutor {
     output: Replay<Qwen35GatherUnembed>,
     sampling: Replay<Sampling>,
     sampler: Rc<TopKSampling>,
+    sampler_bounds: TopKSamplingBounds,
+    mtp: Option<Box<Qwen4xMTPSpeculator>>,
     sampler_output: TopKSamplingOutputBuffers,
     request_sampling: RequestSamplingState,
     gdn: Qwen3xGDNState,
@@ -152,6 +155,7 @@ fn validate_metal_model_config(model: &Qwen4xModelConfig) -> Result<(), ModelExe
         text.num_experts,
         text.num_experts_per_tok,
         text.moe_intermediate_size,
+        text.intermediate_size,
         text.vocab_size,
         text.max_position_embeddings,
         text.hc_count,
@@ -188,8 +192,16 @@ fn validate_metal_model_config(model: &Qwen4xModelConfig) -> Result<(), ModelExe
 impl Qwen4xExecutor {
     pub fn new(
         model_dir: impl AsRef<Path>,
+        model: Qwen4xModelConfig,
+        config: Qwen4xExecutorConfig,
+    ) -> Result<Self, ModelExecutorError> {
+        Self::new_with_spec_capacity(model_dir, model, config, 0)
+    }
+    fn new_with_spec_capacity(
+        model_dir: impl AsRef<Path>,
         mut model: Qwen4xModelConfig,
         config: Qwen4xExecutorConfig,
+        max_spec_tokens: usize,
     ) -> Result<Self, ModelExecutorError> {
         config.validate();
         model.normalize()?;
@@ -212,7 +224,7 @@ impl Qwen4xExecutor {
         let bindings = resolve_qwen4x_model_weight_bindings(&model, store.index().tensor_names())?;
         let device = Device::system_default();
         let runtime = MetalRuntime::new(device.clone());
-        let state = Qwen4xState::new(&device, &model, config)?;
+        let state = Qwen4xState::new(&device, runtime.stream().new_on_same_queue(), &model, config)?;
         let cores: Vec<_> = bindings
             .layers
             .iter()
@@ -241,7 +253,12 @@ impl Qwen4xExecutor {
             &gdn_cores,
             *metal,
             config.max_requests,
-            GDNStateCapacity::new(jobs + 2, jobs + 1, jobs, GDN::max_replay_tokens_per_request(0)),
+            GDNStateCapacity::new(
+                jobs + 2,
+                jobs + 1,
+                jobs,
+                GDN::max_replay_tokens_per_request(max_spec_tokens),
+            ),
             config.max_tokens,
             config.num_tokens_per_block,
             config.num_cache_pages,
@@ -263,10 +280,15 @@ impl Qwen4xExecutor {
         );
         embed.load_weights(&device, &mut store, bindings.embed.clone())?;
         let unembed_layout = uniform_layout(&model, &[&bindings.unembed.weight], "Qwen4x unembedding")?;
+        let max_sampling_inputs = config
+            .max_requests
+            .checked_mul(max_spec_tokens + 1)
+            .expect("Qwen4x sampling capacity must fit usize")
+            .min(config.max_tokens);
         let mut unembed = Unembed::new(
             &device,
             UnembedConfig {
-                max_tokens: config.max_requests as u32,
+                max_tokens: max_sampling_inputs as u32,
                 vocab_size: text.vocab_size as u32,
                 hidden_dim: text.hidden_size as u32,
                 group_size: unembed_layout.group_size,
@@ -283,7 +305,7 @@ impl Qwen4xExecutor {
         }
         main.load_weights(&device, &mut store, &model, &bindings)?;
         let bounds = TopKSamplingBounds {
-            max_sampling_inputs: config.max_requests as u32,
+            max_sampling_inputs: max_sampling_inputs as u32,
             vocab_size: text.vocab_size as u32,
             top_k: MAX_TOP_K as u32,
         };
@@ -307,9 +329,9 @@ impl Qwen4xExecutor {
             token_ids: Buffer::new_zeroed_elements(&device, config.max_tokens, Dtype::Int32),
             hidden_input: Rc::new(bf16(config.max_tokens, text.hidden_size)),
             hidden_output: Rc::new(bf16(config.max_tokens, text.hidden_size)),
-            gather_indices: Buffer::new_zeroed_elements(&device, config.max_requests, Dtype::Uint32),
-            gathered_hidden: bf16(config.max_requests, text.hidden_size),
-            logits: bf16(config.max_requests, text.vocab_size),
+            gather_indices: Buffer::new_zeroed_elements(&device, max_sampling_inputs, Dtype::Uint32),
+            gathered_hidden: bf16(max_sampling_inputs, text.hidden_size),
+            logits: bf16(max_sampling_inputs, text.vocab_size),
             embed: Replay::new("Qwen4x MainTextEmbed", Qwen35MainTextEmbed::new(Rc::new(embed))),
             main: Replay::new("Qwen4x Main", main),
             output: Replay::new(
@@ -318,6 +340,8 @@ impl Qwen4xExecutor {
             ),
             sampling: Replay::new("Qwen4x Sampling", Sampling::new(Rc::clone(&sampler))),
             sampler,
+            sampler_bounds: bounds,
+            mtp: None,
             sampler_output: TopKSamplingOutputBuffers::new(&device, bounds),
             request_sampling: RequestSamplingState::new(config.max_requests),
             gdn,
@@ -336,6 +360,15 @@ impl Qwen4xExecutor {
     pub fn num_kv_page_ids_per_block(&self) -> usize {
         self.state.kv_pages_per_block()
     }
+    /// `(KV pages, state pages)` for each logical MTP cache lane.
+    pub fn num_mtp_page_ids_per_block(&self) -> Vec<(usize, usize)> {
+        self.mtp.as_ref().map_or_else(Vec::new, |mtp| {
+            mtp.states
+                .iter()
+                .map(|state| (state.kv_pages_per_block(), state.aux_pages_per_block()))
+                .collect()
+        })
+    }
     pub fn num_state_page_ids_per_block(&self) -> usize {
         self.gdn.num_pages_per_state_slot() + self.state.aux_pages_per_block()
     }
@@ -348,6 +381,8 @@ pub struct Qwen4xModelOpsRecorder {
     main_arguments: ReplayArguments,
     output: Option<(Qwen35GatherUnembedReplayKey, ReplayArguments)>,
     sampling: Option<(TopKSamplingReplayKey, ReplayArguments)>,
+    rejection: Option<(RejectionReplayKey, ReplayArguments, PreparedRejection)>,
+    mtp: Option<Qwen4xMTPStep>,
 }
 pub struct Qwen4xSampledOutput {
     decisions: Vec<Qwen35DecodeDecision>,
@@ -369,7 +404,10 @@ impl ReplayableDecoderModel for Qwen4xExecutor {
     }
 
     fn model_mode(&self) -> &'static str {
-        "vanilla"
+        if self.mtp.is_some() { "mtp" } else { "vanilla" }
+    }
+    fn num_spec_tokens(&self) -> usize {
+        self.mtp.as_ref().map_or(0, |mtp| mtp.num_spec_tokens)
     }
     fn default_stop_sequences(&self) -> Vec<Vec<Token>> {
         self.stop_sequences.clone()
@@ -377,6 +415,9 @@ impl ReplayableDecoderModel for Qwen4xExecutor {
     fn reset_req_slots(&mut self, slots: &[RawRequestSlot]) {
         self.state.finish_commit();
         self.gdn.finish_commit();
+        if let Some(mtp) = &mut self.mtp {
+            mtp.reset_req_slots(slots);
+        }
         self.request_sampling.reset(slots);
         self.gdn.reset_req_slots(slots);
         self.state.reset_req_slots(slots);
@@ -384,6 +425,9 @@ impl ReplayableDecoderModel for Qwen4xExecutor {
     fn clear_replay_cache(&mut self) {
         self.state.finish_commit();
         self.gdn.finish_commit();
+        if let Some(mtp) = &mut self.mtp {
+            mtp.clear_replay_cache();
+        }
         self.embed.clear();
         self.main.clear();
         self.output.clear();
@@ -391,6 +435,9 @@ impl ReplayableDecoderModel for Qwen4xExecutor {
         self.gdn.clear_replay_cache();
     }
     fn unload_weights(&mut self) {
+        if let Some(mtp) = &mut self.mtp {
+            mtp.body.component_mut().unload_weights();
+        }
         let mut unembed = Rc::try_unwrap(self.output.component_mut().unload_weights())
             .unwrap_or_else(|_| panic!("Qwen4x unembedding must have one owner during unload"));
         unembed.unload_weights();
@@ -420,6 +467,9 @@ impl ReplayableDecoderModel for Qwen4xExecutor {
             .load_weights(device, &mut store, &self.model_config, &self.bindings)?;
         self.embed.component_mut().load_weights(Rc::new(embed));
         self.output.component_mut().load_weights(Rc::new(unembed));
+        if let Some(mtp) = &mut self.mtp {
+            mtp.load_weights(device)?;
+        }
         Ok(())
     }
     fn unload_state(&mut self, path: &Path, plan: &ExecutorHibernationPlan) -> Result<(), ModelExecutorError> {
@@ -428,13 +478,17 @@ impl ReplayableDecoderModel for Qwen4xExecutor {
         self.gdn.release_resources();
         self.state.release_resources();
         self.pages.release_resources();
+        if let Some(mtp) = &mut self.mtp {
+            for state in &mut mtp.states {
+                state.release_resources();
+            }
+        }
         Ok(())
     }
     fn load_state(&mut self, path: &Path, plan: &ExecutorHibernationPlan) -> Result<(), ModelExecutorError> {
         self.read_state(path, plan)
     }
     fn prepare_batch(&mut self, request: &mut BatchDeviceRequest) -> Self::ModelBatchRequest {
-        self.state.finish_commit();
         self.gdn.finish_commit();
         assert!(
             !request.dev_reqs.is_empty()
@@ -444,7 +498,16 @@ impl ReplayableDecoderModel for Qwen4xExecutor {
         for req in &request.dev_reqs {
             assert!((req.req_slot as usize) < self.config.max_requests && req.resource_placements.is_empty());
             let q = &req.decoder_query_tokens;
-            assert_eq!(q.num_spec_tokens(), 0, "Qwen4x MTP is not wired");
+            assert!(q.num_spec_tokens() <= self.num_spec_tokens());
+            if q.num_spec_tokens() > 0 {
+                assert!(
+                    !self
+                        .gdn
+                        .backend()
+                        .uses_recurrent(q.token_consumption() - q.num_spec_tokens(), 0),
+                    "Qwen4x speculative input exceeds the fixed-token replay window"
+                );
+            }
             assert!(q.token_consumption() > 0 && q.token_consumption() <= self.config.max_tokens_per_request);
             assert!(
                 q.token_index()
@@ -454,7 +517,10 @@ impl ReplayableDecoderModel for Qwen4xExecutor {
         }
         request.dev_reqs.sort_by_key(|r| {
             if matches!(r.decoder_query_tokens, QueryTokens::Prefill { .. })
-                || self.gdn.backend().uses_recurrent(r.token_cost(), 0)
+                || self
+                    .gdn
+                    .backend()
+                    .uses_recurrent(r.token_cost(), r.decoder_query_tokens.num_spec_tokens())
             {
                 0
             } else {
@@ -471,8 +537,15 @@ impl ReplayableDecoderModel for Qwen4xExecutor {
                 )
             })
             .collect();
-        let batch = Qwen35ModelBatchRequest::from_core_batch(request, 0, sampling);
+        let batch = Qwen35ModelBatchRequest::from_core_batch(request, self.num_spec_tokens(), sampling);
         let micro = batch.microbatch();
+        if let Some(mtp) = &mut self.mtp {
+            mtp.sync_blocks = request
+                .dev_reqs
+                .iter()
+                .map(|request| request.decoder_sync_blocks.clone())
+                .collect();
+        }
         self.sampler.set_params(micro.req_slots(), micro.sampler_configs());
         self.token_ids.write_typed(0, micro.flat_token_ids());
         let num_total_tokens = self.main.component().capacity(micro.total_tokens() as u32);
@@ -489,10 +562,10 @@ impl ReplayableDecoderModel for Qwen4xExecutor {
         let num_active_recurrent_requests = (0..micro.num_reqs())
             .take_while(|&i| {
                 !micro.is_decode_req(i)
-                    || self
-                        .gdn
-                        .backend()
-                        .uses_recurrent((micro.cu_tokens()[i + 1] - micro.cu_tokens()[i]) as usize, 0)
+                    || self.gdn.backend().uses_recurrent(
+                        (micro.cu_tokens()[i + 1] - micro.cu_tokens()[i]) as usize,
+                        micro.num_spec_tokens(i) as usize,
+                    )
             })
             .count();
         let prepared = self.gdn.prepare_states(
@@ -500,7 +573,9 @@ impl ReplayableDecoderModel for Qwen4xExecutor {
             micro.block_indices(),
             micro.token_indices(),
             micro.cu_tokens(),
-            &vec![0; micro.num_reqs()],
+            &(0..micro.num_reqs())
+                .map(|i| micro.num_spec_tokens(i))
+                .collect::<Vec<_>>(),
             num_active_recurrent_requests,
             self.state.gdn_page_ids(),
         );
@@ -514,17 +589,9 @@ impl ReplayableDecoderModel for Qwen4xExecutor {
         batch
     }
     fn commit_batch(&mut self, request: BatchDeviceRequest, output: Self::SampledOutput) -> BatchDeviceResponse {
-        let batch = self.transactions.pending_microbatch(request.seq).clone();
-        let versions = self.transactions.commit(request.seq, &output.decisions);
-        self.state.commit(
-            self.runtime.device(),
-            self.runtime.stream(),
-            self.pages.buffer(),
-            self.main.component(),
-            &batch,
-            &versions,
-        );
-        self.gdn.commit(self.pages.buffer(), &versions);
+        if self.mtp.is_none() {
+            self.commit_main(request.seq, &output.decisions);
+        }
         to_core_batch_resp(request, output.decisions)
     }
     fn begin_ops_recording(&mut self, batch: &Self::ModelBatchRequest) -> Self::ModelOpsRecorder {
@@ -548,6 +615,8 @@ impl ReplayableDecoderModel for Qwen4xExecutor {
             main_arguments,
             output: None,
             sampling: None,
+            rejection: None,
+            mtp: None,
         }
     }
     fn embed_main(
@@ -616,6 +685,10 @@ impl ReplayableDecoderModel for Qwen4xExecutor {
             return;
         }
         let micro = batch.microbatch();
+        if self.mtp.is_some() {
+            self.record_rejection(recorder, micro);
+            return;
+        }
         let configs = sample_sampler_configs(micro);
         let shape = self.sampling.component().prepare_shape(&configs);
         let (key, _) = self.sampling.record(
@@ -643,18 +716,37 @@ impl ReplayableDecoderModel for Qwen4xExecutor {
         if let Some((key, args)) = &r.sampling {
             sequence.push(ReplayExecution::new(self.sampling.replay(key), args));
         }
-        self.runtime.stream().submit_replay_sequence(&sequence).into()
+        let stream = self.runtime.stream();
+        let mut stage_ends = stream.gpu_timestamps_enabled().then(|| vec![sequence.len()]);
+        if let Some((key, args, _)) = &r.rejection {
+            sequence.push(ReplayExecution::new(
+                self.mtp.as_ref().unwrap().rejection.replay(key),
+                args,
+            ));
+            if let Some(stage_ends) = &mut stage_ends {
+                stage_ends.push(sequence.len());
+            }
+        }
+        if let Some(stage_ends) = stage_ends {
+            stream
+                .submit_replay_sequence_with_gpu_timestamps(&sequence, &stage_ends)
+                .into()
+        } else {
+            stream.submit_replay_sequence(&sequence).into()
+        }
     }
     fn read_main(
         &mut self,
         r: &Self::ModelOpsRecorder,
         batch: &Self::ModelBatchRequest,
         elapsed: Duration,
-        _: Option<&[Duration]>,
+        gpu_durations: Option<&[Duration]>,
     ) -> Self::SampledOutput {
         let start = Instant::now();
         let count = sample_req_slots(batch.microbatch()).len();
-        let decisions = if r.sampling.is_some() {
+        let decisions = if let Some((_, _, prepared)) = &r.rejection {
+            self.read_rejection(prepared, batch.microbatch())
+        } else if r.sampling.is_some() {
             sample_decisions_from_sampled_tokens(&Qwen35SampledTokens::new(
                 self.sampler_output.token_ids.read_typed(0, count),
                 self.sampler_output.token_probs.read_typed(0, count),
@@ -662,15 +754,82 @@ impl ReplayableDecoderModel for Qwen4xExecutor {
         } else {
             Vec::new()
         };
-        Qwen4xSampledOutput {
-            decisions,
-            timing: ModelOutputTiming {
-                main_sample_replay_elapsed: if count > 0 { elapsed } else { Duration::ZERO },
-                main_replay_elapsed: if count == 0 { elapsed } else { Duration::ZERO },
-                sample_read_elapsed: start.elapsed(),
-                ..Default::default()
-            },
-        }
+        let mut timing = ModelOutputTiming {
+            main_sample_replay_elapsed: if count > 0 { elapsed } else { Duration::ZERO },
+            main_replay_elapsed: if count == 0 { elapsed } else { Duration::ZERO },
+            sample_read_elapsed: start.elapsed(),
+            ..Default::default()
+        };
+        apply_main_gpu_timing(&mut timing, gpu_durations, false, r.rejection.is_some(), false);
+        Qwen4xSampledOutput { decisions, timing }
+    }
+    fn run_spec(&self, _: &Self::ModelBatchRequest, _: &Self::SampledOutput) -> bool {
+        self.mtp.is_some()
+    }
+    fn embed_spec(
+        &mut self,
+        recorder: &mut Self::ModelOpsRecorder,
+        batch: &Self::ModelBatchRequest,
+        hidden: &Self::ModelBatchHidden,
+        output: &Self::SampledOutput,
+    ) -> Self::ModelBatchHidden {
+        debug_assert!(Rc::ptr_eq(hidden, &self.hidden_output));
+        self.commit_main(batch.compute_seq(), &output.decisions);
+        let start = Instant::now();
+        let mtp = self.mtp.as_mut().unwrap();
+        mtp.requests = plan::requests(batch.microbatch(), &output.decisions, &mtp.history, mtp.num_spec_tokens);
+        mtp.drafts.clear();
+        mtp.draft_probs.clear();
+        mtp.timing = ModelOutputTiming {
+            spec_replay_gpu_elapsed: Some(Duration::ZERO),
+            ..Default::default()
+        };
+        recorder.mtp = Some(self.record_mtp_embed(0));
+        self.mtp.as_mut().unwrap().timing.spec_build_elapsed += start.elapsed();
+        Rc::clone(&self.hidden_input)
+    }
+    fn forward_spec(
+        &mut self,
+        recorder: &mut Self::ModelOpsRecorder,
+        _: &Self::ModelBatchRequest,
+        hidden: Self::ModelBatchHidden,
+    ) -> Self::ModelBatchHidden {
+        debug_assert!(Rc::ptr_eq(&hidden, &self.hidden_input));
+        let start = Instant::now();
+        self.record_mtp_body(recorder.mtp.as_mut().unwrap());
+        self.mtp.as_mut().unwrap().timing.spec_build_elapsed += start.elapsed();
+        Rc::clone(&self.hidden_output)
+    }
+    fn unembed_spec(
+        &mut self,
+        recorder: &mut Self::ModelOpsRecorder,
+        _: &Self::ModelBatchRequest,
+        _: &Self::ModelBatchHidden,
+    ) {
+        let start = Instant::now();
+        self.record_mtp_output(recorder.mtp.as_mut().unwrap());
+        self.mtp.as_mut().unwrap().timing.spec_build_elapsed += start.elapsed();
+    }
+    fn sample_spec(&mut self, recorder: &mut Self::ModelOpsRecorder, _: &Self::ModelBatchRequest, _: &()) {
+        let start = Instant::now();
+        self.record_mtp_sampling(recorder.mtp.as_mut().unwrap());
+        self.mtp.as_mut().unwrap().timing.spec_build_elapsed += start.elapsed();
+    }
+    fn submit_spec(&mut self, recorder: &Self::ModelOpsRecorder) -> Self::Submission {
+        self.submit_mtp(recorder.mtp.as_ref().unwrap())
+    }
+    fn read_spec(
+        &mut self,
+        _: &Self::ModelOpsRecorder,
+        _: &Self::ModelBatchRequest,
+        mut output: Self::SampledOutput,
+        elapsed: Duration,
+        gpu_durations: Option<&[Duration]>,
+    ) -> Self::SampledOutput {
+        output
+            .timing
+            .add_assign(self.finish_mtp(&mut output.decisions, elapsed, gpu_durations));
+        output
     }
     fn empty_sampled_output(&self) -> Self::SampledOutput {
         Qwen4xSampledOutput {
@@ -687,6 +846,7 @@ impl ReplayableDecoderModel for Qwen4xExecutor {
 }
 
 include!("file_io.rs");
+include!("mtp/executor.rs");
 
 #[cfg(test)]
 #[path = "executor_test.rs"]

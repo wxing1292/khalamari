@@ -16,6 +16,7 @@ use inference_executor_core::model::qwen::v4_x::LayerType;
 use inference_executor_core::model::qwen::v4_x::Qwen4xModelConfig;
 use inference_executor_core::replay::ReplayBucketPolicy;
 use inference_runtime_core::compute::BatchDeviceRequest;
+use inference_runtime_core::compute::DecoderSyncBlocks;
 use wincode::SchemaRead;
 use wincode::SchemaWrite;
 
@@ -29,7 +30,6 @@ use crate::attn::qsa::sdpa::QSASDPAShape;
 use crate::attn::qsa_indexer::batch_metadata::QSAIndexerMetadataBuffers;
 use crate::attn::qsa_indexer::batch_metadata::QSAIndexerRequest;
 use crate::model::qwen::v4_x::executor::Qwen4xExecutorConfig;
-use crate::model::qwen::v4_x::main::Qwen4xMain;
 use crate::model::qwen::v4_x::main::ngram_core;
 use crate::model::qwen::v4_x::main::ple_core;
 use crate::ple::batch_metadata::PLEMetadataBuffers;
@@ -61,6 +61,7 @@ pub struct Qwen4xState {
     config: Qwen4xExecutorConfig,
     index_layout: qsa_indexer::CacheLayout,
     carry_bytes: usize,
+    retained_versions: usize,
     conv_bytes: usize,
     history_len: usize,
     eos: u32,
@@ -77,6 +78,7 @@ pub struct Qwen4xState {
     group_policy: ReplayBucketPolicy,
     query_policy: ReplayBucketPolicy,
     pending_commit: Option<inference_backend_metal::metal::ReplaySubmission>,
+    commit_stream: Stream,
 }
 struct Resources {
     pages: GQARequestPageTable,
@@ -91,8 +93,18 @@ struct Resources {
 impl Qwen4xState {
     pub fn new(
         device: &Device,
+        commit_stream: Stream,
         model: &Qwen4xModelConfig,
         config: Qwen4xExecutorConfig,
+    ) -> Result<Self, ModelExecutorError> {
+        Self::new_with_carry_history(device, commit_stream, model, config, 0)
+    }
+    pub fn new_with_carry_history(
+        device: &Device,
+        commit_stream: Stream,
+        model: &Qwen4xModelConfig,
+        config: Qwen4xExecutorConfig,
+        retained_versions: usize,
     ) -> Result<Self, ModelExecutorError> {
         let text = &model.text_config;
         let qsa_layers = (0..text.num_hidden_layers)
@@ -120,9 +132,14 @@ impl Qwen4xState {
             num_pages_per_request: (num_blocks * (config.num_tokens_per_block / tokens_per_index_page))
                 .try_into()
                 .expect("Qwen4x index pages must fit u32"),
-            num_state_slots: (config.max_requests + config.max_tokens)
-                .try_into()
-                .expect("Qwen4x carry slots must fit u32"),
+            num_state_slots: (config
+                .max_requests
+                .checked_mul(retained_versions)
+                .and_then(|n| n.checked_add(config.max_requests))
+                .and_then(|n| n.checked_add(config.max_tokens))
+                .expect("Qwen4x carry slot count must fit usize"))
+            .try_into()
+            .expect("Qwen4x carry slots must fit u32"),
             page_bytes: PAGE_BYTES as u32,
         };
         let carry_bytes = (text.indexer_compress_ratio - 1)
@@ -205,6 +222,7 @@ impl Qwen4xState {
             config,
             index_layout,
             carry_bytes,
+            retained_versions,
             conv_bytes,
             history_len,
             eos,
@@ -224,6 +242,7 @@ impl Qwen4xState {
                 &inference_backend_metal::components::qsa_sparse_gqa::Compute::topology_boundaries(),
             ),
             pending_commit: None,
+            commit_stream,
         };
         state.allocate_resources(device, model)?;
         Ok(state)
@@ -249,7 +268,7 @@ impl Qwen4xState {
                 .map(|_| {
                     Buffer::new_zeroed(
                         device,
-                        (c.max_requests + c.max_tokens)
+                        (self.index_layout.num_state_slots as usize)
                             .checked_mul(self.carry_bytes)
                             .expect("Qwen4x index state allocation must fit usize"),
                     )
@@ -367,48 +386,77 @@ impl Qwen4xState {
         num_total_tokens: u32,
         gdn_pages: usize,
     ) {
+        self.prepare_lane(
+            device,
+            runtime,
+            pages,
+            request.dev_reqs.iter().map(|request| &request.decoder_sync_blocks),
+            batch,
+            num_total_tokens,
+            gdn_pages,
+            0,
+        );
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_lane<'a>(
+        &mut self,
+        device: &Device,
+        runtime: &Stream,
+        pages: &Buffer,
+        sync_blocks: impl Iterator<Item = &'a DecoderSyncBlocks>,
+        batch: &Qwen35Microbatch,
+        num_total_tokens: u32,
+        gdn_pages: usize,
+        cache_lane: usize,
+    ) {
+        self.finish_commit();
         self.publishes.clear();
         self.gdn_page_ids.clear();
         let mut restore_jobs = Vec::new();
         let mut restore_slots = Vec::new();
-        for (req_index, req) in request.dev_reqs.iter().enumerate() {
-            let slot = req.req_slot as usize;
+        let mut src_state_slots = Vec::new();
+        for (req_index, sync) in sync_blocks.enumerate() {
+            let req_slot = batch.req_slots()[req_index];
+            let slot = req_slot as usize;
             let position = batch.token_indices()[req_index];
-            let synchronized = req
-                .decoder_sync_blocks
+            let synchronized = sync
                 .kv_page_ids()
-                .first()
+                .get(cache_lane)
                 .expect("Qwen4x Main requires cache lane 0");
             for (offset, ids) in synchronized.iter().enumerate() {
-                let block = req.decoder_sync_blocks.block_index() + offset;
+                let block = sync.block_index() + offset;
                 assert_eq!(ids.len(), self.kv_pages_per_block());
                 let per_layer = self.layout.num_page_ids_per_block as usize + self.index_pages_per_block();
                 for (layer, ids) in ids.chunks_exact(per_layer).enumerate() {
                     let (kv, index) = ids.split_at(self.layout.num_page_ids_per_block as usize);
-                    self.resources().pages.write_page_ids(req.req_slot, layer, block, kv);
+                    self.resources().pages.write_page_ids(req_slot, layer, block, kv);
                     let at =
                         slot * self.index_layout.num_pages_per_request as usize + block * self.index_pages_per_block();
                     self.resources().index_page_ids[layer].write_typed(at, index);
                 }
             }
-            assert!(
-                self.versions[slot] <= position,
-                "Qwen4x state version exceeds the runtime input position"
-            );
+            let src_state_slot = if self.versions[slot] > position {
+                debug_assert!(
+                    self.retained_versions > 0 && self.versions[slot] - position < self.retained_versions as u32,
+                    "Qwen4x rollback must stay inside retained carry history"
+                );
+                self.versions[slot] = position;
+                self.config.max_requests
+                    + self.config.max_tokens
+                    + slot * self.retained_versions
+                    + position as usize % self.retained_versions
+            } else {
+                slot
+            };
+            src_state_slots.push(src_state_slot as u32);
             let mut gdn = Vec::new();
             let mut latest = None;
-            let state_blocks = req
-                .decoder_sync_blocks
-                .state_page_ids()
-                .first()
-                .map(Vec::as_slice)
-                .unwrap_or(&[]);
+            let state_blocks = sync.state_page_ids().get(cache_lane).map(Vec::as_slice).unwrap_or(&[]);
             for (offset, ids) in state_blocks.iter().enumerate() {
                 assert_eq!(ids.len(), gdn_pages + self.aux_pages_per_block());
                 let (gdn_ids, aux_ids) = ids.split_at(gdn_pages);
                 gdn.push(gdn_ids.to_vec());
-                let version =
-                    ((req.decoder_sync_blocks.block_index() + offset + 1) * self.config.num_tokens_per_block) as u32;
+                let version = ((sync.block_index() + offset + 1) * self.config.num_tokens_per_block) as u32;
                 if version <= self.versions[slot] {
                     continue;
                 }
@@ -425,7 +473,7 @@ impl Qwen4xState {
             self.gdn_page_ids.push(gdn);
             if let Some((version, ids)) = latest {
                 append_page_jobs(&mut restore_jobs, ids, slot * self.aux_bytes, self.aux_bytes, true);
-                restore_slots.push(req.req_slot);
+                restore_slots.push(req_slot);
                 self.versions[slot] = version;
             }
             assert_eq!(
@@ -462,7 +510,7 @@ impl Qwen4xState {
                 token_index: position,
                 num_tokens: count,
                 group_start: 0,
-                src_state_slot: slot,
+                src_state_slot: src_state_slots[i],
             });
         }
         let sparse_capacity = self.query_policy.capacity(sparse.max(1)).min(num_total_tokens);
@@ -607,21 +655,28 @@ impl Qwen4xState {
             }
             for state in &self.resources().index_states {
                 state.zero_bytes(slot as usize * self.carry_bytes, self.carry_bytes);
+                if self.retained_versions > 0 {
+                    state.zero_bytes(
+                        (self.config.max_requests + self.config.max_tokens + slot as usize * self.retained_versions)
+                            * self.carry_bytes,
+                        self.retained_versions * self.carry_bytes,
+                    );
+                }
             }
             for state in &self.resources().ple_states {
                 state.zero_bytes(slot as usize * self.conv_bytes, self.conv_bytes);
             }
         }
     }
-    pub fn commit(
+    pub fn commit<'a>(
         &mut self,
         device: &Device,
-        runtime: &Stream,
         pages: &Buffer,
-        main: &Qwen4xMain,
+        ple_normalized: impl Fn(usize) -> &'a Buffer,
         batch: &Qwen35Microbatch,
         versions: &[u32],
     ) {
+        let runtime = &self.commit_stream;
         let count = batch.num_reqs();
         assert_eq!(versions.len(), count);
         let mut recorder = ReplayRecorder::new(runtime.create_replay_program());
@@ -654,7 +709,7 @@ impl Qwen4xState {
             let compute = self.resources().ple_commit.as_ref().unwrap();
             recorder.record_with_barrier_before(ReplayOp::opaque(PLECommitJobs {
                 compute,
-                normalized: &main.ple_scratch(layer).normalized_gated,
+                normalized: ple_normalized(layer),
                 states: &self.resources().ple_states[layer],
                 requests: Buffer::from_slice(device, &commits),
                 accepted: Buffer::from_slice(device, &accepted),
@@ -725,7 +780,7 @@ impl Qwen4xState {
         }
         self.record_copy(device, &mut recorder, &self.resources().packed, pages, &page_jobs);
         for layer in 0..self.layout.num_gqa_layers as usize {
-            let jobs: Vec<_> = (0..count)
+            let mut jobs: Vec<_> = (0..count)
                 .map(|i| {
                     let flat = batch.cu_tokens()[i] + versions[i] - batch.token_indices()[i] - 1;
                     [
@@ -735,6 +790,24 @@ impl Qwen4xState {
                     ]
                 })
                 .collect();
+            if self.retained_versions > 0 {
+                for (i, &slot) in batch.req_slots().iter().enumerate() {
+                    let start = batch.token_indices()[i];
+                    let end = versions[i];
+                    for position in start.max(end.saturating_sub(self.retained_versions as u32))..end {
+                        let flat = batch.cu_tokens()[i] + position - start;
+                        let destination = self.config.max_requests
+                            + self.config.max_tokens
+                            + slot as usize * self.retained_versions
+                            + (position as usize + 1) % self.retained_versions;
+                        jobs.push([
+                            ((self.config.max_requests + flat as usize) * self.carry_bytes) as u64,
+                            (destination * self.carry_bytes) as u64,
+                            self.carry_bytes as u64,
+                        ]);
+                    }
+                }
+            }
             self.record_copy(
                 device,
                 &mut recorder,
@@ -829,6 +902,19 @@ impl Qwen4xState {
         let slots: Vec<_> = (0..self.config.max_requests as u32).collect();
         self.unpack(device, &mut recorder, &slots);
         runtime.submit_replay(&recorder.build()).wait();
+    }
+    pub fn carry_history_ranges(&self, slots: &[std::ops::Range<u32>]) -> Vec<std::ops::Range<u32>> {
+        let base = self.config.max_requests + self.config.max_tokens;
+        slots
+            .iter()
+            .map(|range| {
+                (base + range.start as usize * self.retained_versions) as u32
+                    ..(base + range.end as usize * self.retained_versions) as u32
+            })
+            .collect()
+    }
+    pub fn carry_bytes(&self) -> usize {
+        self.carry_bytes
     }
     pub fn packed(&self) -> &Buffer {
         &self.resources().packed

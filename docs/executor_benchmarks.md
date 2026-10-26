@@ -9,6 +9,7 @@ evidence requirements. Component math and source layouts remain in the matching 
 Run `bash scripts/qwen4x_validate.sh` for the serial fixed/random CPU-reference and GPU lifecycle suite.
 The script saves complete logs, commit, dirty state, and hardware under `target/validation/qwen4x`.
 An optional checkpoint argument captures the first eight or all Main layers.
+Optional head-directory and proposal-depth arguments also exercise the public native MTP hooks.
 The capture checks finite output and does not establish cross-framework numerical parity.
 See [Qwen4x verification](executor_qwen4x.md#verification).
 This script does not measure performance.
