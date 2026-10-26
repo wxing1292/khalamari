@@ -178,6 +178,7 @@ See the [performance helper guide](docs/service.md#end-to-end-performance-helper
 ## Workspace map
 
 ```text
+inference-asr-client        native microphone/file ASR client and bounded speech sessions
 inference-error             shared typed errors and error logging
 inference-runtime-launcher  Qwen CLI and const-specialized worker builds
 inference-runtime-core      scheduling, lifecycle, and cache ownership

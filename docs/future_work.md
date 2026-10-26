@@ -112,13 +112,39 @@ python3 scripts/qsa_indexer_score_matrix.py --mode report \
   Pass model-owned positions through `DecodeRequest`, `Sessions`, `InternalRequest`, and `DeviceRequest` to executor batch metadata.
   Validate initial-token coverage and continuation bounds before admission. Keep positions aligned through query slicing and request reordering.
 - Measure resource-level early unload: peak arena bytes, rematerialization, and repeated audio/image/video placements.
-- Add long-audio chunking/streaming after collected Qwen3-ASR parity. Define timestamps, overlap, context carry, and output merging first.
+- Add model-native ASR streaming with explicit chunk/state carry. The standalone client currently sends independent bounded audio windows.
 - Add model-owned image processing, Vision Tower, spatial merger, and true T/H/W M-RoPE.
   Reuse runtime resources and `ResourceEmbed` replacement.
 - Add video after image support. Define demux, sampling, timestamps, and segment mapping from reference fixtures.
 - Measure first-Prefill materialization and batch interference before adding separate resource scheduling.
 - Compare tower attention with decoder bidirectional GQA after both tower baselines are stable.
   Share lower-level SDPA only when contiguous tower tensors and paged decoder state retain their distinct contracts and show a measured benefit.
+
+### ASR E2E support
+
+The [standalone client](qwen3_asr.md#standalone-client) owns microphone/file transcription and a bounded speech session in `crates/inference-asr-client/`.
+The executable prepares external Whisper assets. Native Rust tools generate fixtures and run real-model acceptance.
+The session uses CPU VAD, overlapping independent LID windows, language-aware Qwen requests, and partial/final revisions.
+
+- Move the speech-session owner behind a bidirectional server transport when another client needs the protocol.
+- Add bounded vocabulary and committed transcription context independently of any agent conversation.
+- Calibrate short-span language detection with natural English/Chinese code-switch recordings and human reference text.
+  The current Whisper-tiny window classifier is a heuristic, not a trained frame-level language diarizer.
+- Calibrate ordinary and sentence-assisted pause thresholds with natural English/Chinese speech, hesitation, background sound, and human sentence boundaries.
+  Measure unwanted splits, missed boundaries, endpoint waiting, and final-output latency separately.
+  Existing per-job wait/processing metrics do not replace speech-end-to-final measurements.
+- Evaluate a smaller VAD runtime after a candidate passes the [paired replacement gate](qwen3_asr.md#vad-replacement-gate).
+  The current client statically links ORT and embeds Silero.
+  Earshot 1.2.2 did not preserve retained speech and endpoint P95 on the current validation recordings.
+- Validate the optional ASR overlap mode against natural English/Chinese boundary references before changing its zero default.
+  Compare owned-audio recovery, timestamp-constrained stitching, and optional text-LLM arbitration with identical audio and ASR settings.
+  Measure genuine repetition retention, boundary omissions, insertions, names, negation, and final-output latency.
+- Replace approximate Whisper attention times when a reliable word aligner is available through the supported runtime.
+- Evaluate mixed-language errors that retain some Han characters and therefore bypass the current audio retry guard.
+- Verify server request cancellation after client disconnect before adding a stronger cancellation guarantee.
+- Validate encoder windows and decoder prefixes against uncached execution before model-state reuse.
+- Keep raw transcription, optional Qwen3.8 27B cleanup, and identifier errors separate.
+- Discuss local TTS in a separate follow-up.
 
 ## Replay Evolution
 

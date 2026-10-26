@@ -1,0 +1,43 @@
+[package]
+name = "inference-asr-client"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "asr"
+path = "src/main.rs"
+
+[dependencies]
+clap = { workspace = true, features = ["derive"] }
+ct2rs = { workspace = true, features = ["accelerate", "ruy"] }
+futures-util = { workspace = true }
+hound = { workspace = true }
+inference-error = { workspace = true }
+inference-runtime-core = { path = "../inference-runtime-core" }
+inference-runtime-proto = { path = "../inference-runtime-proto" }
+libc = { workspace = true }
+ort = { workspace = true, features = ["std", "download-binaries", "tls-native", "api-31"] }
+regex = { workspace = true }
+reqwest = { workspace = true, features = ["json", "multipart", "stream"] }
+rustfft = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = [
+    "macros",
+    "rt-multi-thread",
+    "sync",
+    "time",
+    "process",
+    "io-util",
+    "io-std",
+    "signal",
+] }
+tokenizers = { workspace = true }
+tonic = { workspace = true, features = ["transport"] }
+unicode-normalization = { workspace = true }
+unicode-width = { workspace = true }
