@@ -225,7 +225,11 @@ impl Qwen4xExecutor {
             self.runtime.stream(),
             &RejectionSamplingInput {
                 target_shape,
-                logits: &self.logits,
+                inputs: TopKSamplingInputs {
+                    logits: &self.logits,
+                    logits_offset_bytes: 0,
+                    token_mask: None,
+                },
                 target_sparse: TopKSamplingWriteDistributionOutput {
                     token_ids: mtp.probabilities.target_token_ids(),
                     probs: mtp.probabilities.target_probs(),
@@ -388,7 +392,11 @@ impl Qwen4xExecutor {
             self.runtime.stream(),
             &DraftSamplingInput {
                 shape,
-                logits: &self.logits,
+                inputs: TopKSamplingInputs {
+                    logits: &self.logits,
+                    logits_offset_bytes: 0,
+                    token_mask: None,
+                },
                 output: self.sampler_output.as_output(),
                 sparse: TopKSamplingWriteDistributionOutput {
                     token_ids: mtp.probabilities.draft_token_ids(),

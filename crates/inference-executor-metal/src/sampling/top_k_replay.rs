@@ -1,7 +1,6 @@
 use std::rc::Rc;
 
 use inference_backend_metal::components::ReplayRecorder;
-use inference_backend_metal::metal::Buffer;
 use inference_executor_core::replay::ReplayBucketPolicy;
 use inference_executor_core::sampling::SamplerConfig;
 use inference_executor_core::sampling::SamplingDomain;
@@ -18,8 +17,9 @@ use crate::sampling::top_k_sampling::config::TopKSamplingShape;
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct TopKSamplingReplayKey {
-    pub num_total_sampling_inputs: u32,
-    pub top_k: u32,
+    num_total_sampling_inputs: u32,
+    top_k: u32,
+    has_token_mask: bool,
 }
 
 pub struct Sampling {
@@ -35,22 +35,23 @@ pub struct DraftSampling {
 #[derive(Clone, Copy)]
 pub struct SamplingInput<'a> {
     pub shape: TopKSamplingShape,
-    pub logits: &'a Buffer,
+    pub inputs: TopKSamplingInputs<'a>,
     pub output: TopKSamplingOutput<'a>,
 }
 
 #[derive(Clone, Copy)]
 pub struct DraftSamplingInput<'a> {
     pub shape: TopKSamplingShape,
-    pub logits: &'a Buffer,
+    pub inputs: TopKSamplingInputs<'a>,
     pub output: TopKSamplingOutput<'a>,
     pub sparse: TopKSamplingWriteDistributionOutput<'a>,
 }
 
-fn sampling_key(shape: TopKSamplingShape) -> TopKSamplingReplayKey {
+fn sampling_key(shape: TopKSamplingShape, has_token_mask: bool) -> TopKSamplingReplayKey {
     TopKSamplingReplayKey {
         num_total_sampling_inputs: shape.num_total_sampling_inputs,
         top_k: shape.top_k,
+        has_token_mask,
     }
 }
 
@@ -89,7 +90,7 @@ impl ReplayComponent for Sampling {
     type Input<'a> = SamplingInput<'a>;
 
     fn replay_key(&self, input: &Self::Input<'_>) -> Self::Key {
-        sampling_key(input.shape)
+        sampling_key(input.shape, input.inputs.token_mask.is_some())
     }
 
     fn record<'a>(&'a self, recorder: &mut ReplayRecorder, input: &Self::Input<'a>) {
@@ -98,10 +99,7 @@ impl ReplayComponent for Sampling {
             input.shape,
             TopKSamplingLogitsDtype::Bfloat16,
             SamplingDomain::Target,
-            TopKSamplingInputs {
-                logits: input.logits,
-                logits_offset_bytes: 0,
-            },
+            input.inputs,
             input.output,
         );
     }
@@ -112,7 +110,7 @@ impl ReplayComponent for DraftSampling {
     type Input<'a> = DraftSamplingInput<'a>;
 
     fn replay_key(&self, input: &Self::Input<'_>) -> Self::Key {
-        sampling_key(input.shape)
+        sampling_key(input.shape, input.inputs.token_mask.is_some())
     }
 
     fn record<'a>(&'a self, recorder: &mut ReplayRecorder, input: &Self::Input<'a>) {
@@ -124,10 +122,7 @@ impl ReplayComponent for DraftSampling {
                 sample_position_increment: 0,
                 sampling_domain: SamplingDomain::Draft,
             },
-            TopKSamplingInputs {
-                logits: input.logits,
-                logits_offset_bytes: 0,
-            },
+            input.inputs,
             TopKSamplingSampleAndWriteDistributionOutput {
                 sampled: input.output,
                 distribution: input.sparse,

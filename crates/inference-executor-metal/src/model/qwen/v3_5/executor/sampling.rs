@@ -13,7 +13,11 @@ impl Qwen35Executor {
         let sample_shape = self.sampling.component().prepare_shape(sampler_configs);
         let input = SamplingInput {
             shape: sample_shape,
-            logits: &self.unembed_logits,
+            inputs: TopKSamplingInputs {
+                logits: &self.unembed_logits,
+                logits_offset_bytes: 0,
+                token_mask: None,
+            },
             output: self.sampler_output.as_output(),
         };
         let runtime = self.runtime.stream();
@@ -44,7 +48,11 @@ impl Qwen35Executor {
         let mtp = self.speculator.mtp_mut();
         let input = DraftSamplingInput {
             shape: sample_shape,
-            logits: &self.unembed_logits,
+            inputs: TopKSamplingInputs {
+                logits: &self.unembed_logits,
+                logits_offset_bytes: 0,
+                token_mask: None,
+            },
             output: self.sampler_output.as_output(),
             sparse: TopKSamplingWriteDistributionOutput {
                 token_ids: mtp.common.spec_probs.draft_token_ids(),
@@ -179,7 +187,11 @@ impl Qwen35Executor {
         };
         let component_input = RejectionSamplingInput {
             target_shape: target_distribution_shape,
-            logits: &self.unembed_logits,
+            inputs: TopKSamplingInputs {
+                logits: &self.unembed_logits,
+                logits_offset_bytes: 0,
+                token_mask: None,
+            },
             target_sparse: TopKSamplingWriteDistributionOutput {
                 token_ids: spec_probs.target_token_ids(),
                 probs: spec_probs.target_probs(),

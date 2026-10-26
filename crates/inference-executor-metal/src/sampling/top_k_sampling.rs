@@ -44,6 +44,7 @@ impl TopKSamplingCompute {
         let map_buffers = top_k::MapBuffers {
             logits: buffers.logits,
             logits_offset_bytes: buffers.logits_offset_bytes,
+            token_mask: buffers.token_mask,
             tile_token_ids: buffers.partial_token_ids,
             tile_logits: buffers.partial_logits,
         };
@@ -72,6 +73,7 @@ impl TopKSamplingCompute {
             top_k::MapBuffers {
                 logits: buffers.logits,
                 logits_offset_bytes: buffers.logits_offset_bytes,
+                token_mask: buffers.token_mask,
                 tile_token_ids: buffers.partial_token_ids,
                 tile_logits: buffers.partial_logits,
             },
@@ -96,6 +98,7 @@ impl TopKSamplingCompute {
             top_k::MapBuffers {
                 logits: buffers.logits,
                 logits_offset_bytes: buffers.logits_offset_bytes,
+                token_mask: buffers.token_mask,
                 tile_token_ids: buffers.partial_token_ids,
                 tile_logits: buffers.partial_logits,
             },
@@ -178,6 +181,7 @@ impl TopKSamplingCompute {
 struct TopKSamplingComputeBuffers<'a> {
     logits: &'a Buffer,
     logits_offset_bytes: usize,
+    token_mask: Option<&'a Buffer>,
     partial_token_ids: &'a Buffer,
     partial_logits: &'a Buffer,
     params: &'a Buffer,
@@ -309,6 +313,7 @@ impl TopKSampling {
             TopKSamplingComputeBuffers {
                 logits: inputs.logits,
                 logits_offset_bytes: inputs.logits_offset_bytes,
+                token_mask: inputs.token_mask,
                 partial_token_ids: &self.scratch.partial_token_ids,
                 partial_logits: &self.scratch.partial_logits,
                 params: self.params.buffer(),
@@ -339,6 +344,7 @@ impl TopKSampling {
             TopKSamplingComputeBuffers {
                 logits: inputs.logits,
                 logits_offset_bytes: inputs.logits_offset_bytes,
+                token_mask: inputs.token_mask,
                 partial_token_ids: &self.scratch.partial_token_ids,
                 partial_logits: &self.scratch.partial_logits,
                 params: self.params.buffer(),
@@ -366,6 +372,7 @@ impl TopKSampling {
             TopKSamplingComputeBuffers {
                 logits: inputs.logits,
                 logits_offset_bytes: inputs.logits_offset_bytes,
+                token_mask: inputs.token_mask,
                 partial_token_ids: &self.scratch.partial_token_ids,
                 partial_logits: &self.scratch.partial_logits,
                 params: self.params.buffer(),
@@ -437,6 +444,8 @@ impl ReplayLayer for TopKSampling {
 pub struct TopKSamplingInputs<'a> {
     pub logits: &'a Buffer,
     pub logits_offset_bytes: usize,
+    /// Packed `u32` bits per logits row. `None` permits every token.
+    pub token_mask: Option<&'a Buffer>,
 }
 
 #[derive(Clone, Copy)]

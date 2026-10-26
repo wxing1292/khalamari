@@ -15,6 +15,7 @@ use inference_executor_metal::sampling::top_k_replay::Sampling;
 use inference_executor_metal::sampling::top_k_replay::SamplingInput;
 use inference_executor_metal::sampling::top_k_replay::TopKSamplingReplayKey;
 use inference_executor_metal::sampling::top_k_sampling::TopKSampling;
+use inference_executor_metal::sampling::top_k_sampling::TopKSamplingInputs;
 use inference_executor_metal::sampling::top_k_sampling::TopKSamplingOutputBuffers;
 use inference_executor_metal::sampling::top_k_sampling::config::TopKSamplingBounds;
 
@@ -188,7 +189,11 @@ impl MainSamplingFixture {
             .add_replay_arguments(shape, &mut arguments);
         let input = SamplingInput {
             shape,
-            logits: &self.logits,
+            inputs: TopKSamplingInputs {
+                logits: &self.logits,
+                logits_offset_bytes: 0,
+                token_mask: None,
+            },
             output: self.output.as_output(),
         };
         let runtime = &self.stream;

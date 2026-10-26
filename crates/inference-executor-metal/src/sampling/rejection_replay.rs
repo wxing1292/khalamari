@@ -353,7 +353,8 @@ impl RejectionSampling {
 #[derive(Clone, Copy)]
 pub struct RejectionSamplingInput<'a> {
     pub target_shape: TopKSamplingShape,
-    pub logits: &'a Buffer,
+    /// Target logits and mask. Stored draft probabilities remain unchanged.
+    pub inputs: TopKSamplingInputs<'a>,
     pub target_sparse: TopKSamplingWriteDistributionOutput<'a>,
     pub rejection: RejectionSamplerInput<'a>,
 }
@@ -369,6 +370,7 @@ impl ReplayComponent for RejectionSampling {
             num_total_target_distributions: input.rejection.shape.num_total_target_distributions,
             num_total_draft_distributions: input.rejection.shape.num_total_draft_distributions,
             top_k: input.rejection.shape.top_k,
+            has_token_mask: input.inputs.token_mask.is_some(),
         }
     }
 
@@ -377,10 +379,7 @@ impl ReplayComponent for RejectionSampling {
             recorder,
             input.target_shape,
             TopKSamplingLogitsDtype::Bfloat16,
-            TopKSamplingInputs {
-                logits: input.logits,
-                logits_offset_bytes: 0,
-            },
+            input.inputs,
             input.target_sparse,
         );
         self.rejector.record(recorder, input.rejection);
@@ -393,6 +392,7 @@ pub struct RejectionReplayKey {
     num_total_target_distributions: u32,
     num_total_draft_distributions: u32,
     top_k: u32,
+    has_token_mask: bool,
 }
 
 #[cfg(test)]
@@ -416,6 +416,7 @@ mod tests {
     use crate::sampling::sampling_params::SamplingParamsStore;
     use crate::sampling::spec_probs::SpecProbsStore;
     use crate::sampling::top_k_sampling::TopKSampling;
+    use crate::sampling::top_k_sampling::TopKSamplingInputs;
     use crate::sampling::top_k_sampling::TopKSamplingWriteDistributionOutput;
     use crate::sampling::top_k_sampling::config::TopKSamplingBounds;
     use crate::sampling::top_k_sampling::config::TopKSamplingShape;
@@ -527,7 +528,11 @@ mod tests {
                 vocab_size: 16,
                 top_k: 4,
             },
-            logits: &logits,
+            inputs: TopKSamplingInputs {
+                logits: &logits,
+                logits_offset_bytes: 0,
+                token_mask: None,
+            },
             target_sparse: TopKSamplingWriteDistributionOutput {
                 token_ids: spec_probs.target_token_ids(),
                 probs: spec_probs.target_probs(),

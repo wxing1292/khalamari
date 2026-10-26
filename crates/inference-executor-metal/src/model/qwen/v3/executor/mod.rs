@@ -69,6 +69,7 @@ use crate::sampling::top_k_replay::Sampling;
 use crate::sampling::top_k_replay::SamplingInput;
 use crate::sampling::top_k_replay::TopKSamplingReplayKey;
 use crate::sampling::top_k_sampling::TopKSampling;
+use crate::sampling::top_k_sampling::TopKSamplingInputs;
 use crate::sampling::top_k_sampling::TopKSamplingOutputBuffers;
 
 mod load;

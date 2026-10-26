@@ -137,9 +137,25 @@ static inline float psi_uniform01(uint random) {
     return (float(random & 0x00ffffffu) + 0.5f) * (1.0f / 16777216.0f);
 }
 
-template <typename T>
+template <bool MASKED>
+static inline bool token_allowed(
+    device const uint* token_mask,
+    uint mask_words_per_row,
+    uint row,
+    uint token
+) {
+    if constexpr (!MASKED) {
+        return true;
+    }
+    const ulong word = (ulong)row * mask_words_per_row + token / 32;
+    return (token_mask[word] & (1u << (token % 32))) != 0;
+}
+
+template <typename T, bool MASKED>
 static inline void top_k_logits_tile_reduction(
     device const T* logits,
+    device const uint* token_mask,
+    uint mask_words_per_row,
     device int* tile_token_ids,
     device float* tile_logits,
     uint vocab,
@@ -166,31 +182,28 @@ static inline void top_k_logits_tile_reduction(
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
+    // One lane owns one vocabulary token in the fixed 256-token partition.
+    // Keep its mask decision and logit in registers across the top-k selections.
+    const uint token_index = tile_start + lane;
+    float candidate_logit = NEG_INF;
+    int candidate_token = -1;
+    if (token_index < tile_end && token_allowed<MASKED>(token_mask, mask_words_per_row, row, token_index)) {
+        float logit = float(logits[base + (ulong)token_index]);
+        if (metal::isfinite(logit)) {
+            candidate_logit = logit;
+            candidate_token = int(token_index);
+        }
+    }
     for (uint out_slot = 0; out_slot < top_k; ++out_slot) {
-        float local_best_logit = NEG_INF;
-        int local_best_token = -1;
-        for (uint token_index = tile_start + lane; token_index < tile_end; token_index += THREADGROUP_SIZE) {
-            const int token = int(token_index);
-            float logit = float(logits[base + (ulong)token_index]);
-            if (!metal::isfinite(logit)) {
-                continue;
-            }
-            bool already_selected = false;
-            for (uint previous = 0; previous < out_slot; ++previous) {
-                if (top_tokens[previous] == token) {
-                    already_selected = true;
-                    break;
-                }
-            }
-            if (already_selected) {
-                continue;
-            }
-            if (logit > local_best_logit ||
-                (logit == local_best_logit && (local_best_token < 0 || token < local_best_token))) {
-                local_best_logit = logit;
-                local_best_token = token;
+        bool already_selected = false;
+        for (uint previous = 0; previous < out_slot; ++previous) {
+            if (top_tokens[previous] == candidate_token) {
+                already_selected = true;
+                break;
             }
         }
+        float local_best_logit = already_selected ? NEG_INF : candidate_logit;
+        int local_best_token = already_selected ? -1 : candidate_token;
         reduce_values[lane] = local_best_logit;
         reduce_tokens[lane] = local_best_token;
         threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -222,9 +235,11 @@ static inline void top_k_logits_tile_reduction(
     }
 }
 
-template <typename T>
+template <typename T, bool MASKED>
 static inline void top_k_logits_tile_bitonic(
     device const T* logits,
+    device const uint* token_mask,
+    uint mask_words_per_row,
     device int* tile_token_ids,
     device float* tile_logits,
     uint vocab,
@@ -242,7 +257,7 @@ static inline void top_k_logits_tile_bitonic(
     const ulong base = (ulong)row * (ulong)vocab;
     const ulong out_base = ((ulong)row * (ulong)num_tiles + (ulong)tile) * (ulong)top_k;
     const uint token_index = tile_start + lane;
-    if (token_index < tile_end) {
+    if (token_index < tile_end && token_allowed<MASKED>(token_mask, mask_words_per_row, row, token_index)) {
         float logit = float(logits[base + (ulong)token_index]);
         values[lane] = metal::isfinite(logit) ? logit : NEG_INF;
         tokens[lane] = metal::isfinite(logit) ? int(token_index) : -1;
@@ -299,15 +314,41 @@ kernel void top_k_logits_tiles(
     uint group = global_thread_id / THREADGROUP_SIZE;
     uint row = group / num_tiles_u;
     uint tile = group % num_tiles_u;
-    if (top_k_u == 0 || top_k_u > TOP_K_MAX) {
-        return;
-    }
     threadgroup float top_logits[TOP_K_MAX];
     threadgroup int top_tokens[TOP_K_MAX];
     threadgroup float reduce_values[THREADGROUP_SIZE];
     threadgroup int reduce_tokens[THREADGROUP_SIZE];
-    top_k_logits_tile_reduction(
-        logits, tile_token_ids, tile_logits, vocab_u, top_k_u, vocab_tile_size_u, num_tiles_u,
+    top_k_logits_tile_reduction<float, false>(
+        logits, nullptr, 0, tile_token_ids, tile_logits, vocab_u, top_k_u, vocab_tile_size_u, num_tiles_u,
+        lane, row, tile, top_logits, top_tokens, reduce_values, reduce_tokens);
+}
+
+kernel void top_k_logits_tiles_masked(
+    device const float* logits [[buffer(0)]],
+    device int* tile_token_ids [[buffer(1)]],
+    device float* tile_logits [[buffer(2)]],
+    constant uint& num_active_threads_u [[buffer(3)]],
+    constant uint& vocab_u [[buffer(4)]],
+    constant uint& top_k_u [[buffer(5)]],
+    constant uint& vocab_tile_size_u [[buffer(6)]],
+    constant uint& num_tiles_u [[buffer(7)]],
+    device const uint* token_mask [[buffer(8)]],
+    constant uint& mask_words_per_row [[buffer(9)]],
+    uint global_thread_id [[thread_position_in_grid]]
+) {
+    if (global_thread_id >= num_active_threads_u) {
+        return;
+    }
+    uint lane = global_thread_id % THREADGROUP_SIZE;
+    uint group = global_thread_id / THREADGROUP_SIZE;
+    uint row = group / num_tiles_u;
+    uint tile = group % num_tiles_u;
+    threadgroup float top_logits[TOP_K_MAX];
+    threadgroup int top_tokens[TOP_K_MAX];
+    threadgroup float reduce_values[THREADGROUP_SIZE];
+    threadgroup int reduce_tokens[THREADGROUP_SIZE];
+    top_k_logits_tile_reduction<float, true>(
+        logits, token_mask, mask_words_per_row, tile_token_ids, tile_logits, vocab_u, top_k_u, vocab_tile_size_u, num_tiles_u,
         lane, row, tile, top_logits, top_tokens, reduce_values, reduce_tokens);
 }
 
@@ -329,13 +370,37 @@ kernel void top_k_logits_tiles_bitonic(
     uint group = global_thread_id / THREADGROUP_SIZE;
     uint row = group / num_tiles_u;
     uint tile = group % num_tiles_u;
-    if (top_k_u == 0 || top_k_u > TOP_K_MAX) {
-        return;
-    }
     threadgroup float values[THREADGROUP_SIZE];
     threadgroup int tokens[THREADGROUP_SIZE];
-    top_k_logits_tile_bitonic(
-        logits, tile_token_ids, tile_logits, vocab_u, top_k_u, vocab_tile_size_u, num_tiles_u,
+    top_k_logits_tile_bitonic<float, false>(
+        logits, nullptr, 0, tile_token_ids, tile_logits, vocab_u, top_k_u, vocab_tile_size_u, num_tiles_u,
+        lane, row, tile, values, tokens);
+}
+
+kernel void top_k_logits_tiles_bitonic_masked(
+    device const float* logits [[buffer(0)]],
+    device int* tile_token_ids [[buffer(1)]],
+    device float* tile_logits [[buffer(2)]],
+    constant uint& num_active_threads_u [[buffer(3)]],
+    constant uint& vocab_u [[buffer(4)]],
+    constant uint& top_k_u [[buffer(5)]],
+    constant uint& vocab_tile_size_u [[buffer(6)]],
+    constant uint& num_tiles_u [[buffer(7)]],
+    device const uint* token_mask [[buffer(8)]],
+    constant uint& mask_words_per_row [[buffer(9)]],
+    uint global_thread_id [[thread_position_in_grid]]
+) {
+    if (global_thread_id >= num_active_threads_u) {
+        return;
+    }
+    uint lane = global_thread_id % THREADGROUP_SIZE;
+    uint group = global_thread_id / THREADGROUP_SIZE;
+    uint row = group / num_tiles_u;
+    uint tile = group % num_tiles_u;
+    threadgroup float values[THREADGROUP_SIZE];
+    threadgroup int tokens[THREADGROUP_SIZE];
+    top_k_logits_tile_bitonic<float, true>(
+        logits, token_mask, mask_words_per_row, tile_token_ids, tile_logits, vocab_u, top_k_u, vocab_tile_size_u, num_tiles_u,
         lane, row, tile, values, tokens);
 }
 
@@ -357,15 +422,41 @@ kernel void top_k_logits_tiles_bf16(
     uint group = global_thread_id / THREADGROUP_SIZE;
     uint row = group / num_tiles_u;
     uint tile = group % num_tiles_u;
-    if (top_k_u == 0 || top_k_u > TOP_K_MAX) {
-        return;
-    }
     threadgroup float top_logits[TOP_K_MAX];
     threadgroup int top_tokens[TOP_K_MAX];
     threadgroup float reduce_values[THREADGROUP_SIZE];
     threadgroup int reduce_tokens[THREADGROUP_SIZE];
-    top_k_logits_tile_reduction(
-        logits, tile_token_ids, tile_logits, vocab_u, top_k_u, vocab_tile_size_u, num_tiles_u,
+    top_k_logits_tile_reduction<bfloat, false>(
+        logits, nullptr, 0, tile_token_ids, tile_logits, vocab_u, top_k_u, vocab_tile_size_u, num_tiles_u,
+        lane, row, tile, top_logits, top_tokens, reduce_values, reduce_tokens);
+}
+
+kernel void top_k_logits_tiles_bf16_masked(
+    device const bfloat* logits [[buffer(0)]],
+    device int* tile_token_ids [[buffer(1)]],
+    device float* tile_logits [[buffer(2)]],
+    constant uint& num_active_threads_u [[buffer(3)]],
+    constant uint& vocab_u [[buffer(4)]],
+    constant uint& top_k_u [[buffer(5)]],
+    constant uint& vocab_tile_size_u [[buffer(6)]],
+    constant uint& num_tiles_u [[buffer(7)]],
+    device const uint* token_mask [[buffer(8)]],
+    constant uint& mask_words_per_row [[buffer(9)]],
+    uint global_thread_id [[thread_position_in_grid]]
+) {
+    if (global_thread_id >= num_active_threads_u) {
+        return;
+    }
+    uint lane = global_thread_id % THREADGROUP_SIZE;
+    uint group = global_thread_id / THREADGROUP_SIZE;
+    uint row = group / num_tiles_u;
+    uint tile = group % num_tiles_u;
+    threadgroup float top_logits[TOP_K_MAX];
+    threadgroup int top_tokens[TOP_K_MAX];
+    threadgroup float reduce_values[THREADGROUP_SIZE];
+    threadgroup int reduce_tokens[THREADGROUP_SIZE];
+    top_k_logits_tile_reduction<bfloat, true>(
+        logits, token_mask, mask_words_per_row, tile_token_ids, tile_logits, vocab_u, top_k_u, vocab_tile_size_u, num_tiles_u,
         lane, row, tile, top_logits, top_tokens, reduce_values, reduce_tokens);
 }
 
@@ -387,13 +478,37 @@ kernel void top_k_logits_tiles_bf16_bitonic(
     uint group = global_thread_id / THREADGROUP_SIZE;
     uint row = group / num_tiles_u;
     uint tile = group % num_tiles_u;
-    if (top_k_u == 0 || top_k_u > TOP_K_MAX) {
-        return;
-    }
     threadgroup float values[THREADGROUP_SIZE];
     threadgroup int tokens[THREADGROUP_SIZE];
-    top_k_logits_tile_bitonic(
-        logits, tile_token_ids, tile_logits, vocab_u, top_k_u, vocab_tile_size_u, num_tiles_u,
+    top_k_logits_tile_bitonic<bfloat, false>(
+        logits, nullptr, 0, tile_token_ids, tile_logits, vocab_u, top_k_u, vocab_tile_size_u, num_tiles_u,
+        lane, row, tile, values, tokens);
+}
+
+kernel void top_k_logits_tiles_bf16_bitonic_masked(
+    device const bfloat* logits [[buffer(0)]],
+    device int* tile_token_ids [[buffer(1)]],
+    device float* tile_logits [[buffer(2)]],
+    constant uint& num_active_threads_u [[buffer(3)]],
+    constant uint& vocab_u [[buffer(4)]],
+    constant uint& top_k_u [[buffer(5)]],
+    constant uint& vocab_tile_size_u [[buffer(6)]],
+    constant uint& num_tiles_u [[buffer(7)]],
+    device const uint* token_mask [[buffer(8)]],
+    constant uint& mask_words_per_row [[buffer(9)]],
+    uint global_thread_id [[thread_position_in_grid]]
+) {
+    if (global_thread_id >= num_active_threads_u) {
+        return;
+    }
+    uint lane = global_thread_id % THREADGROUP_SIZE;
+    uint group = global_thread_id / THREADGROUP_SIZE;
+    uint row = group / num_tiles_u;
+    uint tile = group % num_tiles_u;
+    threadgroup float values[THREADGROUP_SIZE];
+    threadgroup int tokens[THREADGROUP_SIZE];
+    top_k_logits_tile_bitonic<bfloat, true>(
+        logits, token_mask, mask_words_per_row, tile_token_ids, tile_logits, vocab_u, top_k_u, vocab_tile_size_u, num_tiles_u,
         lane, row, tile, values, tokens);
 }
 

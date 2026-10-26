@@ -80,6 +80,7 @@ use crate::sampling::top_k_replay::Sampling;
 use crate::sampling::top_k_replay::SamplingInput;
 use crate::sampling::top_k_replay::TopKSamplingReplayKey;
 use crate::sampling::top_k_sampling::TopKSampling;
+use crate::sampling::top_k_sampling::TopKSamplingInputs;
 use crate::sampling::top_k_sampling::TopKSamplingOutputBuffers;
 use crate::sampling::top_k_sampling::config::TopKSamplingBounds;
 
@@ -695,7 +696,11 @@ impl ReplayableDecoderModel for Qwen4xExecutor {
             self.runtime.stream(),
             &SamplingInput {
                 shape,
-                logits: &self.logits,
+                inputs: TopKSamplingInputs {
+                    logits: &self.logits,
+                    logits_offset_bytes: 0,
+                    token_mask: None,
+                },
                 output: self.sampler_output.as_output(),
             },
         );

@@ -74,7 +74,7 @@ impl MapThreadBlockConstants {
     fn current() -> Self {
         Self {
             max_vocab_tokens: TOP_K_VOCAB_TILE_SIZE,
-            required_threads: 256,
+            required_threads: TOP_K_VOCAB_TILE_SIZE,
         }
     }
 }
@@ -162,6 +162,8 @@ fn partial_candidate_count(shape: Shape, layout: PartialCandidateLayout) -> usiz
 pub struct MapBuffers<'a> {
     pub logits: &'a Buffer,
     pub logits_offset_bytes: usize,
+    /// Packed `u32` bits per logits row. A set bit permits that token. `None` permits all tokens.
+    pub token_mask: Option<&'a Buffer>,
     pub tile_token_ids: &'a Buffer,
     pub tile_logits: &'a Buffer,
 }
@@ -244,6 +246,17 @@ fn assert_map_buffers_fit(
                 .expect("Metal top-k logits region must fit usize"),
         "top-k logits buffer is too short for total sampling inputs"
     );
+    if let Some(mask) = buffers.token_mask {
+        let mask_bytes = checked_product(
+            "Metal top-k token mask byte length",
+            &[
+                shape.num_total_sampling_inputs as usize,
+                shape.vocab_size.div_ceil(32) as usize,
+                size_of::<u32>(),
+            ],
+        );
+        assert!(mask.len_bytes() >= mask_bytes, "top-k token mask buffer is too short");
+    }
     let candidates = partial_candidate_count(shape, layout);
     assert!(
         buffers.tile_token_ids.len_bytes() >= checked_bytes("Metal top-k partial token", candidates, size_of::<i32>()),
@@ -290,14 +303,17 @@ fn assert_reduce_inputs_fit(
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum VariantKey {
     F32Reduction,
+    F32ReductionMasked,
     F32Bitonic,
+    F32BitonicMasked,
     Bf16Reduction,
+    Bf16ReductionMasked,
     Bf16Bitonic,
+    Bf16BitonicMasked,
 }
 
 struct Variant {
     constants: MapKernelConstants,
-    logits_item_size: usize,
     kernel: CompiledKernel,
 }
 
@@ -310,40 +326,67 @@ struct Selector;
 impl Registry {
     fn new(device: &crate::metal::Device) -> Self {
         Self {
-            entries: vec![
+            entries: [
                 (
                     VariantKey::F32Reduction,
-                    Variant {
-                        constants: MapKernelConstants::new(Dtype::Float32, MapAlgorithm::Reduction),
-                        logits_item_size: size_of::<f32>(),
-                        kernel: CompiledKernel::new(device, SAMPLING_SOURCE, "top_k_logits_tiles"),
-                    },
+                    Dtype::Float32,
+                    MapAlgorithm::Reduction,
+                    "top_k_logits_tiles",
+                ),
+                (
+                    VariantKey::F32ReductionMasked,
+                    Dtype::Float32,
+                    MapAlgorithm::Reduction,
+                    "top_k_logits_tiles_masked",
                 ),
                 (
                     VariantKey::F32Bitonic,
-                    Variant {
-                        constants: MapKernelConstants::new(Dtype::Float32, MapAlgorithm::Bitonic),
-                        logits_item_size: size_of::<f32>(),
-                        kernel: CompiledKernel::new(device, SAMPLING_SOURCE, "top_k_logits_tiles_bitonic"),
-                    },
+                    Dtype::Float32,
+                    MapAlgorithm::Bitonic,
+                    "top_k_logits_tiles_bitonic",
+                ),
+                (
+                    VariantKey::F32BitonicMasked,
+                    Dtype::Float32,
+                    MapAlgorithm::Bitonic,
+                    "top_k_logits_tiles_bitonic_masked",
                 ),
                 (
                     VariantKey::Bf16Reduction,
-                    Variant {
-                        constants: MapKernelConstants::new(Dtype::Bfloat16, MapAlgorithm::Reduction),
-                        logits_item_size: size_of::<u16>(),
-                        kernel: CompiledKernel::new(device, SAMPLING_SOURCE, "top_k_logits_tiles_bf16"),
-                    },
+                    Dtype::Bfloat16,
+                    MapAlgorithm::Reduction,
+                    "top_k_logits_tiles_bf16",
+                ),
+                (
+                    VariantKey::Bf16ReductionMasked,
+                    Dtype::Bfloat16,
+                    MapAlgorithm::Reduction,
+                    "top_k_logits_tiles_bf16_masked",
                 ),
                 (
                     VariantKey::Bf16Bitonic,
-                    Variant {
-                        constants: MapKernelConstants::new(Dtype::Bfloat16, MapAlgorithm::Bitonic),
-                        logits_item_size: size_of::<u16>(),
-                        kernel: CompiledKernel::new(device, SAMPLING_SOURCE, "top_k_logits_tiles_bf16_bitonic"),
-                    },
+                    Dtype::Bfloat16,
+                    MapAlgorithm::Bitonic,
+                    "top_k_logits_tiles_bf16_bitonic",
                 ),
-            ],
+                (
+                    VariantKey::Bf16BitonicMasked,
+                    Dtype::Bfloat16,
+                    MapAlgorithm::Bitonic,
+                    "top_k_logits_tiles_bf16_bitonic_masked",
+                ),
+            ]
+            .into_iter()
+            .map(|(key, logits_dtype, algorithm, entry_point)| {
+                (
+                    key,
+                    Variant {
+                        constants: MapKernelConstants::new(logits_dtype, algorithm),
+                        kernel: CompiledKernel::new(device, SAMPLING_SOURCE, entry_point),
+                    },
+                )
+            })
+            .collect(),
         }
     }
 
@@ -356,12 +399,18 @@ impl Registry {
 }
 
 impl Selector {
-    fn select(registry: &Registry, shape: Shape, logits_dtype: Dtype, operation: Operation) -> (VariantKey, &Variant) {
-        let key = Self::key(shape, logits_dtype, operation);
+    fn select(
+        registry: &Registry,
+        shape: Shape,
+        logits_dtype: Dtype,
+        operation: Operation,
+        has_token_mask: bool,
+    ) -> (VariantKey, &Variant) {
+        let key = Self::key(shape, logits_dtype, operation, has_token_mask);
         (key, registry.get(key))
     }
 
-    fn key(shape: Shape, logits_dtype: Dtype, operation: Operation) -> VariantKey {
+    fn key(shape: Shape, logits_dtype: Dtype, operation: Operation, has_token_mask: bool) -> VariantKey {
         shape.validate();
         let algorithm = match operation {
             Operation::Merge | Operation::Sample if shape.top_k <= TOP_K_REDUCTION_LIMIT => MapAlgorithm::Reduction,
@@ -370,12 +419,16 @@ impl Selector {
             | Operation::WriteDistribution
             | Operation::SampleAndWriteDistribution => MapAlgorithm::Bitonic,
         };
-        match (logits_dtype, algorithm) {
-            (Dtype::Float32, MapAlgorithm::Reduction) => VariantKey::F32Reduction,
-            (Dtype::Float32, MapAlgorithm::Bitonic) => VariantKey::F32Bitonic,
-            (Dtype::Bfloat16, MapAlgorithm::Reduction) => VariantKey::Bf16Reduction,
-            (Dtype::Bfloat16, MapAlgorithm::Bitonic) => VariantKey::Bf16Bitonic,
-            (dtype, _) => panic!("unsupported top-k logits dtype {dtype:?}"),
+        match (logits_dtype, algorithm, has_token_mask) {
+            (Dtype::Float32, MapAlgorithm::Reduction, false) => VariantKey::F32Reduction,
+            (Dtype::Float32, MapAlgorithm::Reduction, true) => VariantKey::F32ReductionMasked,
+            (Dtype::Float32, MapAlgorithm::Bitonic, false) => VariantKey::F32Bitonic,
+            (Dtype::Float32, MapAlgorithm::Bitonic, true) => VariantKey::F32BitonicMasked,
+            (Dtype::Bfloat16, MapAlgorithm::Reduction, false) => VariantKey::Bf16Reduction,
+            (Dtype::Bfloat16, MapAlgorithm::Reduction, true) => VariantKey::Bf16ReductionMasked,
+            (Dtype::Bfloat16, MapAlgorithm::Bitonic, false) => VariantKey::Bf16Bitonic,
+            (Dtype::Bfloat16, MapAlgorithm::Bitonic, true) => VariantKey::Bf16BitonicMasked,
+            (dtype, ..) => panic!("unsupported top-k logits dtype {dtype:?}"),
         }
     }
 }
@@ -398,10 +451,16 @@ impl MapCompute {
         operation: Operation,
         buffers: MapBuffers<'a>,
     ) -> MapInvocation<'a> {
-        let (_, variant) = Selector::select(&self.registry, shape, logits_dtype, operation);
+        let (_, variant) = Selector::select(
+            &self.registry,
+            shape,
+            logits_dtype,
+            operation,
+            buffers.token_mask.is_some(),
+        );
         let constants = variant.constants;
         let layout = constants.partial_candidate_layout();
-        assert_map_buffers_fit(shape, layout, buffers, variant.logits_item_size);
+        assert_map_buffers_fit(shape, layout, buffers, constants.logits_dtype.item_size());
         let num_partitions = num_vocab_partitions(shape, layout);
         let num_threads_per_row = checked_num_threads(num_partitions, constants.thread_block.required_threads);
         checked_num_threads(shape.num_total_sampling_inputs, num_threads_per_row);
@@ -454,6 +513,10 @@ impl Operator for MapInvocation<'_> {
         recorder.set_u32(5, self.shape.top_k);
         recorder.set_u32(6, layout.vocab_partition_size());
         recorder.set_u32(7, num_partitions);
+        if let Some(mask) = self.buffers.token_mask {
+            recorder.set_buffer_read(8, mask, 0);
+            recorder.set_u32(9, self.shape.vocab_size.div_ceil(32));
+        }
         let required_threads = constants.thread_block.required_threads;
         let num_threads_per_row = num_partitions * required_threads;
         let num_total_threads = self.shape.num_total_sampling_inputs * num_threads_per_row;

@@ -30,9 +30,17 @@ fn main() {
     match args.mode {
         BenchMode::TopKSample | BenchMode::TopKWriteDistribution | BenchMode::TopKSampleAndWriteDistribution => {
             for rows in args.rows {
-                let fixture = TopKFixture::new(&device, args.mode, rows, args.top_k, args.vocab);
+                let fixture = TopKFixture::new(&device, args.mode, rows, args.top_k, args.vocab, args.token_mask);
                 let samples = measure_runs(args.runs, args.warmup_iters, args.iters, || fixture.run());
-                print_topk_perf(args.mode, rows, args.top_k, args.vocab, args.iters, &samples);
+                print_topk_perf(
+                    args.mode,
+                    rows,
+                    args.top_k,
+                    args.vocab,
+                    args.token_mask,
+                    args.iters,
+                    &samples,
+                );
             }
         },
         BenchMode::RejectionSparse => {
@@ -95,6 +103,7 @@ struct Args {
     iters: usize,
     warmup_iters: usize,
     runs: usize,
+    token_mask: bool,
 }
 
 impl Args {
@@ -109,6 +118,7 @@ impl Args {
             iters: 200,
             warmup_iters: 50,
             runs: 7,
+            token_mask: false,
         };
         let mut iter = std::env::args().skip(1);
         while let Some(arg) = iter.next() {
@@ -123,6 +133,7 @@ impl Args {
                 "--iters" => args.iters = parse_usize_arg(&next_arg(&mut iter, &arg), &arg),
                 "--warmup-iters" => args.warmup_iters = parse_usize_arg(&next_arg(&mut iter, &arg), &arg),
                 "--runs" => args.runs = parse_usize_arg(&next_arg(&mut iter, &arg), &arg),
+                "--token-mask" => args.token_mask = true,
                 "--bench" => {},
                 other => panic!("unknown argument {other:?}; pass --help for usage"),
             }
@@ -132,6 +143,10 @@ impl Args {
         assert!(
             !args.spec_tokens.is_empty(),
             "--spec-tokens must include at least one value"
+        );
+        assert!(
+            !args.token_mask || !matches!(args.mode, BenchMode::RejectionSparse),
+            "--token-mask requires a top-k mode"
         );
         assert!(args.top_k > 0, "--top-k must be positive");
         assert!(args.vocab > 0, "--vocab must be positive");
@@ -168,15 +183,19 @@ enum TopKFixture {
 }
 
 impl TopKFixture {
-    fn new(device: &Device, mode: BenchMode, rows: u32, top_k: u32, vocab: u32) -> Self {
+    fn new(device: &Device, mode: BenchMode, rows: u32, top_k: u32, vocab: u32, token_mask: bool) -> Self {
         match mode {
-            BenchMode::TopKSample => Self::Sample(ReplayFixture::new_top_k_sample(device, rows, top_k, vocab)),
+            BenchMode::TopKSample => {
+                Self::Sample(ReplayFixture::new_top_k_sample(device, rows, top_k, vocab, token_mask))
+            },
             BenchMode::TopKWriteDistribution => {
-                Self::WriteDistribution(ReplayFixture::new_top_k_write_distribution(device, rows, top_k, vocab))
+                Self::WriteDistribution(ReplayFixture::new_top_k_write_distribution(
+                    device, rows, top_k, vocab, token_mask,
+                ))
             },
             BenchMode::TopKSampleAndWriteDistribution => {
                 Self::SampleAndWriteDistribution(ReplayFixture::new_top_k_sample_and_write_distribution(
-                    device, rows, top_k, vocab,
+                    device, rows, top_k, vocab, token_mask,
                 ))
             },
             BenchMode::RejectionSparse => panic!("rejection bench mode cannot build top-k fixture"),
@@ -199,8 +218,10 @@ struct ReplayFixture {
 }
 
 impl ReplayFixture {
-    fn new_top_k_sample(device: &Device, rows: u32, top_k: u32, vocab: u32) -> Self {
+    fn new_top_k_sample(device: &Device, rows: u32, top_k: u32, vocab: u32, token_mask: bool) -> Self {
         let (stream, shape, logits, tile_token_ids, tile_logits, topk) = top_k_base(device, rows, top_k, vocab);
+        let token_mask = token_mask
+            .then(|| Buffer::from_slice(device, &vec![u32::MAX; rows as usize * vocab.div_ceil(32) as usize]));
         let token_ids = Buffer::new_zeroed(device, rows as usize * size_of::<i32>());
         let token_probs = Buffer::new_zeroed(device, rows as usize * size_of::<f32>());
         let params = sampling_params(device, rows, top_k);
@@ -215,6 +236,7 @@ impl ReplayFixture {
             top_k::MapBuffers {
                 logits: &logits,
                 logits_offset_bytes: 0,
+                token_mask: token_mask.as_ref(),
                 tile_token_ids: &tile_token_ids,
                 tile_logits: &tile_logits,
             },
@@ -245,8 +267,10 @@ impl ReplayFixture {
         fixture
     }
 
-    fn new_top_k_write_distribution(device: &Device, rows: u32, top_k: u32, vocab: u32) -> Self {
+    fn new_top_k_write_distribution(device: &Device, rows: u32, top_k: u32, vocab: u32, token_mask: bool) -> Self {
         let (stream, shape, logits, tile_token_ids, tile_logits, topk) = top_k_base(device, rows, top_k, vocab);
+        let token_mask = token_mask
+            .then(|| Buffer::from_slice(device, &vec![u32::MAX; rows as usize * vocab.div_ceil(32) as usize]));
         let distribution_token_ids = Buffer::new_zeroed(device, rows as usize * top_k as usize * size_of::<i32>());
         let distribution_probs = Buffer::new_zeroed(device, rows as usize * top_k as usize * size_of::<f32>());
         let params = sampling_params(device, rows, top_k);
@@ -261,6 +285,7 @@ impl ReplayFixture {
             top_k::MapBuffers {
                 logits: &logits,
                 logits_offset_bytes: 0,
+                token_mask: token_mask.as_ref(),
                 tile_token_ids: &tile_token_ids,
                 tile_logits: &tile_logits,
             },
@@ -291,8 +316,16 @@ impl ReplayFixture {
         fixture
     }
 
-    fn new_top_k_sample_and_write_distribution(device: &Device, rows: u32, top_k: u32, vocab: u32) -> Self {
+    fn new_top_k_sample_and_write_distribution(
+        device: &Device,
+        rows: u32,
+        top_k: u32,
+        vocab: u32,
+        token_mask: bool,
+    ) -> Self {
         let (stream, shape, logits, tile_token_ids, tile_logits, topk) = top_k_base(device, rows, top_k, vocab);
+        let token_mask = token_mask
+            .then(|| Buffer::from_slice(device, &vec![u32::MAX; rows as usize * vocab.div_ceil(32) as usize]));
         let sampled_token_ids = Buffer::new_zeroed(device, rows as usize * size_of::<i32>());
         let sampled_token_probs = Buffer::new_zeroed(device, rows as usize * size_of::<f32>());
         let distribution_token_ids = Buffer::new_zeroed(device, rows as usize * top_k as usize * size_of::<i32>());
@@ -310,6 +343,7 @@ impl ReplayFixture {
             top_k::MapBuffers {
                 logits: &logits,
                 logits_offset_bytes: 0,
+                token_mask: token_mask.as_ref(),
                 tile_token_ids: &tile_token_ids,
                 tile_logits: &tile_logits,
             },
@@ -571,15 +605,24 @@ where
     samples
 }
 
-fn print_topk_perf(mode: BenchMode, rows: u32, top_k: u32, vocab: u32, iters: usize, samples: &[Duration]) {
+fn print_topk_perf(
+    mode: BenchMode,
+    rows: u32,
+    top_k: u32,
+    vocab: u32,
+    token_mask: bool,
+    iters: usize,
+    samples: &[Duration],
+) {
     let per_iter_us = sorted_per_iter_us(iters, samples);
     println!(
-        "perf component=sampling case={} rows={} top_k={} vocab={} iters={} runs={} median_us={:.3} min_us={:.3} \
-         max_us={:.3}",
+        "perf component=sampling case={} rows={} top_k={} vocab={} token_mask={} iters={} runs={} median_us={:.3} \
+         min_us={:.3} max_us={:.3}",
         mode.as_str(),
         rows,
         top_k,
         vocab,
+        if token_mask { "all" } else { "none" },
         iters,
         samples.len(),
         median_of_sorted(&per_iter_us),
@@ -660,7 +703,8 @@ fn print_help_and_exit() -> ! {
     println!(
         "sampling bench\n--mode \
          top-k-sample|top-k-write-distribution|top-k-sample-and-write-distribution|rejection-sparse\n--rows \
-         1,4\n--num-reqs 1,4\n--spec-tokens 1,4\n--top-k 32\n--vocab 32768\n--iters 200 --warmup-iters 50 --runs 7"
+         1,4\n--num-reqs 1,4\n--spec-tokens 1,4\n--top-k 32\n--vocab 32768\n--iters 200 --warmup-iters 50 --runs \
+         7\n--token-mask (all tokens allowed; top-k modes only)"
     );
     std::process::exit(0);
 }

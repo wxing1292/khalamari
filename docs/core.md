@@ -593,19 +593,42 @@ mask buffer. The future does not borrow the caller's SM. The state machine does 
 `Mask::AllowAll` permits every token without allocating a bitset. `Mask::Bitset` owns packed `u32` words.
 Bit `token_id % 32` in word `token_id / 32` permits that token when set. The bitset must cover the vocabulary.
 The consumer must ignore unused bits in the final word. Mask generation must not change the logical state.
+Mask bits must agree with the `Allow` and `Reject` results of `try_apply` from the same state.
 `DefaultStateMachine` returns a ready future containing `Mask::AllowAll`.
 
-This standalone example uses token ID `11`:
+`fill_spec_masks` generates one mask for the current state and each grammar-valid draft prefix.
+The current state must already include the anchor token. The function accepts an iterator of `Token` values.
+It clones the SM, applies drafts in order, and submits each snapshot through `fill_mask`.
+It stops at the first rejected draft and returns transition errors to the caller.
+The original SM remains unchanged, including when a rejected transition changes its temporary copy.
+The function does not modify proposals or mark drafts as accepted by the target model.
+If a draft is rejected, the final returned mask still describes the state before that draft.
+Verification can use this mask to give the rejected draft zero target probability.
+The consumer must preserve rejection sampling at that position. It must not treat the shorter mask list as an all-accepted proposal.
+
+This standalone example uses anchor token `10` and drafts `35, 68`:
 
 ```text
-sm: DefaultStateMachine
+original SM: includes anchor 10; remains owned by caller
   |
-  +--try_apply(11)--> Allow
-  |
-  +--clone--> snapshot --fill_mask (takes ownership)--> future --await--> Mask::AllowAll
-  |
-  +--still owned by caller
+  +--clone--> trial SM
+                |
+                +--clone--> fill_mask --> future[0]: predicts token after 10
+                |
+                +--try_apply(35): Allow
+                +--clone--> fill_mask --> future[1]: predicts token after 35
+                |
+                +--try_apply(68): Allow
+                +--clone--> fill_mask --> future[2]: predicts token after 68
+
+Main input rows:          [10,         35,         68]
+Next-token mask rows:     [future[0],  future[1],  future[2]]
+Target distribution for: [draft 35,   draft 68,   continuation]
 ```
+
+Each snapshot has one independent future. Background work starts before the caller polls these futures.
+With no drafts, the function still returns the anchor mask.
+Callers can supply only the proposal prefix selected for a query. The function does not require a configured draft width.
 
 The module has no activation controller or runtime token cursor.
 Jump-forward completion is not supported. Applying one token must not append, replace, or promote other tokens.

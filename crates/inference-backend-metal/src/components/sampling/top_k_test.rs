@@ -31,28 +31,28 @@ fn test_map_variant_selection() {
         ..reduction_shape
     };
     assert_eq!(
-        Selector::key(reduction_shape, Dtype::Float32, Operation::Sample),
+        Selector::key(reduction_shape, Dtype::Float32, Operation::Sample, false),
         VariantKey::F32Reduction
     );
     assert_eq!(
-        Selector::key(bitonic_shape, Dtype::Float32, Operation::Sample),
+        Selector::key(bitonic_shape, Dtype::Float32, Operation::Sample, false),
         VariantKey::F32Bitonic
     );
     assert_eq!(
-        Selector::key(reduction_shape, Dtype::Bfloat16, Operation::Sample),
+        Selector::key(reduction_shape, Dtype::Bfloat16, Operation::Sample, false),
         VariantKey::Bf16Reduction
     );
     assert_eq!(
-        Selector::key(bitonic_shape, Dtype::Bfloat16, Operation::Sample),
+        Selector::key(bitonic_shape, Dtype::Bfloat16, Operation::Sample, false),
         VariantKey::Bf16Bitonic
     );
     for operation in [Operation::WriteDistribution, Operation::SampleAndWriteDistribution] {
         assert_eq!(
-            Selector::key(reduction_shape, Dtype::Float32, operation),
+            Selector::key(reduction_shape, Dtype::Float32, operation, false),
             VariantKey::F32Bitonic
         );
         assert_eq!(
-            Selector::key(reduction_shape, Dtype::Bfloat16, operation),
+            Selector::key(reduction_shape, Dtype::Bfloat16, operation, false),
             VariantKey::Bf16Bitonic
         );
     }
@@ -71,7 +71,7 @@ fn test_merge_replay_bucketing() {
 fn test_sample_replay_bucketing() {
     for dtype in [Dtype::Float32, Dtype::Bfloat16] {
         for top_k in [20, 64] {
-            run_sample_case(dtype, top_k);
+            run_sample_case(dtype, top_k, false);
         }
     }
 }
@@ -79,15 +79,80 @@ fn test_sample_replay_bucketing() {
 #[test]
 fn test_write_distribution_replay_bucketing() {
     for dtype in [Dtype::Float32, Dtype::Bfloat16] {
-        run_distribution_case(dtype, false);
+        run_distribution_case(dtype, false, false);
     }
 }
 
 #[test]
 fn test_sample_write_distribution_replay_bucketing() {
     for dtype in [Dtype::Float32, Dtype::Bfloat16] {
-        run_distribution_case(dtype, true);
+        run_distribution_case(dtype, true, false);
     }
+}
+
+#[test]
+fn test_token_mask_replay() {
+    for dtype in [Dtype::Float32, Dtype::Bfloat16] {
+        for top_k in [20, 64] {
+            run_sample_case(dtype, top_k, true);
+        }
+        run_distribution_case(dtype, false, true);
+        run_distribution_case(dtype, true, true);
+    }
+}
+
+#[test]
+#[should_panic(expected = "top-k token mask buffer is too short")]
+fn test_token_mask_buffer_bounds() {
+    let device = Device::system_default();
+    let shape = Shape {
+        num_total_sampling_inputs: 2,
+        vocab_size: 33,
+        top_k: 1,
+    };
+    let logits = Buffer::new_zeroed_elements(&device, 66, Dtype::Float32);
+    let mask = Buffer::new_zeroed_elements(&device, 3, Dtype::Uint32);
+    let map = MapCompute::new(&device);
+    let candidates = map.candidate_count(shape);
+    let tile_token_ids = Buffer::new_zeroed_elements(&device, candidates, Dtype::Int32);
+    let tile_logits = Buffer::new_zeroed_elements(&device, candidates, Dtype::Float32);
+    let _ = map.invoke_replay(
+        shape,
+        Dtype::Float32,
+        Operation::Sample,
+        MapBuffers {
+            logits: &logits,
+            logits_offset_bytes: 0,
+            token_mask: Some(&mask),
+            tile_token_ids: &tile_token_ids,
+            tile_logits: &tile_logits,
+        },
+    );
+}
+
+// Build the GPU bitset and an independent dense CPU reference with excluded logits.
+fn token_mask_fixture(device: &Device, shape: Shape, logits: &mut [f32]) -> Buffer {
+    let words_per_row = shape.vocab_size.div_ceil(32) as usize;
+    let mut words = vec![0_u32; shape.num_total_sampling_inputs as usize * words_per_row];
+    for (row, row_logits) in logits.chunks_mut(shape.vocab_size as usize).enumerate() {
+        for (token, logit) in row_logits.iter_mut().enumerate() {
+            let allowed = match row {
+                0 => token == 0,
+                1 => matches!(token, 31 | 32 | 255 | 256),
+                2 => true,
+                3 => token.is_multiple_of(11),
+                _ => unreachable!(),
+            };
+            if allowed {
+                words[row * words_per_row + token / 32] |= 1 << (token % 32);
+            } else {
+                *logit = f32::NEG_INFINITY;
+            }
+        }
+        // Padding bits must not become out-of-vocabulary candidates.
+        words[(row + 1) * words_per_row - 1] |= !1_u32;
+    }
+    Buffer::from_slice(device, &words)
 }
 
 fn run_merge_case(dtype: Dtype, top_k: u32) {
@@ -123,6 +188,7 @@ fn run_merge_case(dtype: Dtype, top_k: u32) {
             MapBuffers {
                 logits: &logits,
                 logits_offset_bytes,
+                token_mask: None,
                 tile_token_ids: &tile_token_ids,
                 tile_logits: &tile_logits,
             },
@@ -170,7 +236,7 @@ fn run_merge_case(dtype: Dtype, top_k: u32) {
     assert_invalid_logits_rejected(&stream, &replay, &arguments, &logits, dtype, shape.vocab_size as usize);
 }
 
-fn run_sample_case(dtype: Dtype, top_k: u32) {
+fn run_sample_case(dtype: Dtype, top_k: u32, masked: bool) {
     let sampling_domain = SamplingDomain::Target;
     let device = Device::system_default();
     let stream = Stream::new(&device);
@@ -179,7 +245,8 @@ fn run_sample_case(dtype: Dtype, top_k: u32) {
         vocab_size: 257,
         top_k,
     };
-    let (logits, reference_logits, logits_offset_bytes) = logits_fixture(&device, dtype, shape, 0x19A2_7C4D);
+    let (logits, mut reference_logits, logits_offset_bytes) = logits_fixture(&device, dtype, shape, 0x19A2_7C4D);
+    let token_mask = masked.then(|| token_mask_fixture(&device, shape, &mut reference_logits));
     let configs = sampler_configs(top_k as usize);
     let params = sampling_params(&device, &configs);
     let req_slots = Buffer::from_slice(&device, &(0..shape.num_total_sampling_inputs).collect::<Vec<_>>());
@@ -202,6 +269,7 @@ fn run_sample_case(dtype: Dtype, top_k: u32) {
             MapBuffers {
                 logits: &logits,
                 logits_offset_bytes,
+                token_mask: token_mask.as_ref(),
                 tile_token_ids: &tile_token_ids,
                 tile_logits: &tile_logits,
             },
@@ -242,7 +310,7 @@ fn run_sample_case(dtype: Dtype, top_k: u32) {
     map.add_replay_arguments(shape, 1, &mut arguments);
     reduce.add_replay_arguments(shape, 1, &mut arguments);
     assert_invalid_logits_rejected(&stream, &replay, &arguments, &logits, dtype, shape.vocab_size as usize);
-    if dtype == Dtype::Float32 && top_k > 1 {
+    if !masked && dtype == Dtype::Float32 && top_k > 1 {
         req_slots.write_typed(0, &[2_u32]);
         sample_positions.write_typed(0, &[394_u32]);
         write_sampling_params(
@@ -271,9 +339,21 @@ fn run_sample_case(dtype: Dtype, top_k: u32) {
             assert!(message.contains(expected), "{message}");
         }
     }
+    if let Some(mask) = token_mask {
+        mask.write_typed(0, &vec![0_u32; shape.vocab_size.div_ceil(32) as usize]);
+        let failure = catch_unwind(AssertUnwindSafe(|| {
+            stream.submit_replay_with_arguments(&replay, &arguments).wait();
+        }))
+        .expect_err("an empty token mask must fail its submission");
+        let message = failure.downcast_ref::<String>().unwrap();
+        assert!(
+            message.contains("no finite logit candidates; row=0 code=1"),
+            "{message}"
+        );
+    }
 }
 
-fn run_distribution_case(dtype: Dtype, sample: bool) {
+fn run_distribution_case(dtype: Dtype, sample: bool, masked: bool) {
     let sampling_domain = SamplingDomain::Draft;
     let device = Device::system_default();
     let stream = Stream::new(&device);
@@ -282,7 +362,8 @@ fn run_distribution_case(dtype: Dtype, sample: bool) {
         vocab_size: 257,
         top_k: 20,
     };
-    let (logits, reference_logits, logits_offset_bytes) = logits_fixture(&device, dtype, shape, 0xE6B4_2A17);
+    let (logits, mut reference_logits, logits_offset_bytes) = logits_fixture(&device, dtype, shape, 0xE6B4_2A17);
+    let token_mask = masked.then(|| token_mask_fixture(&device, shape, &mut reference_logits));
     let configs = sampler_configs(shape.top_k as usize);
     let params = sampling_params(&device, &configs);
     let req_slots = Buffer::from_slice(&device, &(0..shape.num_total_sampling_inputs).collect::<Vec<_>>());
@@ -323,6 +404,7 @@ fn run_distribution_case(dtype: Dtype, sample: bool) {
             MapBuffers {
                 logits: &logits,
                 logits_offset_bytes,
+                token_mask: token_mask.as_ref(),
                 tile_token_ids: &tile_token_ids,
                 tile_logits: &tile_logits,
             },

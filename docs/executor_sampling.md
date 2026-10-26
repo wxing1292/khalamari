@@ -59,9 +59,10 @@ logits [num_rows, vocab_size]
   -> sampled token IDs + probabilities
 ```
 
-`top_k::MapCompute` owns a private `Registry` and `Selector`. The registry stores four complete execution variants:
-F32 reduction, F32 bitonic, BF16 reduction, and BF16 bitonic. `Selector::select(...)` returns
-`(VariantKey, &Variant)` from the logits dtype, top-k, and required output. The small-k path uses repeated maximum
+`top_k::MapCompute` owns a private `Registry` and `Selector`. The registry stores eight complete execution variants:
+F32/BF16, reduction/bitonic, and masked/unmasked. `Selector::select(...)` returns
+`(VariantKey, &Variant)` from the logits dtype, top-k, mask presence, and required output. Recording binds the selected kernel.
+The small-k path uses repeated maximum
 reduction for sample-only top-k <= 32. Larger top-k and write-distribution generation use the bitonic Map path. The
 selector performs the complete choice. The component does not have a separate planner or plan object.
 Unused static threadblock storage can reduce occupancy.
@@ -100,6 +101,81 @@ It does not apply temperature, top-p, or sampling.
 The current input contract does not include repetition, frequency, or presence penalties.
 `TopKSamplingOutputBuffers` owns the concrete sampled token and probability buffers.
 `OutputBuffers` denotes GPU buffers, not a model lifecycle state machine.
+
+### Token masks
+
+`SamplingInput`, `DraftSamplingInput`, and `RejectionSamplingInput` use the same `inputs: TopKSamplingInputs` field.
+It contains a borrowed logits buffer, its byte offset, and an optional borrowed `token_mask` buffer.
+Sampling draws from this input. Draft sampling also stores the distribution that produced the draw.
+Rejection uses this input for target distributions and reads the stored draft distributions separately.
+The buffer contains contiguous packed `u32` rows in logits-row order:
+
+```text
+logits: [num_total_sampling_inputs, vocab_size]
+mask:   [num_total_sampling_inputs, ceil(vocab_size / 32)] u32
+
+Example: anchor 10, drafts [35, 68], vocab_size = 70
+
+Main input   Output row   Mask state          Predicted token
+10           0            after 10            draft 35
+35           1            after 10,35         draft 68
+68           2            after 10,35,68      continuation
+
+mask[row, token / 32] & (1u << (token % 32)) != 0
+  -> token is allowed
+
+Example: row 0 permits token 35 only
+mask[0] = [0, 0x00000008, 0]
+                 word 1, bit 3
+```
+
+A set bit permits its token. The final word can contain unused bits. Kernels ignore these bits.
+The caller must supply storage for the recorded row capacity. Inactive rows do not read mask contents.
+An unrestricted row in a masked invocation uses set bits for every vocabulary token.
+`None` permits every token without a mask allocation or binding.
+
+Map reads the packed bits directly before it selects top-k candidates.
+It does not expand the bitset or write a dense masked-logits buffer.
+One Map threadblock owns one sampling row and a 256-token vocabulary partition.
+Its 256 lanes each own one token. Reduction keeps that token's logit and mask decision in registers across top-k selections.
+Bitonic sorts only permitted finite candidates.
+
+```text
+Example: vocab_size = 70, top_k = 2, token 35 is the only allowed token
+
+Before: unmasked                         After: masked
+logits[0, 0..70]                          same logits[0, 0..70]
+  -> Map group (row=0, partition=0)         + mask[0, 0..3]
+     lane 0 reads token 0                    -> same Map group, 256 lanes
+     lane 35 reads token 35                     lane 0: excluded by bit 0
+     lane 70..255: inactive                     lane 35: permitted by word 1, bit 3
+  -> highest two finite candidates              lane 70..255: inactive
+  -> Reduce merges candidates                   -> candidates [(35, logit[35]), (-1, -inf)]
+     temperature/top-p                          -> same Reduce, temperature/top-p
+  -> sample and sparse distribution             -> token 35 with probability 1
+```
+
+Masked and unmasked Map variants use separate kernel entry points.
+The unmasked entry points compile without mask reads or mask predicates.
+Both paths keep the same dispatch count, grid, threadblock size, and scratch layout.
+An active row with no permitted finite candidate uses the existing sampling failure path.
+The backend does not substitute a token for an empty mask.
+
+Mask presence is a record-time fact in sampling and rejection replay keys.
+Mask contents can change between completed submissions without recording another program.
+The caller must keep the same mask buffer identity for a cached replay key, as it does for logits and output buffers.
+The logits byte offset must also remain fixed for that key. Mask row zero corresponds to the first logits row at that offset.
+The recorded program retains that buffer. The caller must finish earlier GPU use before it writes new mask contents.
+
+Rejection masks target logits before target-distribution generation. Stored draft distributions remain unchanged.
+Acceptance and residual sampling use the masked target distribution and the distribution that actually produced each draft.
+A forbidden draft has zero target probability. The rejection walk rejects it and samples the residual distribution.
+If proposal sampling also receives a mask, it stores the resulting masked draft distribution at generation time.
+Verification must not mask or renormalize that stored distribution afterward.
+
+The packed layout matches runtime `Mask::Bitset`. Metal shared buffers can receive these `u32` words directly.
+This interface does not need a serialization format or an unpack command.
+Current model callers pass `None`. Runtime mask futures and SM activation are not connected to these inputs yet.
 
 ## Sparse distributions and rejection
 
@@ -312,6 +388,8 @@ Each sparse distribution contains the exact probabilities that the walk uses.
 | All Top-K APIs | Total rows `4`, active `1, 4, 3, 2`, nonzero logits offset, exact active CPU reference |
 | Sparse rejection | Same active-request sequence, accepted counts, sampled tokens/probabilities/prefixes |
 | Rejection fixtures | Reject, all-accept, zero-draft, non-contiguous distribution mapping |
+| Token masks | F32/BF16, reduction/bitonic, word and partition boundaries, unused final bits, unrestricted rows, empty-mask failure |
+| Executor token masks | Masked/unmasked replay keys, mask-content updates, partial draft acceptance, bonus sampling, original draft probabilities |
 
 Inactive output tails are not correctness oracles.
 Run GPU tests serially under [executor verification](executor_benchmarks.md).
@@ -326,5 +404,8 @@ cargo bench --bench rejection_sampling -- \
 
 Supported modes are `top-k-sample`, `top-k-write-distribution`, `top-k-sample-and-write-distribution`,
 and `rejection-sparse`.
+Top-k modes accept `--token-mask` to bind an all-permitted packed mask without changing the sampling workload.
+Output reports `token_mask=none` or `token_mask=all`. This comparison measures mask-read overhead with prepared inputs.
+It does not include CPU mask generation, packing, or submission overlap.
 The model-executor target is `qwen35_main_sampling`.
 [`executor_benchmarks.md`](executor_benchmarks.md) defines shared measurement and provenance rules.

@@ -50,12 +50,37 @@ pub trait GuidedDecodeSM: DynClone + Send {
     fn status(&self) -> StateMachineStatus;
 
     /// Generates the next-token mask from the current state.
+    /// Allowed tokens must match `try_apply` at this state.
     ///
     /// Consumes this snapshot. Submit any background work before returning.
     fn fill_mask(self: Box<Self>) -> MaskFuture;
 }
 
 dyn_clone::clone_trait_object!(GuidedDecodeSM);
+
+/// Generates masks for the current state and each valid speculative prefix.
+///
+/// The current state must already include the anchor token. Mask `0` predicts the
+/// first draft; mask `i + 1` predicts the token after draft `i`.
+/// Stops before applying any draft after the first rejection. The returned length
+/// is the valid draft count plus one. This function leaves `state_machine` unchanged.
+/// The final mask also covers the first rejected draft. Returning fewer masks does
+/// not accept the preceding drafts or replace rejection sampling with a bonus draw.
+pub fn fill_spec_masks(
+    state_machine: &dyn GuidedDecodeSM,
+    spec_tokens: impl IntoIterator<Item = Token>,
+) -> Result<Vec<MaskFuture>> {
+    let mut state_machine = dyn_clone::clone_box(state_machine);
+    let mut masks = vec![state_machine.clone().fill_mask()];
+    for token in spec_tokens {
+        match state_machine.try_apply(token) {
+            StateMachineTransition::Allow => masks.push(state_machine.clone().fill_mask()),
+            StateMachineTransition::Reject { .. } => break,
+            StateMachineTransition::Error(error) => return Err(error),
+        }
+    }
+    Ok(masks)
+}
 
 /// The default state machine permits every token and never terminates.
 #[derive(Clone, Copy, Debug, Default)]
@@ -76,20 +101,5 @@ impl GuidedDecodeSM for DefaultStateMachine {
 }
 
 #[cfg(test)]
-mod tests {
-    use futures_lite::future::block_on;
-
-    use super::*;
-
-    #[test]
-    fn test_mask_future_outlives_state_machine() {
-        let future = {
-            let sm: Box<dyn GuidedDecodeSM> = Box::new(DefaultStateMachine);
-            let future = sm.clone().fill_mask();
-            assert_eq!(sm.status(), StateMachineStatus::Accepting);
-            future
-        };
-
-        assert!(matches!(block_on(future), Ok(Mask::AllowAll)));
-    }
-}
+#[path = "guided_decode_test.rs"]
+mod tests;

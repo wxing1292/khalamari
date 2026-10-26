@@ -443,6 +443,7 @@ impl ReplayComponent for Qwen3xDFlash2Output {
             top_k::MapBuffers {
                 logits: &self.logits,
                 logits_offset_bytes: 0,
+                token_mask: None,
                 tile_token_ids: &self.partial_candidate_token_ids,
                 tile_logits: &self.partial_candidate_logits,
             },

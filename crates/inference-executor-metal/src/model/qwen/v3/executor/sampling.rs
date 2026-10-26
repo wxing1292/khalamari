@@ -13,7 +13,11 @@ impl Qwen3Executor {
         let sample_shape = self.sampling.component().prepare_shape(sampler_configs);
         let input = SamplingInput {
             shape: sample_shape,
-            logits: &self.unembed_logits,
+            inputs: TopKSamplingInputs {
+                logits: &self.unembed_logits,
+                logits_offset_bytes: 0,
+                token_mask: None,
+            },
             output: self.sampler_output.as_output(),
         };
         let runtime = self.runtime.stream();
