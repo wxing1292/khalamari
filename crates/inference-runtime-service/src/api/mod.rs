@@ -5,6 +5,7 @@ use inference_runtime_core::runtime::Token;
 
 use crate::runtime::InferenceRuntime;
 
+pub mod audio;
 pub mod decode;
 pub mod messages;
 

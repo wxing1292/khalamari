@@ -19,7 +19,7 @@ const RESAMPLE_CHUNK_SIZE: usize = 1_024;
 pub struct Qwen3ASRAudioPreprocessor {
     config: Qwen3ASRPreprocessorConfig,
     fft: Arc<dyn Fft<f32>>,
-    mel_filters: Vec<Vec<f32>>,
+    mel_filters: Vec<Vec<(usize, f32)>>,
     window: Vec<f32>,
 }
 
@@ -63,7 +63,10 @@ impl Qwen3ASRAudioPreprocessor {
             TARGET_SAMPLE_RATE,
             self.config.n_samples,
         )?;
-        normalize_samples(&mut samples);
+        // Decoding already normalized the peak. Only resampling can introduce overshoot.
+        if decoded.sample_rate != TARGET_SAMPLE_RATE {
+            normalize_samples(&mut samples);
+        }
         if samples.len() < self.config.hop_length {
             return Err(Error::invalid_argument(format!(
                 "Qwen3-ASR WAV must contain at least {} samples after resampling",
@@ -80,6 +83,7 @@ impl Qwen3ASRAudioPreprocessor {
     fn log_mel(&self, samples: &[f32], num_frames: usize) -> Vec<f32> {
         let num_frequency_bins = self.config.n_fft / 2 + 1;
         let mut frame = vec![Complex32::default(); self.config.n_fft];
+        let mut scratch = vec![Complex32::default(); self.fft.get_inplace_scratch_len()];
         let mut power = vec![0.0; num_frequency_bins];
         let mut features = vec![0.0; self.config.feature_size * num_frames];
         let pad = self.config.n_fft / 2;
@@ -90,15 +94,14 @@ impl Qwen3ASRAudioPreprocessor {
                 let sample_index = sample_index as isize - pad as isize;
                 *value = Complex32::new(reflect_sample(samples, sample_index) * self.window[index], 0.0);
             }
-            self.fft.process(&mut frame);
+            self.fft.process_with_scratch(&mut frame, &mut scratch);
             for (value, frequency) in power.iter_mut().zip(&frame[..num_frequency_bins]) {
                 *value = frequency.norm_sqr();
             }
             for (mel_index, filter) in self.mel_filters.iter().enumerate() {
                 features[mel_index * num_frames + frame_index] = filter
                     .iter()
-                    .zip(&power)
-                    .map(|(filter, power)| filter * power)
+                    .map(|&(index, weight)| weight * power[index])
                     .sum::<f32>()
                     .max(1e-10)
                     .log10();
@@ -239,7 +242,7 @@ fn reflect_sample(samples: &[f32], index: isize) -> f32 {
     samples[index as usize]
 }
 
-fn mel_filters(sample_rate: u32, n_fft: usize, num_mel_bins: usize) -> Vec<Vec<f32>> {
+fn mel_filters(sample_rate: u32, n_fft: usize, num_mel_bins: usize) -> Vec<Vec<(usize, f32)>> {
     let num_frequency_bins = n_fft / 2 + 1;
     let max_frequency = sample_rate as f32 / 2.0;
     let max_mel = hz_to_slaney_mel(max_frequency);
@@ -248,7 +251,7 @@ fn mel_filters(sample_rate: u32, n_fft: usize, num_mel_bins: usize) -> Vec<Vec<f
         .map(slaney_mel_to_hz)
         .collect::<Vec<_>>();
     let frequencies = (0..num_frequency_bins)
-        .map(|index| max_frequency * index as f32 / (num_frequency_bins - 1) as f32)
+        .map(|index| sample_rate as f32 * index as f32 / n_fft as f32)
         .collect::<Vec<_>>();
     (0..num_mel_bins)
         .map(|mel_index| {
@@ -258,10 +261,12 @@ fn mel_filters(sample_rate: u32, n_fft: usize, num_mel_bins: usize) -> Vec<Vec<f
             let normalization = 2.0 / (right - left);
             frequencies
                 .iter()
-                .map(|&frequency| {
+                .enumerate()
+                .filter_map(|(index, &frequency)| {
                     let lower = (frequency - left) / (center - left);
                     let upper = (right - frequency) / (right - center);
-                    0.0f32.max(lower.min(upper)) * normalization
+                    let weight = 0.0f32.max(lower.min(upper)) * normalization;
+                    (weight != 0.0).then_some((index, weight))
                 })
                 .collect()
         })

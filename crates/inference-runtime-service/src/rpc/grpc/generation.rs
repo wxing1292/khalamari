@@ -13,6 +13,8 @@ use inference_runtime_core::config::DEFAULT_SAMPLING_TOP_P;
 use inference_runtime_core::config::SamplingConfig;
 use inference_runtime_core::runtime::CompletionReason;
 use inference_runtime_core::runtime::Token;
+use inference_runtime_proto::inference_runtime_service::AudioTranscribeReq as ProtoAudioTranscribeReq;
+use inference_runtime_proto::inference_runtime_service::AudioTranscribeResp as ProtoAudioTranscribeResp;
 use inference_runtime_proto::inference_runtime_service::CompletionReason as ProtoCompletionReason;
 use inference_runtime_proto::inference_runtime_service::GenerateMessagesRequest as ProtoGenerateMessagesRequest;
 use inference_runtime_proto::inference_runtime_service::GenerateMessagesResponse as ProtoGenerateMessagesResponse;
@@ -38,6 +40,7 @@ use tonic::Response;
 use tonic::Status;
 use tonic::Streaming;
 
+use crate::api::audio::AudioTranscribeReq;
 use crate::api::decode::DecodeEvent;
 use crate::api::decode::DecodeRequest;
 use crate::api::messages::MessageEvent;
@@ -61,6 +64,24 @@ impl<const N: usize, const L: usize, const P: usize> InferenceRuntime for GRPCSe
     type GenerateMessagesStreamStream = MessageResponseStream;
     type GenerateTokensStream = TokenResponseStream;
     type GenerateTokensStreamStream = TokenResponseStream;
+
+    async fn transcribe_audio(
+        &self,
+        request: Request<ProtoAudioTranscribeReq>,
+    ) -> Result<Response<ProtoAudioTranscribeResp>, Status> {
+        let transcriber = self
+            .audio_transcriber
+            .as_ref()
+            .ok_or_else(|| Status::unimplemented("audio transcription is not available for this model"))?;
+        let request = request.into_inner();
+        let request = AudioTranscribeReq::new(request.wav, &request.model, request.language, request.context)
+            .map_err(map_error)?;
+        let result = transcriber.transcribe(request).await.map_err(map_error)?;
+        Ok(Response::new(ProtoAudioTranscribeResp {
+            text: result.text,
+            language: result.language,
+        }))
+    }
 
     async fn generate_tokens(
         &self,

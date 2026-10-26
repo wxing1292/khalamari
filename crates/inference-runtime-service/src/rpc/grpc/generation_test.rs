@@ -46,6 +46,7 @@ use tonic::transport::Server;
 use super::GRPCServer;
 use crate::api::Inference;
 use crate::codec::qwen::QwenCodec;
+use crate::rpc::RPCService;
 use crate::runtime::InferenceRuntime;
 
 type TestRuntime = InferenceRuntime<1024, 1, 4>;
@@ -59,7 +60,10 @@ async fn test_generate_tokens_stream_lifecycle() {
     let (server_shutdown_tx, server_shutdown_rx) = oneshot::channel();
     let server = tokio::spawn(
         Server::builder()
-            .add_service(InferenceRuntimeServer::new(GRPCServer::new(inference, None)))
+            .add_service(InferenceRuntimeServer::new(GRPCServer::new(
+                inference,
+                RPCService::Messages(Arc::new(fixture_message_codec())),
+            )))
             .serve_with_incoming_shutdown(TcpListenerStream::new(listener), async move {
                 let _ = server_shutdown_rx.await;
             }),
@@ -67,6 +71,11 @@ async fn test_generate_tokens_stream_lifecycle() {
     let mut client = InferenceRuntimeClient::connect(format!("http://{listen_addr}"))
         .await
         .unwrap();
+    let status = client
+        .transcribe_audio(inference_runtime_proto::inference_runtime_service::AudioTranscribeReq::default())
+        .await
+        .unwrap_err();
+    assert_eq!(status.code(), Code::Unimplemented);
     for token_id in [1024, u32::MAX] {
         let status = client.generate_tokens(fixture_request(token_id)).await.unwrap_err();
         assert_eq!(status.code(), Code::InvalidArgument);
@@ -164,7 +173,10 @@ async fn test_generate_messages_stream_reuses_resident_request() {
     let (server_shutdown_tx, server_shutdown_rx) = oneshot::channel();
     let server = tokio::spawn(
         Server::builder()
-            .add_service(InferenceRuntimeServer::new(GRPCServer::new(inference, Some(codec))))
+            .add_service(InferenceRuntimeServer::new(GRPCServer::new(
+                inference,
+                RPCService::Messages(codec),
+            )))
             .serve_with_incoming_shutdown(TcpListenerStream::new(listener), async move {
                 let _ = server_shutdown_rx.await;
             }),

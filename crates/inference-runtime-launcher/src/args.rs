@@ -127,12 +127,12 @@ pub struct Qwen3ASRArgs {
 
     #[arg(
         long,
-        default_value = "2",
+        default_value = "8",
         help = "Maximum running requests and requests scheduled per batch"
     )]
     pub max_requests: NonZeroUsize,
 
-    #[arg(long, default_value = "128", help = "Maximum flattened tokens scheduled per batch")]
+    #[arg(long, default_value = "256", help = "Maximum flattened tokens scheduled per batch")]
     pub max_tokens: NonZeroUsize,
 
     #[arg(
@@ -323,8 +323,8 @@ mod tests {
 
         assert_eq!(args.grpc_listen_addr, "127.0.0.1:50051".parse().unwrap());
         assert_eq!(args.http_listen_addr, "127.0.0.1:8000".parse().unwrap());
-        assert_eq!(args.max_requests.get(), 2);
-        assert_eq!(args.max_tokens.get(), 128);
+        assert_eq!(args.max_requests.get(), 8);
+        assert_eq!(args.max_tokens.get(), 256);
         assert_eq!(args.max_tokens_per_request.get(), 64);
         assert_eq!(args.num_cache_pages.get(), 8 * 1024);
         assert_eq!(args.executor_hibernation_timeout_secs.get(), 300);

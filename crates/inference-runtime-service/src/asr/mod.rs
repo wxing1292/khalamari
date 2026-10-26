@@ -1,6 +1,3 @@
-mod audio;
-mod tokenizer;
-
 use std::path::Path;
 use std::sync::Arc;
 
@@ -23,6 +20,9 @@ use self::audio::Qwen3ASRAudioPreprocessor;
 use crate::api::Inference;
 use crate::api::decode::DecodeEvent;
 use crate::api::decode::DecodeRequest;
+
+mod audio;
+mod tokenizer;
 
 const ASR_TEXT_TOKEN: &str = "<asr_text>";
 

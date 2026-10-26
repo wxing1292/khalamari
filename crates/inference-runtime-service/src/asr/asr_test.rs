@@ -6,57 +6,22 @@ use inference_runtime_core::tokenizer::Tokenizer;
 use super::*;
 
 #[test]
-fn test_parse_transcription_w_requested_language() {
-    assert_eq!(
-        parse_transcription("  hello world  ".to_string(), Some("English".to_string())),
-        Transcription {
-            text: "hello world".to_string(),
-            language: "English".to_string(),
-        }
-    );
-}
-
-#[test]
-fn test_parse_transcription_w_detected_language() {
-    assert_eq!(
-        parse_transcription(
-            "header\nLANGUAGE cHINese\n<asr_text>  \u{4f60}\u{597d}  ".to_string(),
-            None,
-        ),
-        Transcription {
-            text: "\u{4f60}\u{597d}".to_string(),
-            language: "Chinese".to_string(),
-        }
-    );
-}
-
-#[test]
-fn test_parse_transcription_wo_metadata() {
-    assert_eq!(
-        parse_transcription("  hello world  ".to_string(), None),
-        Transcription {
-            text: "hello world".to_string(),
-            language: String::new(),
-        }
-    );
-}
-
-#[test]
-fn test_parse_transcription_w_empty_audio() {
-    assert_eq!(
-        parse_transcription("language None<asr_text>".to_string(), None),
-        Transcription {
-            text: String::new(),
-            language: String::new(),
-        }
-    );
-    assert_eq!(
-        parse_transcription("language None<asr_text>unexpected".to_string(), None),
-        Transcription {
-            text: "unexpected".to_string(),
-            language: String::new(),
-        }
-    );
+fn test_parse_transcription_metadata() {
+    for (output, requested, text, language) in [
+        ("  hello world  ", Some("English"), "hello world", "English"),
+        ("header\nLANGUAGE cHINese\n<asr_text>  你好  ", None, "你好", "Chinese"),
+        ("  hello world  ", None, "hello world", ""),
+        ("language None<asr_text>", None, "", ""),
+        ("language None<asr_text>unexpected", None, "unexpected", ""),
+    ] {
+        assert_eq!(
+            parse_transcription(output.into(), requested.map(str::to_owned)),
+            Transcription {
+                text: text.into(),
+                language: language.into()
+            }
+        );
+    }
 }
 
 #[test]

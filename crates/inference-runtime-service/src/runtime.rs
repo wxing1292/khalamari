@@ -50,7 +50,7 @@ use crate::consts::NUM_TRIE_PARTITION;
 use crate::executor::ReplayableDecoderModelEventLoop;
 use crate::executor::ReplayableModelExecutors;
 use crate::rpc;
-use crate::rpc::HTTPService;
+use crate::rpc::RPCService;
 
 mod session;
 use session::Sessions;
@@ -300,7 +300,7 @@ impl<const N: usize, const L: usize, const P: usize> Drop for InferenceRuntime<N
 pub fn serve_replay_model<const N: usize, const L: usize, M>(
     grpc_listen_addr: SocketAddr,
     http_listen_addr: SocketAddr,
-    http_service: HTTPService,
+    service: RPCService,
     resource_processors: Arc<ResourceProcessors>,
     model_runtime_config: RuntimeConfig,
     scheduler_config: SchedulerConfig,
@@ -334,7 +334,7 @@ where
                 grpc_listen_addr,
                 http_listen_addr,
                 model_name,
-                http_service,
+                service,
                 inference,
                 server_shutdown,
             ))

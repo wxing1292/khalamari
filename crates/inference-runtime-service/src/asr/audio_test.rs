@@ -3,6 +3,16 @@ use std::io::Cursor;
 use super::*;
 
 #[test]
+fn test_odd_fft_uses_discrete_frequency_spacing() {
+    // Upstream Slaney reference: FFT length 5 at 16 kHz has bins at 0, 3200 and 6400 Hz.
+    let odd = mel_filters(16000, 5, 2);
+    for (index, expected) in [(1, 0.000_265_809_77f32), (2, 0.000_088_603_26)] {
+        let actual = odd[1].iter().find(|&&(bin, _)| bin == index).unwrap().1;
+        assert!((actual - expected).abs() < expected * 1e-5);
+    }
+}
+
+#[test]
 fn test_prepare_wav_resamples_audio() {
     let bytes = sine_wav(8_000, 1.0);
     let source = fixture_preprocessor().prepare_wav(&bytes).unwrap();

@@ -8,8 +8,10 @@ use tonic::transport::Server;
 use tracing::Instrument;
 
 use crate::api::Inference;
+use crate::api::audio::AudioTranscriber;
+use crate::api::audio::MAX_AUDIO_BODY_BYTES;
 use crate::api::messages::MessageGenerator;
-use crate::codec::qwen::QwenCodec;
+use crate::rpc::RPCService;
 
 mod generation;
 
@@ -17,14 +19,19 @@ mod generation;
 struct GRPCServer<const N: usize, const L: usize, const P: usize> {
     inference: Arc<Inference<N, L, P>>,
     message_generator: Option<MessageGenerator<N, L, P>>,
+    audio_transcriber: Option<AudioTranscriber<N, L, P>>,
 }
 
 impl<const N: usize, const L: usize, const P: usize> GRPCServer<N, L, P> {
-    fn new(inference: Arc<Inference<N, L, P>>, qwen_codec: Option<Arc<QwenCodec>>) -> Self {
-        let message_generator = qwen_codec.map(|codec| MessageGenerator::new(inference.clone(), codec));
+    fn new(inference: Arc<Inference<N, L, P>>, service: RPCService) -> Self {
+        let (message_generator, audio_transcriber) = match service {
+            RPCService::Messages(codec) => (Some(MessageGenerator::new(inference.clone(), codec)), None),
+            RPCService::Transcriptions(asr) => (None, Some(AudioTranscriber::new(inference.clone(), asr))),
+        };
         Self {
             inference,
             message_generator,
+            audio_transcriber,
         }
     }
 }
@@ -32,13 +39,20 @@ impl<const N: usize, const L: usize, const P: usize> GRPCServer<N, L, P> {
 pub async fn run<const N: usize, const L: usize, const P: usize>(
     listen_addr: std::net::SocketAddr,
     inference: Arc<Inference<N, L, P>>,
-    qwen_codec: Option<Arc<QwenCodec>>,
+    service: RPCService,
     shutdown: Shutdown,
 ) -> Result<(), tonic::transport::Error> {
     async move {
         tracing::info!("started");
+        let audio_enabled = matches!(&service, RPCService::Transcriptions(_));
+        let service = InferenceRuntimeServer::new(GRPCServer::new(inference, service));
+        let service = if audio_enabled {
+            service.max_decoding_message_size(MAX_AUDIO_BODY_BYTES)
+        } else {
+            service
+        };
         let result = Server::builder()
-            .add_service(InferenceRuntimeServer::new(GRPCServer::new(inference, qwen_codec)))
+            .add_service(service)
             .serve_with_shutdown(listen_addr, async move {
                 let _ = shutdown.async_rx().recv().await;
             })

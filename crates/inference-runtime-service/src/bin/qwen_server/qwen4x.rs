@@ -19,7 +19,7 @@ use crate::qwen_server::config::Qwen35Config;
 use crate::qwen_server::config::Qwen35ModelMode;
 use crate::qwen_server::sizing::block_cache_capacity;
 use crate::qwen_server::sizing::context_window;
-use crate::rpc::HTTPService;
+use crate::rpc::RPCService;
 use crate::runtime::serve_replay_model;
 
 const TOKENS_PER_CACHE_BLOCK: usize = 2048;
@@ -106,7 +106,7 @@ fn run_inner<const L: usize>() -> Result<()> {
     serve_replay_model::<TOKENS_PER_CACHE_BLOCK, L, _>(
         config.grpc_listen_addr(),
         config.http_listen_addr(),
-        HTTPService::ChatCompletions(codec),
+        RPCService::Messages(codec),
         Arc::new(ResourceProcessors::new()),
         runtime,
         scheduler,

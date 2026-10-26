@@ -6,7 +6,7 @@ transcription service.
 
 [`core.md`](core.md) defines runtime scheduling and cache ownership.
 [`executor_qwen.md`](executor_qwen.md) defines the shared Qwen3 text-decoder execution path.
-[`service.md`](service.md) defines startup and HTTP operation.
+[`service.md`](service.md) defines startup and HTTP/gRPC operation.
 Unresolved work is in [`future_work.md`](future_work.md).
 
 ## Supported scope
@@ -17,7 +17,7 @@ Unresolved work is in [`future_work.md`](future_work.md).
 | Decoder/encoder | Shared Qwen3 decoder, model-owned Audio executor and processor |
 | Input | One WAV/resource/request, integer or F32 -> mono F32 at 16 kHz |
 | Duration | At most 30 seconds after resampling |
-| Output | Greedy, collected HTTP response, no streaming transcription |
+| Server output | Greedy, collected HTTP/gRPC response |
 | Resource lifetime | Private/request, common async-task/resource lifecycle, no cross-request materialization sharing |
 
 Runtime scheduling has no audio-specific states.
@@ -33,13 +33,13 @@ Runtime scheduling has no audio-specific states.
 | `inference-executor-metal/src/model/qwen/v3_asr/` | `audio.rs`, `resource.rs` |
 | `inference-executor-metal/src/model/qwen/v3/executor/` | `mod.rs`, text/resource composition |
 | `inference-runtime-core/src/runtime/` | `resource/`, `decoder/resource.rs`, `tasks/resource_materialization.rs` |
-| `inference-runtime-service/src/` | `asr/`, `rpc/http/transcriptions.rs`, `bin/qwen_server/asr.rs`, `bin/qwen3_asr.rs` |
+| `inference-runtime-service/src/` | `api/audio.rs`, `asr/`, `rpc/`, `bin/qwen_server/asr.rs`, `bin/qwen3_asr.rs` |
 
 ## Owner boundary
 
 | Owner | Responsibility |
 | --- | --- |
-| Service | WAV conversion, resampling/normalization/log-Mel, prompt/placeholder tokens, prepared-source registration, language/result parsing |
+| Service | Shared `api/audio.rs` request admission and WAV conversion, resampling/normalization/log-Mel, prompt/placeholder tokens, prepared-source registration, language/result parsing |
 | Runtime core | Resource identity/placement/segments, request/allocation lifetime, cache hit/miss, async tasks |
 | ASR model integration | Shared resource arena, processor, standalone encoder worker/stream/weights, hidden replacement map |
 | Shared Qwen3 executor | Text embedding, decoder, unembedding, sampling |

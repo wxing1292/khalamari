@@ -19,7 +19,7 @@ use crate::executor::ReplayableModelExecutors;
 use crate::qwen_server::config::Qwen3ASRConfig;
 use crate::qwen_server::sizing::block_cache_capacity;
 use crate::qwen_server::sizing::context_window;
-use crate::rpc::HTTPService;
+use crate::rpc::RPCService;
 use crate::runtime::serve_replay_model;
 
 const TOKENS_PER_CACHE_BLOCK: usize = 16;
@@ -90,7 +90,7 @@ fn run_inner() -> Result<()> {
     serve_replay_model::<TOKENS_PER_CACHE_BLOCK, 1, _>(
         config.grpc_listen_addr(),
         config.http_listen_addr(),
-        HTTPService::Transcriptions(asr),
+        RPCService::Transcriptions(asr),
         Arc::new(resource_processors),
         runtime_config,
         scheduler_config,

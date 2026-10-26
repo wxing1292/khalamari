@@ -4,7 +4,7 @@ The service runs one transport-neutral `Inference` API over the runtime. The gRP
 through its `decode` operation.
 
 The HTTP adapter provides collected and streaming OpenAI-compatible Chat Completions.
-The Qwen3-ASR service instead provides collected OpenAI-compatible audio transcription.
+The Qwen3-ASR service provides collected audio transcription through HTTP and gRPC.
 Both adapters use the same `decode` operation.
 
 [`core.md`](core.md) defines runtime scheduling and page ownership. The executor documents define model execution.
@@ -26,7 +26,9 @@ Use these sections for common tasks:
 | Owner | Contract |
 | --- | --- |
 | `crates/inference-runtime-service/src/api/` | Token validation, local request IDs, stop merging, submission/streaming, cancellation on response drop |
+| `rpc/mod.rs` | `RPCService` selects model capabilities once for both transports |
 | `rpc/grpc/` | Protobuf conversion and tonic status mapping |
+| `api/audio.rs` | Shared audio request validation, CPU preparation, decode submission and collected result |
 | `rpc/http/` | Listener, JSON/multipart parsing, HTTP error mapping |
 | `tool/` | Transport/model-neutral tool domain, no storage, handlers, scheduling, rendering, or Qwen syntax |
 | `inference-runtime-core/src/chat_template/` | Checkpoint-authoritative template, compiled with `hf-chat-template` |
@@ -241,9 +243,11 @@ cargo run --release --bin qwen3_asr -- \
 ```
 
 Qwen3-ASR uses 16-token logical cache blocks.
-It defaults to 8,192 shared cache pages, two running requests, 128 flattened batch tokens, and 64 tokens for each
+It defaults to 8,192 shared cache pages, eight running requests, 256 flattened batch tokens, and 64 tokens for each
 request transaction.
 It uses one compute lane and does not use a speculative checkpoint.
+The batch token limit counts decoder positions processed in one forward transaction.
+Audio placeholders consume this budget. The limit does not set the total transcription output length.
 
 The Qwen3 executor gets stop tokens from the checkpoint configuration when `generation_config.json` is absent.
 
@@ -464,6 +468,37 @@ The Audio encoder executor runs only when a required cache block misses and the 
 It owns a worker thread, a Metal stream, the Audio Tower, and the Audio Tower weight lifecycle.
 Service hibernation stops and starts this executor with the decoder lifecycle command.
 See [`qwen3_asr.md`](qwen3_asr.md) for the resource and executor contract.
+
+### gRPC audio transcription
+
+The Qwen3-ASR gRPC listener also provides `psi_dec.inference.v1.InferenceRuntime/TranscribeAudio`.
+It accepts one `AudioTranscribeReq` and returns one `AudioTranscribeResp`.
+The request contains `wav` bytes, `model`, optional `language` and optional `context`.
+The response contains `text` and `language`.
+The protobuf message limit is 32 MiB.
+Text-only services return gRPC `UNIMPLEMENTED` for this method.
+
+HTTP parses multipart fields. gRPC converts protobuf fields.
+`RPCService::Transcriptions` configures both adapters from the same ASR model owner.
+`RPCService::Messages` configures both text adapters from the same codec owner.
+Both audio adapters construct `api::audio::AudioTranscribeReq` and call the same `AudioTranscriber`.
+The shared API validates request bounds and runs the same Qwen preparation and decode path.
+Transport adapters map shared errors to HTTP responses or tonic statuses.
+Dropping an admitted transcription future drops its decode session and requests runtime cancellation.
+
+```text
+HTTP: file + model + language + prompt --+
+                                        +-> AudioTranscribeReq
+gRPC: wav  + model + language + context -+       |
+                                                v
+                                AudioTranscriber -> Qwen3ASRService
+                                  prepare WAV -> DecodeRequest
+                                    runtime -> audio resource -> Qwen decoder
+                                      Transcription{text, language}
+                                        -> HTTP JSON/text or gRPC response
+```
+
+Each call processes an independent snapshot. It does not retain decoder KV between audio snapshots.
 
 ## gRPC generation
 

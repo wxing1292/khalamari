@@ -3,10 +3,24 @@ syntax = "proto3";
 package psi_dec.inference.v1;
 
 service InferenceRuntime {
+  rpc TranscribeAudio(AudioTranscribeReq) returns (AudioTranscribeResp);
   rpc GenerateTokens(GenerateTokensRequest) returns (stream GenerateTokensResponse);
   rpc GenerateTokensStream(stream GenerateTokensRequest) returns (stream GenerateTokensResponse);
   rpc GenerateMessages(GenerateMessagesRequest) returns (stream GenerateMessagesResponse);
   rpc GenerateMessagesStream(stream GenerateMessagesRequest) returns (stream GenerateMessagesResponse);
+}
+
+// One independent WAV snapshot. Continuous recording and revisions belong to the client.
+message AudioTranscribeReq {
+  bytes wav = 1;
+  string model = 2;
+  optional string language = 3;
+  optional string context = 4;
+}
+
+message AudioTranscribeResp {
+  string text = 1;
+  string language = 2;
 }
 
 message GenerateTokensRequest {

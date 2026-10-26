@@ -6,23 +6,31 @@ use inference_runtime_core::channel::Shutdown;
 use inference_runtime_core::log_err_unavailable;
 
 use crate::api::Inference;
+use crate::asr::Qwen3ASRService;
+use crate::codec::qwen::QwenCodec;
+
 mod grpc;
 mod http;
-pub use http::HTTPService;
+
+#[derive(Clone)]
+pub enum RPCService {
+    Messages(Arc<QwenCodec>),
+    Transcriptions(Arc<Qwen3ASRService>),
+}
 
 pub async fn run<const N: usize, const L: usize, const P: usize>(
     grpc_listen_addr: SocketAddr,
     http_listen_addr: SocketAddr,
     model_name: String,
-    http_service: HTTPService,
+    service: RPCService,
     inference: Arc<Inference<N, L, P>>,
     shutdown: Shutdown,
 ) -> Result<()> {
-    let grpc_qwen_codec = http_service.qwen_codec();
+    let grpc_service = service.clone();
     let grpc_inference = inference.clone();
     let grpc_shutdown = shutdown.clone();
     let grpc_server = async move {
-        let result = grpc::run(grpc_listen_addr, grpc_inference, grpc_qwen_codec, grpc_shutdown.clone())
+        let result = grpc::run(grpc_listen_addr, grpc_inference, grpc_service, grpc_shutdown.clone())
             .await
             .map_err(|error| log_err_unavailable!("gRPC server failed: {error}"));
         grpc_shutdown.shutdown();
@@ -30,15 +38,9 @@ pub async fn run<const N: usize, const L: usize, const P: usize>(
     };
     let http_shutdown = shutdown.clone();
     let http_server = async move {
-        let result = http::run(
-            http_listen_addr,
-            model_name,
-            inference,
-            http_service,
-            http_shutdown.clone(),
-        )
-        .await
-        .map_err(|error| log_err_unavailable!("HTTP server failed: {error}"));
+        let result = http::run(http_listen_addr, model_name, inference, service, http_shutdown.clone())
+            .await
+            .map_err(|error| log_err_unavailable!("HTTP server failed: {error}"));
         http_shutdown.shutdown();
         result
     };
