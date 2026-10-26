@@ -56,6 +56,8 @@ The executable owns capture, streaming and external checkpoint preparation. The 
 | `terminal.rs` | Independent input descriptor, UTF-8 command input and shared display formatting |
 | `main.rs` | Startup commands, replay and process cancellation |
 
+The native `asr_e2e` example generates fixtures and replays the production executable through the service.
+
 ### Client composition and trust
 
 The client resolves configuration once before opening models, files, or capture resources.
@@ -590,6 +592,43 @@ These tests cover audio ownership, revisions, endpointing, suffix retention, ove
 The ignored native migration-oracle test accepts reference JSON through `PSI_DEC_ASR_ORACLE`.
 It compares log-Mel values, recurrent VAD outputs, language labels and fixed-text alignment coverage.
 Native LID scores and attention times can differ between builds. They are not numerical parity guarantees.
+
+After starting the release Qwen3-ASR service, run actual model acceptance:
+
+```sh
+cargo run --release -p inference-asr-client --example asr_e2e -- \
+  --binary target/release/asr --binary-commit "$(git rev-parse HEAD)" \
+  --model-dir /absolute/path/to/Qwen3-ASR-1.7B-8bit --official
+```
+
+The runner checks synthetic English, Chinese, mixtures and duration cuts.
+`--official` adds concatenated public human speech in both language orders.
+These cases do not establish spontaneous human code-switch accuracy.
+A JSON `--manifest` can supply recordings, required fragments, repetition counts and endpoint expectations.
+Relative recording and configuration paths resolve against the manifest directory.
+`--prepare-only` writes the recordings and manifest without inference.
+The runner copies one release binary into its output directory and uses that copy for every case.
+Reports retain its hash, audio hashes, settings, evaluator source hash/Git state, collected baselines and raw streaming events.
+`--binary-commit` records the caller's declared binary source commit. The evaluator does not infer this commit from its own checkout.
+Protocol checks remain separate from transcription-quality checks.
+Reports also retain the capture-ready time and each event's receipt time on one monotonic clock.
+An optional manifest `speech` field supplies ordered, disjoint `[start_sample, end_sample]` reference intervals at 16 kHz.
+The evaluator merges reference intervals across pauses shorter than 0.5 seconds.
+It reports `final_latencies` from each reference turn's end to the matching final event.
+These estimates include file replay pacing, FFmpeg buffering and startup after the capture-ready marker, and transport scheduling.
+They exclude native model loading before that marker. They are not audio-device timestamp measurements.
+
+Generate paired overlap cases:
+
+```sh
+cargo run --release -p inference-asr-client --example asr_e2e -- \
+  --binary target/release/asr --paired-overlap --output target/asr-overlap-eval \
+  --model-dir /absolute/path/to/Qwen3-ASR-1.7B-8bit
+```
+
+Homophones such as `cache` and `cash` can fail strict references.
+Use explicit domain context when it is part of the intended workload.
+Do not weaken a reference silently or count a protocol pass as a quality pass.
 
 ### VAD replacement gate
 
