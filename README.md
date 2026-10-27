@@ -83,6 +83,45 @@ curl -N http://127.0.0.1:8000/v1/chat/completions \
 
 The [service guide](docs/service.md) also covers Main-only startup, Qwen3-ASR, gRPC, tool calls, and the HTTP APIs.
 
+## Streaming ASR client
+
+Start a [Qwen3-ASR service](docs/service.md#binaries-and-checkpoints) first.
+The client requires FFmpeg on `PATH`, CMake, and a C++ compiler.
+Run the commands from the repository root.
+
+Build the Rust client and prepare the external Whisper-tiny checkpoint once:
+
+```sh
+cargo build --release --bin asr
+target/release/asr --setup-models
+```
+
+Start continuous transcription from the default microphone:
+
+```sh
+target/release/asr --stream
+```
+
+The default service URL is `http://127.0.0.1:8000/v1/audio/transcriptions`.
+Leave `--language` unset for English, Chinese, and mixed-language speech.
+Press Enter to stop capture and finish pending transcription. Ctrl-C cancels the session.
+Use `--list-devices` to list microphones and `--device 0` to select one.
+ONNX Runtime is statically linked, and Silero VAD is embedded. Recording requires no ORT shared-library configuration.
+
+To use the service's gRPC listener instead:
+
+```sh
+target/release/asr --stream --transport grpc --url http://127.0.0.1:50051
+```
+
+To replay an audio file at recording speed and emit JSON events:
+
+```sh
+target/release/asr --stream --input /absolute/path/to/recording.m4a --json
+```
+
+See the [client guide](docs/service.md#microphone-and-file-client) for configuration, vocabulary context, overlap, and the transcript editor.
+
 ## Other service modes
 
 The `qwen3_5_*` binaries support compatible Qwen3.5, Qwen3.6, and Qwen3.8 checkpoints.
