@@ -88,16 +88,7 @@ fn default_buckets(max_capacity: u32) -> Vec<u32> {
 
 #[cfg(test)]
 mod tests {
-    use super::BASE_BUCKETS;
     use super::ReplayBucketPolicy;
-
-    #[test]
-    fn test_default_prefix_matches_component_capacity_policy() {
-        let policy = ReplayBucketPolicy::new(64);
-
-        assert_eq!(policy.buckets(), BASE_BUCKETS);
-        assert_eq!(policy.max_capacity(), 64);
-    }
 
     #[test]
     fn test_default_policy_extends_past_64_and_includes_terminal_capacity() {

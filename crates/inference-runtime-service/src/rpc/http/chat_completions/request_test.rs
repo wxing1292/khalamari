@@ -84,17 +84,6 @@ fn test_schema() {
 }
 
 #[test]
-fn test_stream_defaults_to_false() {
-    let request = serde_json::from_value::<Request>(json!({
-        "messages": [{"role": "user", "content": "hello"}]
-    }))
-    .unwrap();
-
-    assert_eq!(request.model, None);
-    assert!(!request.stream);
-}
-
-#[test]
 fn test_role_fields_are_structural() {
     for message in [
         json!({"role": "system", "content": "hello", "tool_call_id": "call_1"}),

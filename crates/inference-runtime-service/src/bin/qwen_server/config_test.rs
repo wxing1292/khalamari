@@ -1,9 +1,7 @@
 use std::num::NonZeroUsize;
-use std::time::Duration;
 
 use clap::Parser;
 use inference_runtime_core::Error;
-use inference_runtime_core::config::ExecutorHibernationMode;
 use inference_runtime_launcher::args::Qwen3ASRArgs;
 use inference_runtime_launcher::args::Qwen3Args;
 use inference_runtime_launcher::args::Qwen35Args;
@@ -29,57 +27,6 @@ fn parse_qwen3_asr(extra: &[&str]) -> Qwen3ASRArgs {
     let mut args = vec!["qwen3_asr", "--hf-model-dir", "model"];
     args.extend_from_slice(extra);
     Qwen3ASRArgs::try_parse_from(args).unwrap()
-}
-
-#[test]
-fn test_executor_hibernation_timeout() {
-    let qwen3_default = Qwen3Config::from_args(parse_qwen3(&[])).unwrap();
-    let qwen3_asr_default = Qwen3ASRConfig::from_args(parse_qwen3_asr(&[])).unwrap();
-    let qwen35_default = Qwen35Config::from_args(parse_qwen35(&[])).unwrap();
-    let qwen3_override = Qwen3Config::from_args(parse_qwen3(&["--executor-hibernation-timeout-secs", "17"])).unwrap();
-    let qwen3_asr_override =
-        Qwen3ASRConfig::from_args(parse_qwen3_asr(&["--executor-hibernation-timeout-secs", "17"])).unwrap();
-    let qwen35_override =
-        Qwen35Config::from_args(parse_qwen35(&["--executor-hibernation-timeout-secs", "17"])).unwrap();
-
-    assert_eq!(qwen3_default.executor_hibernation_timeout(), Duration::from_secs(300));
-    assert_eq!(
-        qwen3_asr_default.executor_hibernation_timeout(),
-        Duration::from_secs(300)
-    );
-    assert_eq!(qwen35_default.executor_hibernation_timeout(), Duration::from_secs(300));
-    assert_eq!(qwen3_override.executor_hibernation_timeout(), Duration::from_secs(17));
-    assert_eq!(
-        qwen3_asr_override.executor_hibernation_timeout(),
-        Duration::from_secs(17)
-    );
-    assert_eq!(qwen35_override.executor_hibernation_timeout(), Duration::from_secs(17));
-}
-
-#[test]
-fn test_executor_hibernation_mode() {
-    let qwen3_default = Qwen3Config::from_args(parse_qwen3(&[])).unwrap();
-    let qwen3_asr_default = Qwen3ASRConfig::from_args(parse_qwen3_asr(&[])).unwrap();
-    let qwen35_default = Qwen35Config::from_args(parse_qwen35(&[])).unwrap();
-    let qwen3_all = Qwen3Config::from_args(parse_qwen3(&["--executor-hibernation-mode", "all"])).unwrap();
-    let qwen3_asr_all = Qwen3ASRConfig::from_args(parse_qwen3_asr(&["--executor-hibernation-mode", "all"])).unwrap();
-    let qwen35_all = Qwen35Config::from_args(parse_qwen35(&["--executor-hibernation-mode", "all"])).unwrap();
-
-    assert_eq!(
-        qwen3_default.executor_hibernation_mode(),
-        ExecutorHibernationMode::Selected
-    );
-    assert_eq!(
-        qwen3_asr_default.executor_hibernation_mode(),
-        ExecutorHibernationMode::Selected
-    );
-    assert_eq!(
-        qwen35_default.executor_hibernation_mode(),
-        ExecutorHibernationMode::Selected
-    );
-    assert_eq!(qwen3_all.executor_hibernation_mode(), ExecutorHibernationMode::All);
-    assert_eq!(qwen3_asr_all.executor_hibernation_mode(), ExecutorHibernationMode::All);
-    assert_eq!(qwen35_all.executor_hibernation_mode(), ExecutorHibernationMode::All);
 }
 
 #[test]
@@ -271,9 +218,4 @@ fn test_spec_checkpoint_arguments_must_be_specified_together() {
             Err(Error::InvalidArgument(message)) if message.contains("must be specified together")
         ));
     }
-}
-
-#[test]
-fn test_qwen3_rejects_speculative_options() {
-    assert!(Qwen3Args::try_parse_from(["qwen3", "--hf-model-dir", "model", "--spec-type", "dflash2"]).is_err());
 }

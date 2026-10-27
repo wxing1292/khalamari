@@ -563,6 +563,9 @@ Use runtime-core tests as the naming/case-design reference.
 An actual named production/reference API may appear in a test name.
 Do not name tests after backend, `matches_reference`, poison, canary, fixture, or other internal mechanisms.
 Do not add one test per branch, assertion, or helper.
+A source file does not require a matching unit-test file.
+Do not add unit tests only for field forwarding, declared defaults, simple getters, or dependency behavior.
+Keep tests for nontrivial algorithms, cross-component invariants, state transitions, and resource ownership.
 Match peer test classification without inventing a stateless transaction lifecycle.
 
 | Test layer | Proves |
