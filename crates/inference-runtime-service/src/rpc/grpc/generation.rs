@@ -13,6 +13,8 @@ use inference_runtime_core::config::DEFAULT_SAMPLING_TOP_P;
 use inference_runtime_core::config::SamplingConfig;
 use inference_runtime_core::runtime::CompletionReason;
 use inference_runtime_core::runtime::Token;
+use inference_runtime_proto::inference_runtime_service::AudioStreamReq;
+use inference_runtime_proto::inference_runtime_service::AudioStreamResp;
 use inference_runtime_proto::inference_runtime_service::AudioTranscribeReq as ProtoAudioTranscribeReq;
 use inference_runtime_proto::inference_runtime_service::AudioTranscribeResp as ProtoAudioTranscribeResp;
 use inference_runtime_proto::inference_runtime_service::CompletionReason as ProtoCompletionReason;
@@ -64,6 +66,23 @@ impl<const N: usize, const L: usize, const P: usize> InferenceRuntime for GRPCSe
     type GenerateMessagesStreamStream = MessageResponseStream;
     type GenerateTokensStream = TokenResponseStream;
     type GenerateTokensStreamStream = TokenResponseStream;
+    type StreamAudioStream = Pin<Box<dyn Stream<Item = Result<AudioStreamResp, Status>> + Send>>;
+
+    async fn stream_audio(
+        &self,
+        request: Request<Streaming<AudioStreamReq>>,
+    ) -> Result<Response<Self::StreamAudioStream>, Status> {
+        let transcriber = self
+            .audio_transcriber
+            .as_ref()
+            .ok_or_else(|| Status::unimplemented("audio transcription is not available for this model"))?;
+        let input = request.into_inner().map(|request| {
+            request.map_err(|error| inference_runtime_core::Error::unavailable(format!("audio stream input: {error}")))
+        });
+        let output = crate::rpc::audio_stream::responses(transcriber.clone(), input, self.shutdown.clone())
+            .map(|response| response.map_err(map_error));
+        Ok(Response::new(Box::pin(output)))
+    }
 
     async fn transcribe_audio(
         &self,

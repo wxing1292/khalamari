@@ -25,11 +25,11 @@ pub struct AudioSession {
 }
 
 impl AudioSession {
-    pub fn open(config: Config) -> Result<Self> {
+    pub async fn open(config: Config) -> Result<Self> {
         let output = Output::open(&config.output)?;
         let stream = if config.streaming.enabled {
             eprintln!("Loading native CPU speech models.");
-            Some(tokio::task::block_in_place(|| AudioStream::load(&config))?)
+            Some(AudioStream::load(&config).await?)
         } else {
             None
         };
@@ -74,7 +74,7 @@ impl AudioSession {
         let mut capture_done = false;
         loop {
             if let Some(stream) = &mut stream {
-                stream.schedule();
+                stream.schedule()?;
             }
             if capture_done && stream.as_ref().is_none_or(AudioStream::is_drained) {
                 break;
@@ -141,6 +141,12 @@ impl AudioSession {
                         "FFmpeg did not stop within 5 seconds"
                     } else { "no audio received for 15 seconds; check input device and microphone permission" }));
                 },
+            }
+        }
+        if let Some(stream) = &mut stream {
+            let stats = stream.finish_transport().await?;
+            if config.output.json {
+                eprintln!("Audio transport: {}", serde_json::to_string(&stats).unwrap());
             }
         }
         if let Some(saved) = saved {

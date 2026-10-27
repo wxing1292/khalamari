@@ -19,6 +19,7 @@ inference-error = { workspace = true }
 inference-runtime-core = { path = "../inference-runtime-core" }
 inference-runtime-proto = { path = "../inference-runtime-proto" }
 libc = { workspace = true }
+prost = { workspace = true }
 ort = { workspace = true, features = ["std", "download-binaries", "tls-native", "api-31"] }
 regex = { workspace = true }
 reqwest = { workspace = true, features = ["json", "multipart", "stream"] }
@@ -37,6 +38,8 @@ tokio = { workspace = true, features = [
     "io-std",
     "signal",
 ] }
+tokio-stream = { workspace = true }
+tokio-tungstenite = { workspace = true }
 tokenizers = { workspace = true }
 tonic = { workspace = true, features = ["transport"] }
 unicode-normalization = { workspace = true }

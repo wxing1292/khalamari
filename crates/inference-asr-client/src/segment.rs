@@ -364,6 +364,10 @@ impl AudioSegmenter {
     pub fn num_completed(&self) -> usize {
         self.completed.len()
     }
+
+    pub fn retained_sample(&self) -> u64 {
+        self.base
+    }
 }
 
 #[cfg(test)]

@@ -107,6 +107,7 @@ struct Replay {
     received: Vec<f64>,
     capture_start: Option<f64>,
     wall_seconds: f64,
+    transport: Value,
 }
 
 #[tokio::main]
@@ -257,6 +258,10 @@ async fn run(args: Args) -> Result<bool> {
                 }
                 row["work"] = Value::Object(work);
                 row["work_scope"] = json!("emitted jobs; discarded and cancelled work is excluded");
+                let transport = &replay.transport;
+                row["transport"] = transport.clone();
+                row["transport"]["uploaded_pcm_bytes"] = json!(transport["uploaded_samples"].as_u64().unwrap() * 2);
+                row["transport"]["scope"] = json!("connection totals; include cancelled requests and uploads");
             },
             Err(error) => {
                 row["protocol_verdict"] = json!("fail");
@@ -314,6 +319,7 @@ async fn replay(binary: &Path, flags: &[String], seconds: f64) -> Result<Replay>
         received: Vec::new(),
         capture_start: None,
         wall_seconds: 0.0,
+        transport: Value::Null,
     };
     let deadline = tokio::time::sleep(Duration::from_secs_f64(seconds * 3.0 + 60.0));
     tokio::pin!(deadline);
@@ -334,6 +340,9 @@ async fn replay(binary: &Path, flags: &[String], seconds: f64) -> Result<Replay>
                 },
                 line = err.next_line(), if !error_done => match line.map_err(external)? {
                     Some(line) => {
+                        if let Some(stats) = line.strip_prefix("Audio transport: ") {
+                            result.transport = serde_json::from_str(stats).map_err(external)?;
+                        }
                         if result.capture_start.is_none() && line.starts_with("Streaming. Press Enter to stop") {
                             result.capture_start = Some(started.elapsed().as_secs_f64());
                         }
@@ -375,6 +384,15 @@ async fn replay(binary: &Path, flags: &[String], seconds: f64) -> Result<Replay>
 }
 
 fn verify(case: &Case, replay: &Replay, frames: u64) -> Result<String> {
+    check(
+        integer(&replay.transport["uploaded_samples"])? <= frames,
+        "PCM was uploaded more than once",
+    )?;
+    check(
+        integer(&replay.transport["buffered_samples"])? == 0,
+        "finished connection retained PCM",
+    )?;
+    integer(&replay.transport["requested_samples"])?;
     let mut revisions = BTreeMap::new();
     let mut next_final = 0;
     let mut final_end = 0;
@@ -439,6 +457,13 @@ fn verify(case: &Case, replay: &Replay, frames: u64) -> Result<String> {
         for key in ["asr_requests", "lid_windows", "result_cache_hits", "alignment_calls"] {
             integer(&event["metrics"][key])?;
         }
+        let uploaded = integer(&event["transport"]["uploaded_samples"])?;
+        check(uploaded <= frames, "PCM was uploaded more than once")?;
+        integer(&event["transport"]["requested_samples"])?;
+        check(
+            integer(&event["transport"]["peak_buffered_samples"])? <= uploaded,
+            "invalid PCM cache metric",
+        )?;
         check(
             event["metrics"]["submitted_audio_seconds"]
                 .as_f64()

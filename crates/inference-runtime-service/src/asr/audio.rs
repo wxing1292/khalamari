@@ -67,15 +67,29 @@ impl Qwen3ASRAudioPreprocessor {
         if decoded.sample_rate != TARGET_SAMPLE_RATE {
             normalize_samples(&mut samples);
         }
-        if samples.len() < self.config.hop_length {
+        self.prepare_samples(&samples)
+    }
+
+    pub fn prepare_pcm(&self, samples: impl Iterator<Item = i16>) -> Result<Qwen3ASRAudioSource> {
+        let mut samples: Vec<_> = samples.map(|sample| f32::from(sample) / 32768.0).collect();
+        if samples.is_empty() {
+            return Err(Error::invalid_argument("PCM range must not be empty"));
+        }
+        // Match the client's former 10-ms padding for short language ranges.
+        samples.resize(samples.len().max(self.config.hop_length), 0.0);
+        self.prepare_samples(&samples)
+    }
+
+    fn prepare_samples(&self, samples: &[f32]) -> Result<Qwen3ASRAudioSource> {
+        if samples.len() < self.config.hop_length || samples.len() > self.config.n_samples {
             return Err(Error::invalid_argument(format!(
-                "Qwen3-ASR WAV must contain at least {} samples after resampling",
-                self.config.hop_length
+                "Qwen3-ASR audio must contain {}..={} canonical samples",
+                self.config.hop_length, self.config.n_samples
             )));
         }
 
         let num_frames = samples.len() / self.config.hop_length;
-        let features = self.log_mel(&samples, num_frames);
+        let features = self.log_mel(samples, num_frames);
         Ok(Qwen3ASRAudioSource::new(features, self.config.feature_size, num_frames)
             .expect("Qwen3-ASR preprocessing must produce a valid Audio Tower source"))
     }

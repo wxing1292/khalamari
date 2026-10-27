@@ -241,6 +241,7 @@ fn fixture_transcript(text: &str) -> Result<AudioSegmentResp> {
         language: "Chinese,English".into(),
         spans: vec![],
         metrics: Default::default(),
+        transport: Default::default(),
         language_ranges: None,
     })
 }

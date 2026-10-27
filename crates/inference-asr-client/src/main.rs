@@ -102,7 +102,7 @@ async fn run() -> Result<()> {
         output.edit(&mut input).await?;
         return output.finish();
     }
-    AudioSession::open(args.config)?.run().await
+    AudioSession::open(args.config).await?.run().await
 }
 
 fn io_error(error: std::io::Error) -> Error {

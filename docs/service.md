@@ -506,9 +506,18 @@ target/release/asr --stream --transport grpc --url http://127.0.0.1:50051
 
 `--transport` defaults to `http`. The JSON setting is `service.transport`.
 For gRPC, `--url` must be a plaintext HTTP origin without an endpoint path or query.
-`--timeout` applies to both transports. gRPC requests also carry this deadline.
+`--timeout` bounds connection establishment, individual recognition, stalled writes and graceful stream finish.
+The recording connection has no whole-session deadline. Collected gRPC requests carry their own deadline.
 The client uses the same language routing, revisions, overlap and editor with either transport.
 Each call processes an independent snapshot. It does not retain decoder KV between audio snapshots.
+
+Continuous clients use `InferenceRuntime/StreamAudio` or an HTTP WebSocket at `/v1/audio/transcriptions/stream`.
+One connection accepts ordered, disjoint mono S16LE PCM appends at 16 kHz.
+Recognition commands reference retained `[start_sample, end_sample)` ranges with language and context.
+The service bounds its cache to 32 MiB and each range to 30 seconds.
+Both transports use the same protobuf commands and shared cache/recognition loop.
+The client retains VAD, language detection, segmentation and revision ordering.
+See [incremental audio transport](qwen3_asr.md#incremental-audio-transport) for ownership, release and cancellation.
 
 ### Microphone and file client
 
@@ -696,12 +705,12 @@ It accepts that retry only if the result contains Han characters. It never trans
 This guard does not detect every partial translation or recognition error.
 
 The Rust client owns each run in `session.rs`. `segment.rs` owns its timeline, segments and revisions.
-Both client transports use collected transcription calls.
+Collected mode uses independent WAV calls. Streaming mode uploads each new PCM range once over one duplex connection.
 `stream.rs` owns the VAD, segmenter, task capacity and ordered completion for one recording.
-It does not provide a server WebSocket API or reuse incremental model state.
+The service retains uploaded PCM for range requests. Model inference remains independent for each request.
 Bounded tasks run concurrent ASR requests while microphone capture continues.
 The tasks share one Whisper model. CPU model access is serialized through `SyncTaskPool` without holding its guard across service-call waits.
-Concurrent jobs share one HTTP or gRPC connection pool. Each job owns its request metrics.
+Concurrent jobs share one HTTP WebSocket or gRPC audio connection. Each job owns its request metrics.
 Overlap reconciliation waits for the preceding final commit after recognition and alignment finish.
 Pending partials coalesce into the latest snapshot. Final jobs take priority.
 The final queue capacity is `max_pending_finals + ceil(overlap_seconds / sentence_silence_seconds)`.
@@ -709,12 +718,16 @@ The final queue capacity is `max_pending_finals + ceil(overlap_seconds / sentenc
 The extra bounded allowance lets short segments collect right context. Without ASR overlap, the queue capacity remains two.
 The client reports live overload and stops if another final cannot fit.
 At EOF, the already-buffered active range can become one additional final while input is closed.
-The session skips partial requests without newly detected speech. It can reuse the last Qwen result for identical audio and language.
+The session skips partial requests without newly detected speech.
+It can reuse the last Qwen result for the same recording sample range and language.
 `--no-reuse-identical-audio` disables result reuse. This cache does not reuse encoder state or decoder KV state.
 JSON events expose `metrics`: wait/processing seconds, service request count, submitted audio seconds, language windows, result cache hits, and alignment calls.
 These metrics describe emitted jobs. They exclude discarded or cancelled jobs.
 `wait_seconds` includes right-context collection and worker backlog. `processing_seconds` covers one worker job.
 These durations do not directly measure speech-end-to-final latency. Submitted audio includes retries, padding, and overlap.
+`submitted_audio_seconds` measures recognition input, not network traffic.
+Event `transport` snapshots and the final JSON-mode stderr `Audio transport: { ... }` report connection work, including cancelled requests.
+`uploaded_samples * 2` gives uploaded PCM bytes. Graceful finish reports zero retained cache samples.
 Recommendation: Use `--save` when a continuous session needs replay after failure.
 Context does not automatically carry between segments. `--context` supplies caller vocabulary to every internal request.
 For a programming discussion, supply domain vocabulary:
@@ -724,7 +737,7 @@ target/release/asr --stream --context "Software engineering discussion. Vocabula
 ```
 
 Context can resolve homophones such as `cache` and `cash`. It biases decoding; it does not enforce an exact glossary.
-Client cancellation drops the active service future and closes its HTTP request or gRPC stream.
+Cancelling a partial sends a service cancellation command. Cancelling the recording closes its duplex connection.
 The server can still finish GPU work after disconnect.
 See [session ownership and limits](qwen3_asr.md#continuous-client) for the data flow and acceptance commands.
 

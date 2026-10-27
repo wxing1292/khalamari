@@ -1,7 +1,9 @@
 use std::sync::Arc;
 
+use axum::Extension;
 use axum::Router;
 use axum::extract::DefaultBodyLimit;
+use axum::routing::get;
 use axum::routing::post;
 use inference_runtime_core::channel::Shutdown;
 use tracing::Instrument;
@@ -13,6 +15,7 @@ use crate::api::messages::MessageGenerator;
 use crate::codec::qwen::QwenCodec;
 use crate::rpc::RPCService;
 
+mod audio_stream;
 mod chat_completions;
 mod error;
 mod transcriptions;
@@ -54,7 +57,9 @@ pub async fn run<const N: usize, const L: usize, const P: usize>(
         RPCService::Transcriptions(asr) => {
             Router::<AudioTranscriber<N, L, P>>::new()
                 .route("/v1/audio/transcriptions", post(transcriptions::handle::<N, L, P>))
+                .route("/v1/audio/transcriptions/stream", get(audio_stream::handle::<N, L, P>))
                 .layer(DefaultBodyLimit::max(MAX_AUDIO_BODY_BYTES))
+                .layer(Extension(shutdown.clone()))
                 .with_state(AudioTranscriber::new(inference, asr))
         },
     };

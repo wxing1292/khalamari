@@ -50,7 +50,7 @@ The executable owns capture, streaming and external checkpoint preparation. The 
 | `transcribe.rs` | Shared CPU model/cache, Qwen routing, last-result reuse, Mandarin retry and alignment |
 | `stream.rs` | `AudioStream`: VAD, segmenter, bounded tasks, cancellation and committed overlap history |
 | `overlap.rs` | Timestamp ownership and deterministic reconciliation |
-| `service.rs` | `AudioTranscribeReq`/`AudioTranscribeResp`, shared HTTP or gRPC connections and bounded responses |
+| `service.rs`, `service/stream.rs` | Collected WAV calls, duplex PCM transport, bounded commands, request cancellation and connection statistics |
 | `output.rs` | Exclusive JSON/text/editor selection, output errors and the shared edit loop |
 | `editor.rs`, `document.rs` | Raw event log, minimal text projection, explicit corrections and final-text snapshot |
 | `terminal.rs` | Independent input descriptor, UTF-8 command input and shared display formatting |
@@ -92,11 +92,11 @@ HTTP/gRPC request -> service WAV validation -> log-Mel[128, frames]
 
 `AudioSession` owns capture, processing, terminal input, saved WAV and output for one run.
 Its event loop waits for capture, completion, terminal input or a deadline.
-`AudioStream` owns streaming admission and completion. `AudioSegmenter` owns source coordinates and segment state.
+`AudioStream` owns the service connection, streaming admission and completion. `AudioSegmenter` owns source coordinates and segment state.
 It schedules available jobs before it waits for capture, completion, terminal input, or a deadline.
 `AudioSegmentReq` owns its immutable audio allocation. Its read end derives from the allocation length.
 Its final status derives from its endpoint reason.
-Service-call metrics belong to the segment request. Requests share one immutable client and connection pool.
+Service-call metrics belong to the segment request. Streaming requests share one duplex connection for the recording.
 Submitted audio counts remain integer samples until JSON serialization.
 
 | Boundary | Contract |
@@ -131,11 +131,17 @@ The client uses concrete request and response contracts at each processing bound
 | --- | --- |
 | `AudioSegmentReq` / `AudioSegmentResp` | One segment revision: immutable PCM snapshot to text, spans and metrics |
 | `AudioLangRecognitionReq` / `AudioLangRecognitionResp` | One source range to merged language observations and work count |
-| `AudioTranscribeReq` / `AudioTranscribeResp` | One canonical PCM range and language hint to Qwen text and language |
+| `AudioTranscribeReq` / `AudioTranscribeResp` | One collected WAV request to Qwen text and language |
+| `AudioStreamReq` / `AudioStreamResp` | PCM append/release, range recognition, cancellation and graceful connection finish |
 
 A segment can produce several requests. Its revision is allocated only at submission.
 The session schedules asynchronous work with `JoinSet`. It cancels individual obsolete partials by their abort handles.
 The client reuses `SyncTaskPool` for CPU language analysis and alignment.
+The optional `Acoustics` owner creates and releases its model, language state, CPU pool and shutdown guard together.
+Forced-language jobs without overlap do not create this owner.
+`AudioTranscriber` retains a private shared connection handle for recognition. It does not expose transport lifecycle operations.
+Its result cache keys use recording sample ranges and language. Recording coordinates identify immutable PCM within one connection.
+The cache does not copy or compare PCM. Model and prompt context remain fixed for the connection.
 Each language response counts its own uncached observations. The analyzer retains only its bounded observation cache.
 The runtime core `AsyncTaskPool` retains its runtime request IDs and scheduler completion channels.
 The client does not adapt audio segment identity to those runtime IDs.
@@ -144,14 +150,68 @@ Task futures own execution. The client does not add a second task struct that du
 ```text
 AudioSession
   PCM i16[512] -> AudioStream -> AudioSegmenter -> AudioSegmentReq[segment, revision]
-    shared CPU gate -> SyncTaskPool -> AudioLangRecognitionResp[ranges]
-      AudioTranscribeReq[PCM range, hint] -> HTTP or gRPC -> AudioTranscribeResp[text, language]
-        optional CPU alignment -> AudioSegmentResp[text, spans, metrics]
-          accept revision / order finals -> AudioEvent -> Output -> Editor -> Document
+    append new PCM once -> AudioStreamClient -> service PCM cache
+    spawn job -> AudioTranscriber
+      shared CPU gate -> SyncTaskPool -> AudioLangRecognitionResp[ranges]
+      private connection handle -> recognize[start,end,hint] -> HTTP WebSocket or gRPC -> text/language
+      optional CPU alignment -> AudioSegmentResp[text, spans, metrics]
+    accept revision / order finals -> AudioEvent -> Output -> Editor -> Document
 ```
 
-The wire response and event schemas remain unchanged.
+Collected WAV RPCs retain their request and response schemas.
+Streaming events retain their partial/final revision contract and add a `transport` statistics snapshot.
 The editor owns the document through the session output path. Replay can create the same editor without audio capture.
+
+### Incremental audio transport
+
+Capture, FFmpeg conversion, VAD, Whisper language analysis, segment boundaries and transcript revisions remain in the client.
+One recording owns one connection to the service.
+The service owns a bounded PCM cache for that connection. It does not own the client's speech-session policy.
+The HTTP endpoint is `GET /v1/audio/transcriptions/stream`, with a WebSocket upgrade and protobuf binary messages.
+The gRPC method is `InferenceRuntime/StreamAudio`, with the same protobuf messages and shared RPC loop.
+The collected WAV endpoints remain available.
+
+```text
+same source x[0:32000], mono i16 at 16000 Hz
+  client: VAD + language ranges + partial/final revisions
+    append x[0:16000] ------------------> connection cache x[0:16000]
+    recognize [0,16000) ----------------> PCM -> log-Mel -> Audio Tower + decoder
+    append x[16000:32000] --------------> connection cache x[0:32000]
+    recognize [0,32000) ----------------> reuse cached PCM; run independent ASR
+    release before 16000 --------------> keep x[16000:32000]
+
+snapshot for an admitted request: shared byte views -> CPU preparation -> model resource
+  cache release cannot invalidate those views
+```
+
+The client uploads audio only when it submits a segment job.
+It appends the unseen suffix of that job's read range. Long silence can remain an explicit gap in the sample timeline.
+Appends must be nonempty, aligned S16LE, ordered and disjoint. Each append must fit 30 seconds.
+Recognition ranges must be nonempty, fully uploaded, retained and at most 30 seconds.
+The service rejects a range that crosses an omitted gap. It does not synthesize silence.
+Short nonempty language ranges retain the former 10-ms zero-padding behavior before log-Mel preparation.
+
+The cache retains at most 32 MiB of PCM. A connection admits at most 64 unfinished recognition requests.
+The client release watermark includes local retained audio and every unfinished job's read start.
+This includes jobs that are still waiting for LID or may need overlap recovery.
+The service prunes released prefixes. Admitted model jobs retain their own shared byte views until preparation completes.
+Decoded appends own compact PCM allocations. Range snapshots share those allocations without retaining unrelated network-frame bytes.
+The client command queue is bounded by its configured job capacity. Transport overload returns an explicit error.
+
+Connection request IDs correlate service calls. They are separate from segment IDs and transcript revisions.
+Cancelling a partial sends a cancellation command for its active service call.
+Cancellation immediately returns the service admission slot. The completion loop discards that task's late result.
+Dropping a connection or stopping the service drops its cache and pending decode futures.
+An already-running blocking CPU preparation or submitted device operation can finish before its resources retire.
+Graceful finish seals input, releases cached PCM, drains accepted jobs and returns final connection statistics.
+The client completes this exchange before entering the editor's post-recording edit loop.
+
+Each event's `transport` object is a cumulative snapshot, including accepted work from cancelled jobs.
+It reports `uploaded_samples`, `requested_samples`, `peak_buffered_samples` and `buffered_samples`.
+In JSON mode, stderr ends with `Audio transport: { ... }`, containing the acknowledged final statistics.
+The acceptance runner checks these final statistics and records uploaded PCM bytes separately from requested audio.
+PCM reuse removes repeated WAV encoding, upload and decode. Each recognition still computes log-Mel and model inference independently.
+This transport does not provide model-native encoder or decoder state carry.
 
 ## Owner boundary
 
@@ -534,7 +594,7 @@ It acquires the CPU-model guard asynchronously before it submits work to the run
 The fixed pool has one runner. Whisper retains its existing internal thread setting.
 A canceled queued task is skipped. A running native call finishes without publishing its canceled result.
 Cancellation cannot accumulate blocking calls behind that guard.
-Tasks share one HTTP or gRPC connection pool. Each segment request retains its own metrics.
+Tasks share one HTTP WebSocket or gRPC audio connection. Each segment request retains its own metrics.
 Only ordered final commits publish overlap words to later jobs.
 
 Final work has priority. Unsubmitted partials coalesce into the latest snapshot.
@@ -542,7 +602,7 @@ The live final queue capacity is `max_pending_finals + ceil(overlap_seconds / se
 Live overload returns an explicit error before audio is silently lost.
 At EOF, the already-buffered active range can become one additional final. Input is then closed.
 Graceful flush waits for pending inference results.
-Jobs reuse the last completed Qwen result only for identical PCM and language.
+Jobs reuse the last completed Qwen result only for the same recording sample range and language.
 This does not reuse encoder computation or decoder KV.
 Events report wait/processing durations, request count, submitted audio, LID work, cache hits and alignment calls.
 These metrics describe emitted jobs. They exclude discarded or cancelled jobs.

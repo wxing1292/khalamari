@@ -63,6 +63,7 @@ async fn test_generate_tokens_stream_lifecycle() {
             .add_service(InferenceRuntimeServer::new(GRPCServer::new(
                 inference,
                 RPCService::Messages(Arc::new(fixture_message_codec())),
+                inference_runtime_core::channel::Shutdown::new(),
             )))
             .serve_with_incoming_shutdown(TcpListenerStream::new(listener), async move {
                 let _ = server_shutdown_rx.await;
@@ -176,6 +177,7 @@ async fn test_generate_messages_stream_reuses_resident_request() {
             .add_service(InferenceRuntimeServer::new(GRPCServer::new(
                 inference,
                 RPCService::Messages(codec),
+                inference_runtime_core::channel::Shutdown::new(),
             )))
             .serve_with_incoming_shutdown(TcpListenerStream::new(listener), async move {
                 let _ = server_shutdown_rx.await;

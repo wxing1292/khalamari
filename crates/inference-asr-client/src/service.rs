@@ -16,6 +16,8 @@ use crate::audio::wav;
 use crate::config::ServiceConfig;
 use crate::config::Transport;
 
+pub mod stream;
+
 pub struct AudioTranscribeReq<'a> {
     pub audio: &'a [i16],
     pub language: &'a str,
@@ -39,10 +41,6 @@ enum Client {
 }
 
 impl AsrClient {
-    pub fn language(&self) -> Option<&str> {
-        self.config.language.as_deref()
-    }
-
     pub fn new(config: ServiceConfig) -> Result<Self> {
         let timeout = Duration::from_secs_f64(config.timeout);
         let client = match config.transport {

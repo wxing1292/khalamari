@@ -13,6 +13,7 @@ use tokio::sync::watch;
 
 use crate::audio::SAMPLE_RATE;
 use crate::config::Config;
+use crate::config::LanguageConfig;
 use crate::config::samples;
 use crate::language::AudioLangRecognitionReq;
 use crate::language::LanguageAnalyzer;
@@ -23,9 +24,9 @@ use crate::overlap::Word;
 use crate::overlap::stitch;
 use crate::overlap::timed_words;
 use crate::segment::AudioSegmentReq;
-use crate::service::AsrClient;
-use crate::service::AudioTranscribeReq;
 use crate::service::AudioTranscribeResp;
+use crate::service::stream::AudioStreamClient;
+use crate::service::stream::AudioTransportStats;
 
 #[derive(Debug, Default, Serialize)]
 pub struct Metrics {
@@ -45,6 +46,7 @@ pub struct AudioSegmentResp {
     pub language: String,
     pub spans: Vec<Span>,
     pub metrics: Metrics,
+    pub transport: AudioTransportStats,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub language_ranges: Option<Vec<LanguageRange>>,
 }
@@ -77,80 +79,83 @@ pub struct Overlap {
 }
 
 struct CachedRecognition {
-    pcm: Vec<i16>,
+    range: Range<u64>,
     language: String,
     result: AudioTranscribeResp,
 }
 
 struct Acoustics {
-    model: Option<AcousticModel>,
+    model: AcousticModel,
     analyzer: LanguageAnalyzer,
-}
-
-/// Segment tasks share one CPU model and service connection pool. Each task owns its work metrics.
-pub struct AudioTranscriber {
-    client: AsrClient,
-    acoustics: Arc<tokio::sync::Mutex<Acoustics>>,
-    overlap: usize,
-    reuse: bool,
-    last: Mutex<Option<CachedRecognition>>,
     cpu: SyncTaskPool,
     _shutdown: ShutdownGuard,
 }
 
-impl AudioTranscriber {
-    pub fn load(config: &Config) -> Result<Self> {
+impl Acoustics {
+    fn load(config: &LanguageConfig) -> Result<Self> {
+        let model = AcousticModel::load(config)?;
         let shutdown = Shutdown::new();
         let cpu = SyncTaskPool::new(shutdown.clone(), 1)?;
-        let model = if config.service.language.is_none() || config.streaming.overlap_seconds > 0.0 {
-            Some(AcousticModel::load(&config.language)?)
-        } else {
-            None
-        };
         Ok(Self {
-            client: AsrClient::new(config.service.clone())?,
-            acoustics: Arc::new(tokio::sync::Mutex::new(Acoustics {
-                model,
-                analyzer: LanguageAnalyzer::new(&config.language),
-            })),
-            overlap: samples(config.streaming.overlap_seconds),
-            reuse: config.streaming.reuse_identical_audio,
-            last: Mutex::new(None),
+            model,
+            analyzer: LanguageAnalyzer::new(config),
             cpu,
             _shutdown: ShutdownGuard::new(shutdown),
         })
     }
+}
 
-    async fn request(&self, pcm: &[i16], language: &str, metrics: &mut Metrics) -> Result<AudioTranscribeResp> {
+/// Segment tasks share CPU speech models and a private handle to the stream's service connection.
+pub struct AudioTranscriber {
+    client: Arc<AudioStreamClient>,
+    acoustics: Option<Arc<tokio::sync::Mutex<Acoustics>>>,
+    overlap: usize,
+    reuse: bool,
+    last: Mutex<Option<CachedRecognition>>,
+}
+
+impl AudioTranscriber {
+    pub fn load(config: &Config, client: Arc<AudioStreamClient>) -> Result<Self> {
+        let acoustics = if config.service.language.is_none() || config.streaming.overlap_seconds > 0.0 {
+            let acoustics = tokio::task::block_in_place(|| Acoustics::load(&config.language))?;
+            Some(Arc::new(tokio::sync::Mutex::new(acoustics)))
+        } else {
+            None
+        };
+        Ok(Self {
+            client,
+            acoustics,
+            overlap: samples(config.streaming.overlap_seconds),
+            reuse: config.streaming.reuse_identical_audio,
+            last: Mutex::new(None),
+        })
+    }
+
+    async fn request(
+        &self,
+        job: &AudioSegmentReq,
+        range: Range<usize>,
+        language: &str,
+        metrics: &mut Metrics,
+    ) -> Result<AudioTranscribeResp> {
+        let range = job.audio_start_sample + range.start as u64..job.audio_start_sample + range.end as u64;
         if self.reuse
             && let Some(last) = self
                 .last
                 .lock()
                 .unwrap()
                 .as_ref()
-                .filter(|last| last.pcm == pcm && last.language == language)
+                .filter(|last| last.range == range && last.language == language)
         {
             metrics.result_cache_hits += 1;
             return Ok(last.result.clone());
         }
-        let padded;
-        let input = if pcm.len() < 160 {
-            let mut input = vec![0; 160];
-            input[..pcm.len()].copy_from_slice(pcm);
-            padded = input;
-            &padded
-        } else {
-            pcm
-        };
         metrics.asr_requests += 1;
-        metrics.submitted_audio_samples += input.len() as u64;
-        let result = self
-            .client
-            .transcribe(AudioTranscribeReq { audio: input, language })
-            .await?;
+        metrics.submitted_audio_samples += (range.end - range.start).max(160);
+        let result = self.client.transcribe(range.start, range.end, language).await?;
         if self.reuse {
             *self.last.lock().unwrap() = Some(CachedRecognition {
-                pcm: pcm.to_vec(),
+                range,
                 language: language.to_owned(),
                 result: result.clone(),
             });
@@ -160,15 +165,16 @@ impl AudioTranscriber {
 
     async fn recognize(
         &self,
-        pcm: &[i16],
+        job: &AudioSegmentReq,
+        range: Range<usize>,
         language: &str,
         chinese: bool,
         metrics: &mut Metrics,
     ) -> Result<(AudioTranscribeResp, bool)> {
-        let mut result = self.request(pcm, language, metrics).await?;
+        let mut result = self.request(job, range.clone(), language, metrics).await?;
         let mut retry = false;
         if language.is_empty() && chinese && !result.text.is_empty() && !result.text.chars().any(is_han) {
-            let candidate = self.request(pcm, "Chinese", metrics).await?;
+            let candidate = self.request(job, range, "Chinese", metrics).await?;
             if candidate.text.chars().any(is_han) {
                 result = candidate;
                 retry = true;
@@ -188,22 +194,18 @@ impl AudioTranscriber {
             return Ok(Some(Vec::new()));
         }
         metrics.alignment_calls += 1;
-        let mut acoustics = self.acoustics.clone().lock_owned().await;
+        let mut acoustics = self.acoustics.as_ref().unwrap().clone().lock_owned().await;
+        let cpu = acoustics.cpu.clone();
         let audio = job.audio.clone();
         let start = job.audio_start_sample + range.start as u64;
         let text = result.text.clone();
         let language = result.language.clone();
-        self.cpu
-            .spawn(move || {
-                let units = acoustics
-                    .model
-                    .as_mut()
-                    .unwrap()
-                    .align(&audio[range], &text, &language)?;
-                Ok(units.and_then(|units| timed_words(&text, &units, start)))
-            })
-            .await
-            .expect("CPU pool returns every accepted task result")
+        cpu.spawn(move || {
+            let units = acoustics.model.align(&audio[range], &text, &language)?;
+            Ok(units.and_then(|units| timed_words(&text, &units, start)))
+        })
+        .await
+        .expect("CPU pool returns every accepted task result")
     }
 
     pub async fn process(
@@ -222,14 +224,14 @@ impl AudioTranscriber {
             }]
         } else {
             // Acquire before spawning. Cancellation cannot leave an unbounded queue of blocking CPU calls.
-            let mut acoustics = self.acoustics.clone().lock_owned().await;
+            let mut acoustics = self.acoustics.as_ref().unwrap().clone().lock_owned().await;
+            let cpu = acoustics.cpu.clone();
             let job = job.clone();
-            let response = self
-                .cpu
+            let response = cpu
                 .spawn(move || {
-                    let Acoustics { model, analyzer } = &mut *acoustics;
+                    let Acoustics { model, analyzer, .. } = &mut *acoustics;
                     analyzer.plan(
-                        model.as_mut().unwrap(),
+                        model,
                         &AudioLangRecognitionReq {
                             segment: job.segment,
                             start_sample: job.start_sample,
@@ -261,10 +263,14 @@ impl AudioTranscriber {
             let end = (range.end_sample - job.audio_start_sample) as usize;
             let read_start = start.saturating_sub(self.overlap);
             let read_end = (end + self.overlap).min(job.audio.len());
-            let pcm = &job.audio[start..end];
-            let request_pcm = &job.audio[read_start..read_end];
             let (mut result, mut retry) = self
-                .recognize(request_pcm, &range.language_hint, range.chinese_observed, &mut metrics)
+                .recognize(
+                    job,
+                    read_start..read_end,
+                    &range.language_hint,
+                    range.chinese_observed,
+                    &mut metrics,
+                )
                 .await?;
             let metadata = if self.overlap > 0 {
                 let audio_start = job.audio_start_sample + read_start as u64;
@@ -297,7 +303,13 @@ impl AudioTranscriber {
                     None => {
                         if read_start != start || read_end != end {
                             let (owned, owned_retry) = self
-                                .recognize(pcm, &range.language_hint, range.chinese_observed, &mut metrics)
+                                .recognize(
+                                    job,
+                                    start..end,
+                                    &range.language_hint,
+                                    range.chinese_observed,
+                                    &mut metrics,
+                                )
                                 .await?;
                             result = owned;
                             retry |= owned_retry;
@@ -346,6 +358,7 @@ impl AudioTranscriber {
             text,
             language: languages.join(","),
             spans,
+            transport: self.client.stats(),
             language_ranges: (self.overlap > 0).then_some(ranges),
             metrics: Metrics {
                 wait_seconds: started.duration_since(job.created).as_secs_f64(),

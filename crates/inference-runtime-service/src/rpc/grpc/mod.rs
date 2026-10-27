@@ -20,10 +20,11 @@ struct GRPCServer<const N: usize, const L: usize, const P: usize> {
     inference: Arc<Inference<N, L, P>>,
     message_generator: Option<MessageGenerator<N, L, P>>,
     audio_transcriber: Option<AudioTranscriber<N, L, P>>,
+    shutdown: Shutdown,
 }
 
 impl<const N: usize, const L: usize, const P: usize> GRPCServer<N, L, P> {
-    fn new(inference: Arc<Inference<N, L, P>>, service: RPCService) -> Self {
+    fn new(inference: Arc<Inference<N, L, P>>, service: RPCService, shutdown: Shutdown) -> Self {
         let (message_generator, audio_transcriber) = match service {
             RPCService::Messages(codec) => (Some(MessageGenerator::new(inference.clone(), codec)), None),
             RPCService::Transcriptions(asr) => (None, Some(AudioTranscriber::new(inference.clone(), asr))),
@@ -32,6 +33,7 @@ impl<const N: usize, const L: usize, const P: usize> GRPCServer<N, L, P> {
             inference,
             message_generator,
             audio_transcriber,
+            shutdown,
         }
     }
 }
@@ -45,7 +47,7 @@ pub async fn run<const N: usize, const L: usize, const P: usize>(
     async move {
         tracing::info!("started");
         let audio_enabled = matches!(&service, RPCService::Transcriptions(_));
-        let service = InferenceRuntimeServer::new(GRPCServer::new(inference, service));
+        let service = InferenceRuntimeServer::new(GRPCServer::new(inference, service, shutdown.clone()));
         let service = if audio_enabled {
             service.max_decoding_message_size(MAX_AUDIO_BODY_BYTES)
         } else {
@@ -65,14 +67,5 @@ pub async fn run<const N: usize, const L: usize, const P: usize>(
 }
 
 fn map_error(error: Error) -> Status {
-    match error {
-        Error::InvalidArgument(message) => Status::invalid_argument(message),
-        Error::ResourceExhausted(message) => Status::resource_exhausted(message),
-        Error::Cancelled(message) => Status::cancelled(message),
-        Error::DeadlineExceeded(message) => Status::deadline_exceeded(message),
-        Error::Aborted(message) => Status::aborted(message),
-        Error::Evicted(message) => Status::aborted(message),
-        Error::Unavailable(message) => Status::unavailable(message),
-        Error::Internal(message) => Status::internal(message),
-    }
+    Status::new(tonic::Code::from_i32(crate::rpc::error_code(&error)), error.to_string())
 }

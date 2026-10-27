@@ -9,8 +9,23 @@ use crate::api::Inference;
 use crate::asr::Qwen3ASRService;
 use crate::codec::qwen::QwenCodec;
 
+mod audio_stream;
 mod grpc;
 mod http;
+
+fn error_code(error: &inference_runtime_core::Error) -> i32 {
+    use inference_runtime_core::Error;
+    use tonic::Code;
+    (match error {
+        Error::InvalidArgument(_) => Code::InvalidArgument,
+        Error::ResourceExhausted(_) => Code::ResourceExhausted,
+        Error::Cancelled(_) => Code::Cancelled,
+        Error::DeadlineExceeded(_) => Code::DeadlineExceeded,
+        Error::Aborted(_) | Error::Evicted(_) => Code::Aborted,
+        Error::Unavailable(_) => Code::Unavailable,
+        Error::Internal(_) => Code::Internal,
+    }) as i32
+}
 
 #[derive(Clone)]
 pub enum RPCService {

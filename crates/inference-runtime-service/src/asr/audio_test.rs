@@ -27,6 +27,13 @@ fn test_prepare_wav_resamples_audio() {
 fn test_prepare_wav_matches_whisper_log_mel_reference() {
     let bytes = sine_wav(16_000, 1.0);
     let source = fixture_preprocessor().prepare_wav(&bytes).unwrap();
+    let pcm = hound::WavReader::new(Cursor::new(&bytes))
+        .unwrap()
+        .samples::<i16>()
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .unwrap();
+    let direct = fixture_preprocessor().prepare_pcm(pcm.into_iter()).unwrap();
+    assert_eq!(direct.features(), source.features());
     let indexes = [0, 1, 50, 99, 1_037, 6_450, 12_799];
     let expected = [
         1.169_255, 0.821_978, 0.826_407, 0.821_445, 0.181_805, -0.694_741, -0.694_741,

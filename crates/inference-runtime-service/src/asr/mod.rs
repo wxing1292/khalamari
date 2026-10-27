@@ -2,6 +2,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use inference_executor_core::model::qwen::v3_asr::QWEN3_ASR_AUDIO_RESOURCE_TYPE;
+use inference_executor_core::model::qwen::v3_asr::Qwen3ASRAudioSource;
 use inference_executor_core::model::qwen::v3_asr::Qwen3ASRModelConfig;
 use inference_executor_metal::model::qwen::v3_asr::AudioSourceRegistration;
 use inference_executor_metal::model::qwen::v3_asr::Qwen3ASRAudioProcessor;
@@ -92,6 +93,26 @@ impl Qwen3ASRService {
     ) -> Result<PreparedTranscription> {
         let requested_language = self.normalize_language(language)?;
         let source = self.audio_preprocessor.prepare_wav(wav_bytes)?;
+        self.prepare_source(source, requested_language, context)
+    }
+
+    pub fn prepare_pcm(
+        &self,
+        samples: impl Iterator<Item = i16>,
+        language: Option<&str>,
+        context: Option<&str>,
+    ) -> Result<PreparedTranscription> {
+        let requested_language = self.normalize_language(language)?;
+        let source = self.audio_preprocessor.prepare_pcm(samples)?;
+        self.prepare_source(source, requested_language, context)
+    }
+
+    fn prepare_source(
+        &self,
+        source: Qwen3ASRAudioSource,
+        requested_language: Option<String>,
+        context: Option<&str>,
+    ) -> Result<PreparedTranscription> {
         let num_resource_tokens = source.num_resource_tokens();
         let (tokens, audio_token_index) = tokenize_prompt(
             &self.tokenizer,

@@ -4,6 +4,7 @@ package psi_dec.inference.v1;
 
 service InferenceRuntime {
   rpc TranscribeAudio(AudioTranscribeReq) returns (AudioTranscribeResp);
+  rpc StreamAudio(stream AudioStreamReq) returns (stream AudioStreamResp);
   rpc GenerateTokens(GenerateTokensRequest) returns (stream GenerateTokensResponse);
   rpc GenerateTokensStream(stream GenerateTokensRequest) returns (stream GenerateTokensResponse);
   rpc GenerateMessages(GenerateMessagesRequest) returns (stream GenerateMessagesResponse);
@@ -21,6 +22,60 @@ message AudioTranscribeReq {
 message AudioTranscribeResp {
   string text = 1;
   string language = 2;
+}
+
+// One connection owns a bounded cache of mono 16 kHz signed i16 little-endian PCM.
+// Append ranges are ordered and disjoint. Sample positions include omitted silence.
+message AudioStreamReq {
+  oneof command {
+    AudioAppend append = 1;
+    AudioRangeTranscribe transcribe = 2;
+    uint64 release_before_sample = 3;
+    uint64 cancel_request_id = 4;
+    AudioFinish finish = 5;
+  }
+}
+
+// Seal input and drain accepted requests before returning final connection statistics.
+message AudioFinish {}
+
+message AudioAppend {
+  uint64 start_sample = 1;
+  bytes pcm_s16le = 2;
+}
+
+message AudioRangeTranscribe {
+  uint64 request_id = 1;
+  uint64 start_sample = 2;
+  uint64 end_sample = 3;
+  string model = 4;
+  optional string language = 5;
+  optional string context = 6;
+}
+
+message AudioStreamStats {
+  uint64 uploaded_samples = 1;
+  uint64 requested_samples = 2;
+  uint64 peak_buffered_samples = 3;
+  uint64 buffered_samples = 4;
+}
+
+message AudioStreamError {
+  // Canonical gRPC status code, shared by both streaming transports.
+  int32 code = 1;
+  string message = 2;
+}
+
+message AudioStreamResp {
+  // Zero acknowledges an append; other IDs correlate transcription responses.
+  uint64 request_id = 1;
+  oneof result {
+    AudioTranscribeResp transcription = 2;
+    AudioStreamError error = 3;
+  }
+  // Cumulative work accepted by this connection, including cancelled jobs.
+  AudioStreamStats stats = 4;
+  bool finished = 5;
 }
 
 message GenerateTokensRequest {
