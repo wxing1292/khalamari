@@ -320,9 +320,9 @@ Every completed case reports no new swap. Failed attempts do not enter the repor
 The measured paths adapt scorer source bodies. They do not reproduce complete framework runtimes or production Metal ICB.
 All score-plus-radix arms use the same exact full256 selector. Production sampled/full radix selection is unchanged.
 Q/K projection, pooling, page construction, and layout preparation are excluded. FP32 casts and matmul intermediates are included.
-PSI uses paged K and token-major Q. The oMLX and TensorFold FP32 peers use prepared contiguous K.
+KHALAMARI uses paged K and token-major Q. The oMLX and TensorFold FP32 peers use prepared contiguous K.
 
-The following changes are PSI latency relative to each peer. Negative values mean lower latency.
+The following changes are KHALAMARI latency relative to each peer. Negative values mean lower latency.
 Each matched shape has equal weight in these geometric means.
 
 | Score plus common radix | Shapes | oMLX native | oMLX FP32 | TensorFold FP32 | TensorFold SIMD B4 |
@@ -340,7 +340,7 @@ Growth sums cover independent synthetic sparse chunks. They are not complete pre
 
 Representative absolute latencies use score plus the common radix. All times are microseconds.
 
-| Requests | History | Q tokens/request | PSI BM32 | oMLX native | oMLX FP32 | TensorFold FP32 | TensorFold SIMD B4 |
+| Requests | History | Q tokens/request | KHALAMARI BM32 | oMLX native | oMLX FP32 | TensorFold FP32 | TensorFold SIMD B4 |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | 1 | 4096 | 128 | 277.23 | 296.11 | 305.42 | 307.39 | 316.52 |
 | 1 | 16384 | 128 | 325.78 | 325.26 | 394.07 | 406.16 | 524.64 |
@@ -376,7 +376,7 @@ Both: loop over four heads, stage Q/K slices in SMEM, retain C/S in registers
 | Interpretation | Limit |
 | --- | --- |
 | Reduced C/S storage and more blocks | Compiler register allocation/occupancy unmeasured |
-| PSI skips wholly future tiles before loads, oMLX masks at store | One-shot differences do not isolate BM32 |
+| KHALAMARI skips wholly future tiles before loads, oMLX masks at store | One-shot differences do not isolate BM32 |
 | Resident-K/Q alternatives lose | Fewer explicit reads alone do not establish lower latency |
 | Q=1..16 and mixed-tail production composition | Remain unmeasured, existing choices unchanged |
 

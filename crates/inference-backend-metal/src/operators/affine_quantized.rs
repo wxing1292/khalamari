@@ -2112,7 +2112,7 @@ fn affine_qmv_bn8_bk32_source(config: Config) -> (String, String) {
 
     let type_string = metal_type_string(config.input_dtype);
     let fast = config.n % 8 == 0 && config.k % 512 == 0;
-    let function_name = if fast { "psi_dec_qmv_fast" } else { "psi_dec_qmv" };
+    let function_name = if fast { "khalamari_qmv_fast" } else { "khalamari_qmv" };
     let kernel_name = format!(
         "{function_name}_{type_string}_gs_{}_b_{}_batch_0",
         config.group_size, config.bits
@@ -2136,12 +2136,12 @@ fn affine_qmv_bn8_bk32_source(config: Config) -> (String, String) {
 fn affine_qmv_quad_bn64_source(config: Config) -> (String, String) {
     let type_string = metal_type_string(config.input_dtype);
     let kernel_name = format!(
-        "psi_dec_qmv_quad_{type_string}_gs_{}_b_{}_d_{}_batch_0",
+        "khalamari_qmv_quad_{type_string}_gs_{}_b_{}_d_{}_batch_0",
         config.group_size, config.bits, config.k
     );
     let template_definition = template_definition(
         &kernel_name,
-        "psi_dec_qmv_quad",
+        "khalamari_qmv_quad",
         &[
             type_string.to_string(),
             config.group_size.to_string(),

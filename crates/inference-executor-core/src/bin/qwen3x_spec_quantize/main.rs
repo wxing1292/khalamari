@@ -196,7 +196,7 @@ mod tests {
 
     fn test_root(model: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
-            "psi-qwen3x-spec-quantize-{model}-{}-{}",
+            "khalamari-qwen3x-spec-quantize-{model}-{}-{}",
             std::process::id(),
             SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
         ))

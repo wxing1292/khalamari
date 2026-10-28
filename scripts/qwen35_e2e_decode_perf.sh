@@ -1123,7 +1123,7 @@ run_decode() {
     local run="$5"
     local server_log="$6"
     local tokenizer="$7"
-    local out="/tmp/psi_dec_${label}_${tokens}_${prompt_id}_${run}.out"
+    local out="/tmp/khalamari_${label}_${tokens}_${prompt_id}_${run}.out"
     local server_log_offset
     server_log_offset="$(wc -c <"$server_log")"
     if ! target/release/decode \
@@ -1237,7 +1237,7 @@ run_server_case() {
     local tokenizer="$3"
     local prompt_index
     shift 3
-    local log="/tmp/psi_dec_${label}.log"
+    local log="/tmp/khalamari_${label}.log"
 
     local server_command=("$@")
     local server_rust_log="${RUST_LOG:-info}"
@@ -1285,7 +1285,7 @@ run_server_case() {
                     inter_chunk_p50 inter_chunk_p95 proposed_spec verified_spec \
                     acceptance_rate tokens_per_chunk run_spec_by_index \
                     run_verified_by_index acceptance_rate_by_index output_sha256 <<<"$parsed"
-                local output_file="/tmp/psi_dec_${label}_${tokens}_${prompt_id}_${run}.out"
+                local output_file="/tmp/khalamari_${label}_${tokens}_${prompt_id}_${run}.out"
                 if [[ -z "$expected_output_sha256" ]]; then
                     expected_output_sha256="$output_sha256"
                     expected_output_file="$output_file"
@@ -1606,7 +1606,7 @@ PROMPT_IDS_CSV="$(prompt_ids_csv)"
 REFERENCE_CONFIG_MISMATCHES="$(
     reference_config_mismatches "$MACHINE" "$OS_VERSION" "$ARCH" "$PROMPT_SET_SHA256"
 )"
-REPORT_FILE="$(mktemp "${TMPDIR:-/tmp}/psi_dec_qwen35_perf.XXXXXX")"
+REPORT_FILE="$(mktemp "${TMPDIR:-/tmp}/khalamari_qwen35_perf.XXXXXX")"
 if ((SHOW_RUNS)); then
     echo "CONFIG commit=$GIT_COMMIT dirty=$GIT_DIRTY machine=$MACHINE os=$OS_VERSION arch=$ARCH runs=$RUNS build=$BUILD grpc_port=$PORT num_cache_pages=$NUM_CACHE_PAGES cache_block_tokens=$CACHE_BLOCK_TOKENS max_requests=$MAX_REQUESTS max_tokens=$MAX_TOKENS max_tokens_per_request=$MAX_TOKENS_PER_REQUEST mtp_num_spec_tokens=case-specific block_spec_tokens=${BLOCK_SPEC_TOKENS:-checkpoint-or-case} cases=$CASES case_cooldown_secs=$CASE_COOLDOWN_SECS logging=$LOGGING seed=$SEED temperature=$TEMPERATURE top_k=$TOP_K top_p=$TOP_P enable_thinking=1 prompt_set=$PROMPT_SET prompt_count=${#PROMPTS[@]} prompt_ids=$PROMPT_IDS_CSV prompt_set_sha256=$PROMPT_SET_SHA256 tokenizer=${TOKENIZER:-auto-per-model} model_27b=$MODEL_27B mtp_27b=$MTP_27B dflash2_27b=$DFLASH2_27B model_35b=$MODEL_35B mtp_35b=$MTP_35B dflash2_35b=$DFLASH2_35B reference_enabled=$REFERENCE reference_machine=$REFERENCE_MACHINE reference_date=$REFERENCE_DATE reference_commit=$REFERENCE_COMMIT reference_source_tree=$REFERENCE_SOURCE_TREE reference_dirty=$REFERENCE_DIRTY reference_os=$REFERENCE_OS_VERSION reference_arch=$REFERENCE_ARCH reference_runs=$REFERENCE_RUNS reference_scope=user-table reference_config_source=script-defaults reference_cases=$REFERENCE_CASES reference_prompt_set=$REFERENCE_PROMPT_SET reference_prompt_set_sha256=$REFERENCE_PROMPT_SET_SHA256 reference_config_mismatches=${REFERENCE_CONFIG_MISMATCHES:-none}"
 fi

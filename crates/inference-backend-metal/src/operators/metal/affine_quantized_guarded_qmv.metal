@@ -1,5 +1,5 @@
 template <typename T, int group_size, int bits, int D, bool batched>
-[[kernel]] void psi_dec_qmv_quad(
+[[kernel]] void khalamari_qmv_quad(
     const device uint32_t* w [[buffer(0)]],
     const device T* scales [[buffer(1)]],
     const device T* biases [[buffer(2)]],
@@ -64,7 +64,7 @@ template <typename T, int group_size, int bits, int D, bool batched>
 }
 
 template <typename T, int group_size, int bits, bool batched>
-[[kernel]] void psi_dec_qmv_fast(
+[[kernel]] void khalamari_qmv_fast(
     const device uint32_t* w [[buffer(0)]],
     const device T* scales [[buffer(1)]],
     const device T* biases [[buffer(2)]],
@@ -85,7 +85,7 @@ template <typename T, int group_size, int bits, bool batched>
 }
 
 template <typename T, int group_size, int bits, bool batched>
-[[kernel]] void psi_dec_qmv(
+[[kernel]] void khalamari_qmv(
     const device uint32_t* w [[buffer(0)]],
     const device T* scales [[buffer(1)]],
     const device T* biases [[buffer(2)]],

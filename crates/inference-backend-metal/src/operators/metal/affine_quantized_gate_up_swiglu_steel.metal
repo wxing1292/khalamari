@@ -22,8 +22,8 @@ template <typename InT, typename ParamT, typename OutT,
   using mma_t = mlx::steel::BlockMMA<T, OutT, BM, BN, BK, WM, WN, false, true, LD, LD>;
   using loader_x_t = conditional_t<same_dtype,
       mlx::steel::BlockLoader<T, BM, BK, LD, 1, WM * WN * SIMD_SIZE>,
-      PsiDecMixedBlockLoader<InT, T, BM, BK, LD, 1, WM * WN * SIMD_SIZE>>;
-  using loader_w_t = PsiDecMixedQuantizedBlockLoader<ParamT, T, BN, BK, LD, 1,
+      KhalamariMixedBlockLoader<InT, T, BM, BK, LD, 1, WM * WN * SIMD_SIZE>>;
+  using loader_w_t = KhalamariMixedQuantizedBlockLoader<ParamT, T, BN, BK, LD, 1,
       WM * WN * SIMD_SIZE, group_size, bits>;
   const int y_row = tid.y * BM, y_col = tid.x * BN;
   const short rows = min(BM, int(num_active_rows) - y_row), cols = min(BN, N - y_col);

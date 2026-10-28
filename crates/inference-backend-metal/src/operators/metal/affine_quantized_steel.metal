@@ -9,8 +9,8 @@ METAL_FUNC auto affine_qmm_tile(const device uint8_t *w, const device ParamT *sc
   constexpr int WN = 2;
   constexpr int LD = BK + 16 / sizeof(T);
 
-  using loader_x_t = PsiDecMixedBlockLoader<InT, T, BM, BK, LD, 1, WM * WN * SIMD_SIZE>;
-  using loader_w_t = PsiDecMixedQuantizedBlockLoader<ParamT, T, BN, BK, LD, 1, WM * WN * SIMD_SIZE, group_size, bits>;
+  using loader_x_t = KhalamariMixedBlockLoader<InT, T, BM, BK, LD, 1, WM * WN * SIMD_SIZE>;
+  using loader_w_t = KhalamariMixedQuantizedBlockLoader<ParamT, T, BN, BK, LD, 1, WM * WN * SIMD_SIZE, group_size, bits>;
 
   loader_x_t loader_x(x, K, Xs, simd_gid, simd_lid);
   loader_w_t loader_w(w, scales, biases, K, Ws, simd_gid, simd_lid);

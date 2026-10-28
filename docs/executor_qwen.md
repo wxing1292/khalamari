@@ -12,7 +12,7 @@ It reuses the generic leaf components and keeps its GR, QSA, and PLE graph in `v
 
 ## Numerical checkpoints
 
-Set `PSI_QWEN35_CHECK_FINITE=1` before starting the process to enable numerical checkpoints.
+Set `KHALAMARI_QWEN35_CHECK_FINITE=1` before starting the process to enable numerical checkpoints.
 The setting is read once. It is disabled by default.
 The backend `components/check_finite.rs` checks active F32 or BF16 rows and implements the same `SubmissionCheck`
 contract as sampling. It records one non-finite value with its row, column, dtype, and F32 bit pattern.

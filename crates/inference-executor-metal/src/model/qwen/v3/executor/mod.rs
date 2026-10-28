@@ -741,9 +741,9 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires PSI_DEC_QWEN3_ASR_MODEL_DIR and the pinned local checkpoint"]
+    #[ignore = "requires KHALAMARI_QWEN3_ASR_MODEL_DIR and the pinned local checkpoint"]
     fn test_qwen3_asr_replaces_placeholder_embedding_before_text_decoder() {
-        let model_dir = std::env::var("PSI_DEC_QWEN3_ASR_MODEL_DIR").unwrap();
+        let model_dir = std::env::var("KHALAMARI_QWEN3_ASR_MODEL_DIR").unwrap();
         let mut loaded = init_qwen3_asr_model(
             model_dir,
             Qwen3ExecutorConfig {

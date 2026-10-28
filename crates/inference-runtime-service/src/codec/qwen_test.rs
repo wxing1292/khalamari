@@ -114,9 +114,9 @@ fn test_encode_continuation_preserves_sampled_history() {
 }
 
 #[test]
-#[ignore = "requires PSI_DEC_QWEN_MODEL_DIR"]
+#[ignore = "requires KHALAMARI_QWEN_MODEL_DIR"]
 fn test_checkpoint_continuation_contract() {
-    let model_dir = std::env::var("PSI_DEC_QWEN_MODEL_DIR").expect("PSI_DEC_QWEN_MODEL_DIR must be set");
+    let model_dir = std::env::var("KHALAMARI_QWEN_MODEL_DIR").expect("KHALAMARI_QWEN_MODEL_DIR must be set");
     let codec = QwenCodec::load(std::path::Path::new(&model_dir)).unwrap();
     let first = Message::user("one");
     let answer = Message::assistant("answer");

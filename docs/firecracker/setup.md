@@ -1,6 +1,6 @@
 # Legacy Firecracker Setup Notes
 
-Warning: This runbook is not verified or part of the supported `psi-dec` service workflow. The commands change host
+Warning: This runbook is not verified or part of the supported `khalamari` service workflow. The commands change host
 networking and delete files. Review each command before you use it.
 
 The repository keeps these notes as a historical reference. The code blocks remain unchanged.

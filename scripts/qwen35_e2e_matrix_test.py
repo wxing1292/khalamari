@@ -78,7 +78,7 @@ class MatrixTest(unittest.TestCase):
                         f.write(json.dumps(dict(key="latest", status="measured")) + "\n")
                     self.returncode = 0
 
-            args = SimpleNamespace(out=path, root=path, engine="psi-dec", mode="off")
+            args = SimpleNamespace(out=path, root=path, engine="khalamari", mode="off")
             with (
                 patch.object(matrix.subprocess, "Popen", return_value=Process()),
                 patch.object(matrix, "swap_counters", side_effect=[
@@ -98,7 +98,7 @@ class MatrixTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory)
             process = SimpleNamespace(pid=123, returncode=0, poll=lambda: 0)
-            args = SimpleNamespace(out=path, root=path, engine="psi-dec", mode="off")
+            args = SimpleNamespace(out=path, root=path, engine="khalamari", mode="off")
             with (
                 patch.object(matrix.subprocess, "Popen", return_value=process),
                 patch.object(matrix, "swap_counters", return_value=dict(Swapins=100, Swapouts=200)),
@@ -111,17 +111,17 @@ class MatrixTest(unittest.TestCase):
             path = Path(directory)
             (path / "config.json").write_text('{"vocab_size":248320}')
             args = SimpleNamespace(
-                out=path, model=path, engine="psi-dec", mode="off", modes=["off"],
+                out=path, model=path, engine="khalamari", mode="off", modes=["off"],
                 requests=[1], contexts=[0], tokens=[8, 16, 24, 32], full=[],
                 shared_prefix=False, warmup=0, repeats=1, output_tokens=2,
             )
             rows = [
-                dict(key=matrix.key("psi-dec", "off", (1, "append", 0, q)), status=status)
+                dict(key=matrix.key("khalamari", "off", (1, "append", 0, q)), status=status)
                 for q, status in [(8, "measured"), (16, "N/A: Metal OOM"), (24, "measured")]
             ]
             ledger = path / "results.jsonl"
             ledger.write_text("".join(json.dumps(row) + "\n" for row in rows))
-            last = dict(key=matrix.key("psi-dec", "off", (1, "append", 0, 32)), status="measured")
+            last = dict(key=matrix.key("khalamari", "off", (1, "append", 0, 32)), status="measured")
             with patch.object(matrix, "report"):
                 matrix.write_row(args, last.copy())
                 matrix.write_row(args, last)
@@ -147,7 +147,7 @@ class MatrixTest(unittest.TestCase):
                 patch.object(matrix, "provenance"),
                 patch.object(matrix, "model_view"),
                 patch.object(matrix, "report"),
-                patch.object(matrix, "PSI", return_value=Engine()) as engine,
+                patch.object(matrix, "KHALAMARI", return_value=Engine()) as engine,
             ):
                 asyncio.run(matrix.run(args))
                 self.assertEqual(calls, [16, 24, 32])
@@ -190,8 +190,8 @@ class MatrixTest(unittest.TestCase):
             matrix.key("omlx", "mtp1", shape), matrix.key("omlx", "mtp4", shape)
         )
         self.assertNotEqual(
-            matrix.key("psi-dec", "off", (1, "full", 0, 2048)),
-            matrix.key("psi-dec", "off", (1, "append", 0, 2048)),
+            matrix.key("khalamari", "off", (1, "full", 0, 2048)),
+            matrix.key("khalamari", "off", (1, "append", 0, 2048)),
         )
 
     def test_mtp_short_input_is_excluded_before_engine_setup(self):
@@ -202,7 +202,7 @@ class MatrixTest(unittest.TestCase):
                 shared_prefix=False,
                 out=path,
                 model=path,
-                engine="psi-dec",
+                engine="khalamari",
                 mode="mtp2",
                 modes=["mtp2"],
                 requests=[1, 2, 4, 8],
@@ -213,7 +213,7 @@ class MatrixTest(unittest.TestCase):
             with (
                 patch.object(matrix, "provenance"),
                 patch.object(matrix, "model_view"),
-                patch.object(matrix, "PSI") as engine,
+                patch.object(matrix, "KHALAMARI") as engine,
             ):
                 asyncio.run(matrix.run(args))
             engine.assert_not_called()
@@ -237,7 +237,7 @@ class MatrixTest(unittest.TestCase):
                     modes=["off"],
                 )
                 rows = []
-                for engine in ("psi-dec", "omlx"):
+                for engine in ("khalamari", "omlx"):
                     rows.append(
                         dict(
                             key=matrix.key(engine, "off", shape),
@@ -518,7 +518,7 @@ class MatrixTest(unittest.TestCase):
                 self.assertEqual(result["proposed"], 6 if mode == "mtp2" else 21)
                 self.assertEqual(result["accepted"], 3)
 
-    def test_psi_oom_is_distinct_from_other_rpc_failures(self):
+    def test_khalamari_oom_is_distinct_from_other_rpc_failures(self):
         class RPCError(Exception):
             pass
 
@@ -536,7 +536,7 @@ class MatrixTest(unittest.TestCase):
             with self.subTest(
                 message=message
             ), tempfile.TemporaryDirectory() as directory:
-                engine = object.__new__(matrix.PSI)
+                engine = object.__new__(matrix.KHALAMARI)
                 engine.log_path = Path(directory) / "server.log"
                 # An earlier failure must not classify a later RPC failure.
                 engine.log_path.write_text(

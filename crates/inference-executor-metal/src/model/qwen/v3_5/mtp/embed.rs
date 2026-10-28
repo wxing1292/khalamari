@@ -464,7 +464,7 @@ mod tests {
     impl TempModelDir {
         fn new() -> Self {
             let path = std::env::temp_dir().join(format!(
-                "psi-qwen35-mtp-embed-test-{}-{}",
+                "khalamari-qwen35-mtp-embed-test-{}-{}",
                 std::process::id(),
                 SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
             ));

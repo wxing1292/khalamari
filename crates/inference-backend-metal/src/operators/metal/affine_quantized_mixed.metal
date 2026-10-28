@@ -177,7 +177,7 @@ template <
     short n_reads = (BCOLS * BROWS) / (tgp_size),
     short TCOLS = BCOLS / n_reads,
     short TROWS = tgp_size / TCOLS>
-struct PsiDecMixedBlockLoader {
+struct KhalamariMixedBlockLoader {
   STEEL_CONST short vec_size = n_reads;
 
   const ulong src_ld;
@@ -189,7 +189,7 @@ struct PsiDecMixedBlockLoader {
   threadgroup OutT* dst;
   const device InT* src;
 
-  PsiDecMixedBlockLoader(
+  KhalamariMixedBlockLoader(
       const device InT* src_,
       const int src_ld_,
       threadgroup OutT* dst_,
@@ -252,7 +252,7 @@ template <
     short tgp_size,
     short group_size,
     short bits>
-struct PsiDecMixedQuantizedBlockLoader {
+struct KhalamariMixedQuantizedBlockLoader {
   static_assert(
       BCOLS <= group_size,
       "The group size should be larger than the columns");
@@ -284,7 +284,7 @@ struct PsiDecMixedQuantizedBlockLoader {
   const device ParamT* scales;
   const device ParamT* biases;
 
-  PsiDecMixedQuantizedBlockLoader(
+  KhalamariMixedQuantizedBlockLoader(
       const device uint8_t* src_,
       const device ParamT* scales_,
       const device ParamT* biases_,

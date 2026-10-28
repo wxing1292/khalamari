@@ -227,7 +227,7 @@ mod tests {
         let selected_request_slot_ranges = [1..2, 3..4];
         let plan = ExecutorHibernationPlan::selected(selected_request_slot_ranges.to_vec(), Vec::new());
         let snapshot_path =
-            std::env::temp_dir().join(format!("psi-dec-gqa-selected-state-{}.state", std::process::id()));
+            std::env::temp_dir().join(format!("khalamari-gqa-selected-state-{}.state", std::process::id()));
         let buffer_io = inference_backend_metal::metal::BufferIO::new(&device);
         let snapshot_files = [SNAPSHOT_FILES.request_page_table()];
 

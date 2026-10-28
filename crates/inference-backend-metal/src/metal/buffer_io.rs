@@ -426,6 +426,6 @@ mod tests {
 
     fn test_file_path() -> std::path::PathBuf {
         let id = NEXT_TEST_FILE_ID.fetch_add(1, Ordering::Relaxed);
-        std::env::temp_dir().join(format!("psi-dec-buffer-io-test-{}-{id}", std::process::id()))
+        std::env::temp_dir().join(format!("khalamari-buffer-io-test-{}-{id}", std::process::id()))
     }
 }

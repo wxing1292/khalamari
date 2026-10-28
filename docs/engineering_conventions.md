@@ -437,7 +437,7 @@ For Spec, keep the deterministic trajectory fixed or report proposals, sampled/a
 Different trajectories are not like-for-like executor/kernel comparisons.
 Use [verification and evidence rules](executor_benchmarks.md).
 
-README summaries contain dated PSI results by mode.
+README summaries contain dated KHALAMARI results by mode.
 Keep historical results separate and cross-framework comparisons in the owning performance report.
 
 ## Public API

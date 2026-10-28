@@ -116,7 +116,7 @@ static inline bool rank_before(float left_logit, int left_token, float right_log
     return left_logit > right_logit || (left_logit == right_logit && left_token < right_token);
 }
 
-static inline uint psi_mix(uint h) {
+static inline uint khalamari_mix(uint h) {
     h ^= h >> 16;
     h *= 0x7feb352du;
     h ^= h >> 15;
@@ -129,11 +129,11 @@ constant uint SAMPLING_DOMAIN_TARGET = 0x243f6a88u;
 constant uint SAMPLING_DOMAIN_ACCEPT = 0x13198a2eu;
 constant uint SAMPLING_DOMAIN_RESAMPLE = 0x03707344u;
 
-static inline uint psi_sampling_random(uint seed, uint sample_position, uint sampling_domain) {
-    return psi_mix(seed ^ psi_mix(sample_position + 0x9e3779b9u) ^ sampling_domain);
+static inline uint khalamari_sampling_random(uint seed, uint sample_position, uint sampling_domain) {
+    return khalamari_mix(seed ^ khalamari_mix(sample_position + 0x9e3779b9u) ^ sampling_domain);
 }
 
-static inline float psi_uniform01(uint random) {
+static inline float khalamari_uniform01(uint random) {
     return (float(random & 0x00ffffffu) + 0.5f) * (1.0f / 16777216.0f);
 }
 
@@ -681,8 +681,8 @@ static inline void sample_merged_distribution(
     if (kept_count <= 0 || kept_total <= 0.0f) {
         return;
     }
-    uint random = psi_sampling_random(params.seed, sample_position, sampling_domain);
-    float draw = psi_uniform01(random) * kept_total;
+    uint random = khalamari_sampling_random(params.seed, sample_position, sampling_domain);
+    float draw = khalamari_uniform01(random) * kept_total;
     float cumulative = 0.0f;
     for (uint slot = 0; slot < kept_count; ++slot) {
         cumulative += weights[slot];
@@ -1100,7 +1100,7 @@ kernel void rejection_sparse_sample(
             max_draft_k_u, top_k, draft_token);
         float accept_prob = p > 0.0f ? metal::min(q / p, 1.0f) : 0.0f;
         uint sample_position = params.sample_position + offset;
-        float u = psi_uniform01(psi_sampling_random(params.seed, sample_position, SAMPLING_DOMAIN_ACCEPT));
+        float u = khalamari_uniform01(khalamari_sampling_random(params.seed, sample_position, SAMPLING_DOMAIN_ACCEPT));
         if (u <= accept_prob) {
             flat_accepted_token_ids[flat_draft_index] = draft_token;
             flat_accepted_probs[flat_draft_index] = q;
@@ -1111,7 +1111,7 @@ kernel void rejection_sparse_sample(
         num_accepted_tokens[req] = offset;
         info.sampling_domain = SAMPLING_DOMAIN_RESAMPLE;
         float residual_uniform =
-            psi_uniform01(psi_sampling_random(params.seed, sample_position, SAMPLING_DOMAIN_RESAMPLE));
+            khalamari_uniform01(khalamari_sampling_random(params.seed, sample_position, SAMPLING_DOMAIN_RESAMPLE));
         sparse_sample_residual(
             target_distribution_token_ids, target_distribution_probs, draft_distribution_token_ids, draft_distribution_probs,
             sampled_token_ids, sampled_token_probs, req, target_distribution_index, draft_distribution_index, true,
@@ -1124,7 +1124,7 @@ kernel void rejection_sparse_sample(
     info.sample_position = final_sample_position;
     info.sampling_domain = SAMPLING_DOMAIN_TARGET;
     float final_uniform =
-        psi_uniform01(psi_sampling_random(params.seed, final_sample_position, SAMPLING_DOMAIN_TARGET));
+        khalamari_uniform01(khalamari_sampling_random(params.seed, final_sample_position, SAMPLING_DOMAIN_TARGET));
     sparse_sample_residual(
         target_distribution_token_ids, target_distribution_probs, draft_distribution_token_ids, draft_distribution_probs,
         sampled_token_ids, sampled_token_probs, req, final_target_distribution_index, 0, false,

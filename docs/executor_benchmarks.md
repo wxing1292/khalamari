@@ -194,7 +194,7 @@ An external comparison must match weights, input tensors, state contents, precis
 Main and Main-layer targets use synthetic hidden inputs and initialized metadata.
 Use the Vanilla target when the measurement requires committed context.
 
-For `buffer_io`, set `PSI_DEC_BUFFER_IO_BENCH_DIR` to select the volume.
+For `buffer_io`, set `KHALAMARI_BUFFER_IO_BENCH_DIR` to select the volume.
 The default is the operating-system temporary directory.
 Setup validates a repeated 1 MiB pattern before timing.
 Reads use `F_GLOBAL_NOCACHE`. Writes use `F_NOCACHE` and `sync_all` each iteration.
@@ -219,7 +219,7 @@ reset slot -> build committed context in chunks                 untimed
 | `--num-tokens-per-block 2048` / `--num-cache-pages 393216` | Default block/page capacities |
 | `--warmup-iters 2 --iters 5 --runs 5` | Default timing controls |
 | `--reuse-context` | Prefill only, retained block-aligned prefix, restoration inside timing |
-| `PSI_PREFILL_SKIP` | Benchmark-only completed `context:tokens` pairs |
+| `KHALAMARI_PREFILL_SKIP` | Benchmark-only completed `context:tokens` pairs |
 | `matrix_result` | Retained-context cold/warm wall, submission, and preparation times |
 
 The active chunk per request is `min(max_tokens_per_request, max_tokens / num_reqs)`.
@@ -312,7 +312,7 @@ verdict
 ```
 
 Cross-framework tables must identify each framework's measured version or source commit and execution path.
-Group results by component and workload shape. Show each framework's latency and the PSI relative latency difference.
+Group results by component and workload shape. Show each framework's latency and the KHALAMARI relative latency difference.
 
 For speculative decoding, also record these values:
 
@@ -502,7 +502,7 @@ Their host tests cover process, report, policy, and calibration contracts.
 
 ## Cross-engine serving matrix
 
-`scripts/qwen35_e2e_matrix.py` compares fixed raw-token work across psi-dec, oMLX, and TensorFold.
+`scripts/qwen35_e2e_matrix.py` compares fixed raw-token work across khalamari, oMLX, and TensorFold.
 Use [service text-prompt checks](service.md#end-to-end-performance-helper) for output quality.
 
 | Axis or control | Default |
@@ -542,7 +542,7 @@ Concurrent decode latency covers the remaining batch phase.
 
 | Engine | Path and comparison limits |
 | --- | --- |
-| psi-dec | Production raw-token gRPC from a separate process, FP8 KV |
+| khalamari | Production raw-token gRPC from a separate process, FP8 KV |
 | oMLX | Production VLM engine in process, BF16 KV, native fixed-depth Lightning MTP |
 | TensorFold | Python `0.6` LaneEngine in process, BF16 KV, fixed-chain DFlash2 |
 
@@ -562,13 +562,13 @@ Numerical paths can produce different greedy hashes. Synthetic acceptance does n
 | Prefix or memory contract | Behavior |
 | --- | --- |
 | Prefix identity | Distinct/request, or `--shared-prefix` with distinct timed suffixes |
-| Cache validation | Exact first PSI token index and authoritative oMLX cached-token count |
+| Cache validation | Exact first KHALAMARI token index and authoritative oMLX cached-token count |
 | Missing retained prefix | `N/A: prefix not retained`, no comparison ratio |
 | MTP depth `K` | Requires `K` suffix lookahead tokens, otherwise `N/A: MTP lookahead` |
-| MLX prefix chunk | `--prefix-chunk 2048`, PSI uses its static `--chunk` |
+| MLX prefix chunk | `--prefix-chunk 2048`, KHALAMARI uses its static `--chunk` |
 | MLX allocator free-buffer limit | `--mlx-cache-gib 1`, does not limit live KV |
 | oMLX hot cache | 20 GiB |
-| PSI page arena | 98304 pages/request, allocated and zeroed at initialization |
+| KHALAMARI page arena | 98304 pages/request, allocated and zeroed at initialization |
 
 TensorFold copies working cache containers from an immutable baseline through its native API.
 Shorter GDN prefixes need their own recurrent state. Truncating KV alone is insufficient.
@@ -587,7 +587,7 @@ python3 scripts/qwen35_e2e_matrix.py \
   --out target/perf/qwen35-e2e-matrix
 ```
 
-The PSI environment also needs `grpcio` and `grpcio-tools`.
+The KHALAMARI environment also needs `grpcio` and `grpcio-tools`.
 
 | Operation | Result |
 | --- | --- |
@@ -595,7 +595,7 @@ The PSI environment also needs `grpcio` and `grpcio-tools`.
 | `--engine plan` | Inspect without loading a model |
 | `--engine report` | Regenerate without GPU work |
 | `--requests`, `--contexts`, `--tokens`, `--full`, `--modes` | Select a subset |
-| `--engine psi-dec --mode mtp2` | One worker in its engine environment |
+| `--engine khalamari --mode mtp2` | One worker in its engine environment |
 | Metal OOM | Record `N/A: Metal OOM`, release GPU owner, exit 86, stop controller |
 | New swap-in/out | Supervisor stops worker/controller, retains raw results, excludes affected observations |
 

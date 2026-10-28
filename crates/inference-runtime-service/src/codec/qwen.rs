@@ -287,8 +287,8 @@ struct Parser {
 
 const THINKING_END: &str = "</think>";
 const TURN_END: &str = "<|im_end|>";
-const CONTINUATION_ANCHOR_USER: &str = "psi-dec continuation anchor";
-const CONTINUATION_ANCHOR_ASSISTANT: &str = "<psi-dec-continuation-boundary>";
+const CONTINUATION_ANCHOR_USER: &str = "khalamari continuation anchor";
+const CONTINUATION_ANCHOR_ASSISTANT: &str = "<khalamari-continuation-boundary>";
 const TOOL_START: &str = "<tool_call>";
 const TOOL_END: &str = "</tool_call>";
 

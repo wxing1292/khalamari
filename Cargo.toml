@@ -18,7 +18,7 @@ version = "0.1.0"
 edition = "2024"
 authors = ["Wenquan Xing"]
 license = "MIT"
-repository = "https://github.com/wxing1292/psi-dec"
+repository = "https://github.com/wxing1292/khalamari"
 
 [workspace.dependencies]
 ahash = "0.8"

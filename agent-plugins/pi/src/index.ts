@@ -72,7 +72,7 @@ const packageDefinition = protoLoader.loadSync(PROTO_PATH, {
   oneofs: true,
 });
 const proto = grpc.loadPackageDefinition(packageDefinition) as any;
-const InferenceClient = proto.psi_dec.inference.v1.InferenceRuntime as new (
+const InferenceClient = proto.khalamari.inference.v1.InferenceRuntime as new (
   target: string,
   credentials: grpc.ChannelCredentials,
 ) => DynamicInferenceClient;
@@ -97,7 +97,7 @@ class ResidentSession {
     });
     this.call.on("data", (response: WireResponse) => this.enqueue(() => this.receive(response)));
     this.call.on("error", (error: grpc.ServiceError) => this.enqueue(() => this.fail(error)));
-    this.call.on("end", () => this.enqueue(() => this.fail(new Error("psi-dec message stream ended"))));
+    this.call.on("end", () => this.enqueue(() => this.fail(new Error("khalamari message stream ended"))));
   }
 
   matches(configuration: SessionConfiguration): boolean {
@@ -112,7 +112,7 @@ class ResidentSession {
     firstRequest: boolean,
   ): Promise<void> {
     if (this.active) {
-      throw new Error("psi-dec session already has an active turn");
+      throw new Error("khalamari session already has an active turn");
     }
     const messages = firstRequest ? context.messages : context.messages.slice(this.numMessages);
     const mappedRequest = mapRequest(
@@ -181,7 +181,7 @@ class ResidentSession {
       this.active = undefined;
       active.resolve();
     } else {
-      throw new Error("psi-dec returned an empty message event");
+      throw new Error("khalamari returned an empty message event");
     }
   }
 
@@ -296,7 +296,7 @@ class TurnEmitter {
       block.thinking += delta;
       this.stream.push({ type: "thinking_delta", contentIndex: index, delta, partial: this.output });
     } else {
-      throw new Error("psi-dec content stream changed block type");
+      throw new Error("khalamari content stream changed block type");
     }
   }
 
@@ -322,9 +322,9 @@ class TurnEmitter {
         this.output.stopReason = this.sawToolCall ? "toolUse" : "length";
         break;
       case "COMPLETION_REASON_CONTEXT_LIMIT":
-        throw new Error("context_length_exceeded: psi-dec reached the model context limit");
+        throw new Error("context_length_exceeded: khalamari reached the model context limit");
       default:
-        throw new Error(`psi-dec returned unexpected completion reason: ${completion.reason}`);
+        throw new Error(`khalamari returned unexpected completion reason: ${completion.reason}`);
     }
     this.output.usage.input = Number(completion.numInputTokens);
     this.output.usage.output = Number(completion.numOutputTokens);
@@ -335,7 +335,7 @@ class TurnEmitter {
   done(): void {
     const reason = this.output.stopReason;
     if (reason !== "stop" && reason !== "length" && reason !== "toolUse") {
-      throw new Error("psi-dec stream ended without a completion event");
+      throw new Error("khalamari stream ended without a completion event");
     }
     this.stream.push({ type: "done", reason, message: this.output });
     this.stream.end();
@@ -448,7 +448,7 @@ function textContent(content: UserMessage["content"] | ToolResultMessage["conten
   let text = "";
   for (const block of content) {
     if (block.type !== "text") {
-      throw new Error(`psi-dec ${owner} does not support image content`);
+      throw new Error(`khalamari ${owner} does not support image content`);
     }
     text += block.text;
   }
@@ -537,10 +537,10 @@ function mapReasoning(reasoning: SimpleStreamOptions["reasoning"]): ReasoningEff
 
 export default function register(pi: ExtensionAPI): void {
   const sessions = new SessionPool();
-  pi.registerProvider("psi-dec", {
-    name: "psi-dec",
+  pi.registerProvider("khalamari", {
+    name: "khalamari",
     apiKey: "unused",
-    api: "psi-dec-messages" as any,
+    api: "khalamari-messages" as any,
     streamSimple: (model, context, options) => streamMessages(sessions, model, context, options),
   });
   pi.on("session_shutdown", async () => sessions.shutdownAll());

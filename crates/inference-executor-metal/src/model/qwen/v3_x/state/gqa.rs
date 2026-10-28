@@ -368,7 +368,7 @@ mod tests {
 
     fn snapshot_path(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
-            "psi-dec-gqa-state-unload-load-{}-{name}.state",
+            "khalamari-gqa-state-unload-load-{}-{name}.state",
             std::process::id()
         ))
     }

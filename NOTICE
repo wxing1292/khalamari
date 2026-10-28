@@ -28,7 +28,7 @@ from oMLX v0.6.1, omlx/custom_kernels/qwen35_prefill/gdn.py:
 https://github.com/jundot/omlx
 
 The upstream file is licensed under Apache-2.0. A copy of that license is
-included in licenses/omlx-Apache-2.0.txt. The psi implementation adds F32
+included in licenses/omlx-Apache-2.0.txt. The khalamari implementation adds F32
 normalization and gates, model-derived geometry, ragged request metadata,
 BF16 state arenas, arbitrary state snapshots, and per-token F32 replay logs.
 
@@ -44,28 +44,28 @@ The scalar K-partition and SIMDgroup-column designs are adapted upstream from MT
 Copyright 2026 Youssof Altoukhi (Apache-2.0):
 https://github.com/youssofal/mtplx
 
-See licenses/omlx-Apache-2.0.txt. The PSI adaptation adds stacked gate/up
+See licenses/omlx-Apache-2.0.txt. The KHALAMARI adaptation adds stacked gate/up
 bindings, a compile-time SwiGLU epilogue, and submission-time active rows.
 
 The QSA indexer Steel scoring kernels adapt oMLX commit
 d6b2b92b11ebcbf4a4c1f002b0d590a3117212a8 (Apache-2.0),
 Copyright © 2026 Apple Inc. See licenses/omlx-Apache-2.0.txt.
-The psi implementation adds paged keys and request-local score task templates.
+The khalamari implementation adds paged keys and request-local score task templates.
 
 The QSA indexer vector scoring and sampled exact radix selection adapt
 TensorFold 0.6.6, kernels/qwen/flash_next/v1/attention.py and block_select.py:
 https://github.com/ashhart/TensorFold
 Copyright 2026 TensorFold contributors (Apache-2.0).
-See licenses/tensorfold-Apache-2.0.txt. The psi implementation uses paged keys,
+See licenses/tensorfold-Apache-2.0.txt. The khalamari implementation uses paged keys,
 existing token metadata, replay capacities, and chronological logical group IDs.
 
 The n-gram embedding follows hash parameter construction and arithmetic in
 oMLX commit 64bf5d1ba6336b45955c00f7fe0e46acd5c85095 (Apache-2.0).
-See licenses/omlx-Apache-2.0.txt. The psi implementation uses caller-owned
+See licenses/omlx-Apache-2.0.txt. The khalamari implementation uses caller-owned
 metadata, resident table groups, and capacity-selected Metal replay kernels.
 The grouped resident lookup also follows the eight-table design in TensorFold
 0.6.6 (Apache-2.0). See licenses/tensorfold-Apache-2.0.txt.
 
-The PLE baseline follows the same oMLX arithmetic. The psi implementation
+The PLE baseline follows the same oMLX arithmetic. The khalamari implementation
 separates preparation, application, and accepted-prefix state commit through
 caller-owned Metal replay.

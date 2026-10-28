@@ -1,6 +1,6 @@
-# psi-dec
+# khalamari
 
-`psi-dec` is a Qwen inference engine for Apple Silicon.
+`khalamari` is a Qwen inference engine for Apple Silicon.
 It combines a model-agnostic Rust runtime, a Qwen executor, and a Metal replay backend.
 It supports text generation and Qwen3-ASR audio transcription.
 
@@ -165,7 +165,7 @@ hf download z-lab/Qwen3.8-27B-DFlash2 \
   --local-dir models/Qwen3.8-27B-DFlash2
 ```
 
-Convert the source checkpoint to the psi-dec affine format:
+Convert the source checkpoint to the khalamari affine format:
 
 ```sh
 cargo run --release -p inference-executor-core --bin qwen3x_spec_quantize -- dflash2 \
@@ -243,7 +243,7 @@ All paths above live under `crates/`.
 
 ## Acknowledgements
 
-`psi-dec` is an independent Rust and Metal implementation inspired by these projects:
+`khalamari` is an independent Rust and Metal implementation inspired by these projects:
 
 - [vLLM](https://github.com/vllm-project/vllm)
 - [SGLang](https://github.com/sgl-project/sglang)
@@ -273,5 +273,5 @@ Model weights are separate artifacts with their own terms.
 
 ## License
 
-`psi-dec` is distributed under the [MIT License](LICENSE).
+`khalamari` is distributed under the [MIT License](LICENSE).
 See [NOTICE](NOTICE) for third-party attribution and licenses.

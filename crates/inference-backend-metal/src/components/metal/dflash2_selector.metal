@@ -8,7 +8,7 @@ struct sampling_params {
     uint top_k;
 };
 
-static inline uint psi_mix(uint h) {
+static inline uint khalamari_mix(uint h) {
     h ^= h >> 16;
     h *= 0x7feb352du;
     h ^= h >> 15;
@@ -17,11 +17,11 @@ static inline uint psi_mix(uint h) {
     return h;
 }
 
-static inline uint psi_sampling_random(uint seed, uint sample_position, uint sampling_domain) {
-    return psi_mix(seed ^ psi_mix(sample_position + 0x9e3779b9u) ^ sampling_domain);
+static inline uint khalamari_sampling_random(uint seed, uint sample_position, uint sampling_domain) {
+    return khalamari_mix(seed ^ khalamari_mix(sample_position + 0x9e3779b9u) ^ sampling_domain);
 }
 
-static inline float psi_uniform01(uint random) {
+static inline float khalamari_uniform01(uint random) {
     return (float(random & 0x00ffffffu) + 0.5f) * (1.0f / 16777216.0f);
 }
 
@@ -140,9 +140,9 @@ kernel void dflash2_selector_walk(
         }
         uint selected = greedy ? maximum_index : top_k - 1u;
         if (!greedy) {
-            const uint random = psi_sampling_random(
+            const uint random = khalamari_sampling_random(
                 request_params.seed, sample_positions[request] + step, sampling_domain);
-            const float draw = psi_uniform01(random);
+            const float draw = khalamari_uniform01(random);
             float cumulative = 0.0f;
             bool has_selected = false;
             for (uint candidate = 0u; candidate < top_k; ++candidate) {

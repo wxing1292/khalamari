@@ -649,7 +649,7 @@ cargo test -p inference-asr-client
 ```
 
 These tests cover audio ownership, revisions, endpointing, suffix retention, overlap ambiguity and VAD recurrence.
-The ignored native migration-oracle test accepts reference JSON through `PSI_DEC_ASR_ORACLE`.
+The ignored native migration-oracle test accepts reference JSON through `KHALAMARI_ASR_ORACLE`.
 It compares log-Mel values, recurrent VAD outputs, language labels and fixed-text alignment coverage.
 Native LID scores and attention times can differ between builds. They are not numerical parity guarantees.
 

@@ -1407,7 +1407,7 @@ impl Provenance {
             .unwrap_or_else(|| "unknown".into());
         let mut environment = std::env::vars()
             .filter(|(key, _)| {
-                key.starts_with("PSI_DEC_") || key.starts_with("MTL_") || matches!(key.as_str(), "RUST_LOG")
+                key.starts_with("KHALAMARI_") || key.starts_with("MTL_") || matches!(key.as_str(), "RUST_LOG")
             })
             .map(|(key, value)| format!("{}={}", escape_field(&key), escape_field(&value)))
             .collect::<Vec<_>>();
@@ -1534,7 +1534,7 @@ fn print_help_and_exit() -> ! {
 fn run_reused_prefill(args: &Args, shapes: &[Shape], fixture: &mut VanillaFixture) {
     use std::io::Write;
 
-    let skipped = std::env::var("PSI_PREFILL_SKIP").unwrap_or_default();
+    let skipped = std::env::var("KHALAMARI_PREFILL_SKIP").unwrap_or_default();
     let skipped = skipped.split(',').collect::<BTreeSet<_>>();
     let req_slots = (0..args.num_reqs).map(|index| index as u32).collect::<Vec<_>>();
     for &context in &args.contexts {

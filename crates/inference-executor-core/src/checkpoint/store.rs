@@ -204,7 +204,7 @@ mod tests {
 
     fn temp_model_dir() -> PathBuf {
         let path = std::env::temp_dir().join(format!(
-            "psi-safetensor-store-test-{}-{}",
+            "khalamari-safetensor-store-test-{}-{}",
             std::process::id(),
             SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
         ));

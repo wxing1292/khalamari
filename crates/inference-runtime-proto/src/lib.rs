@@ -1,5 +1,5 @@
 pub mod inference_runtime_service {
-    tonic::include_proto!("psi_dec.inference.v1");
+    tonic::include_proto!("khalamari.inference.v1");
 }
 
 pub const INFERENCE_RUNTIME_FILE_DESCRIPTOR_SET: &[u8] =

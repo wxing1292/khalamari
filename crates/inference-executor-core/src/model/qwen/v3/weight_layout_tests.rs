@@ -44,7 +44,10 @@ fn test_rejects_missing_required_tensor() {
 
 fn model_config() -> Qwen3ModelConfig {
     let test_id = NEXT_MODEL_DIR.fetch_add(1, Ordering::Relaxed);
-    let model_dir = std::env::temp_dir().join(format!("psi-dec-qwen3-weight-layout-{}-{test_id}", std::process::id()));
+    let model_dir = std::env::temp_dir().join(format!(
+        "khalamari-qwen3-weight-layout-{}-{test_id}",
+        std::process::id()
+    ));
     std::fs::create_dir(&model_dir).unwrap();
     std::fs::write(
         model_dir.join("config.json"),

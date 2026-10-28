@@ -449,7 +449,7 @@ run_decode() {
     local token_count="$2"
     local run="$3"
     local server_log="$4"
-    local output="/tmp/psi_dec_qwen3_${label}_${token_count}_${run}.out"
+    local output="/tmp/khalamari_qwen3_${label}_${token_count}_${run}.out"
     local log_offset
     log_offset="$(wc -c <"$server_log")"
 
@@ -638,7 +638,7 @@ PY
 run_server_case() {
     local label="$1"
     shift
-    local server_log="/tmp/psi_dec_qwen3_${label}.log"
+    local server_log="/tmp/khalamari_qwen3_${label}.log"
     local -a command=("$@")
     local server_rust_log="${RUST_LOG:-info}"
     server_rust_log+=",inference-runtime-service::perf=debug"

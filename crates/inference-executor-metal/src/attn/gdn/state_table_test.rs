@@ -848,7 +848,7 @@ fn assert_reset_state_values(
 
 fn snapshot_path(name: &str) -> PathBuf {
     std::env::temp_dir().join(format!(
-        "psi-dec-gdn-state-unload-load-{}-{name}.state",
+        "khalamari-gdn-state-unload-load-{}-{name}.state",
         std::process::id()
     ))
 }

@@ -29,9 +29,9 @@ fn test_audio_source_registration_owns_store_entry() {
 }
 
 #[test]
-#[ignore = "requires PSI_DEC_QWEN3_ASR_MODEL_DIR and the pinned local checkpoint"]
+#[ignore = "requires KHALAMARI_QWEN3_ASR_MODEL_DIR and the pinned local checkpoint"]
 fn test_audio_processor_materializes_registered_source() {
-    let model_dir = std::env::var("PSI_DEC_QWEN3_ASR_MODEL_DIR").unwrap();
+    let model_dir = std::env::var("KHALAMARI_QWEN3_ASR_MODEL_DIR").unwrap();
     let config = init_qwen3_asr_config(&model_dir).unwrap();
     let store = inference_executor_core::checkpoint::SafeTensorStore::from_model_dir(&model_dir).unwrap();
     let names = store.index().tensor_names().collect::<Vec<_>>();

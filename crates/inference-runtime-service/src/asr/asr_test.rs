@@ -25,9 +25,9 @@ fn test_parse_transcription_metadata() {
 }
 
 #[test]
-#[ignore = "requires PSI_DEC_QWEN3_ASR_MODEL_DIR"]
+#[ignore = "requires KHALAMARI_QWEN3_ASR_MODEL_DIR"]
 fn test_target_prompt_contract() {
-    let model_dir = std::env::var("PSI_DEC_QWEN3_ASR_MODEL_DIR").unwrap();
+    let model_dir = std::env::var("KHALAMARI_QWEN3_ASR_MODEL_DIR").unwrap();
     let model_dir = Path::new(&model_dir);
     let config = init_qwen3_asr_config(model_dir).unwrap();
     let tokenizer = tokenizer::load(model_dir).unwrap();

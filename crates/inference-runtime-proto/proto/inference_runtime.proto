@@ -1,6 +1,6 @@
 syntax = "proto3";
 
-package psi_dec.inference.v1;
+package khalamari.inference.v1;
 
 service InferenceRuntime {
   rpc TranscribeAudio(AudioTranscribeReq) returns (AudioTranscribeResp);

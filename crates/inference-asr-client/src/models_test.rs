@@ -33,12 +33,12 @@ fn test_vad_recurrence() {
 }
 
 #[test]
-#[ignore = "requires native speech assets and PSI_DEC_ASR_ORACLE reference data"]
+#[ignore = "requires native speech assets and KHALAMARI_ASR_ORACLE reference data"]
 fn test_models_migration() {
     let config = LanguageConfig::default();
     let mut vad = Vad::load().unwrap();
     let mut model = AcousticModel::load(&config).unwrap();
-    let path = std::env::var("PSI_DEC_ASR_ORACLE").expect("set PSI_DEC_ASR_ORACLE to the migration reference JSON");
+    let path = std::env::var("KHALAMARI_ASR_ORACLE").expect("set KHALAMARI_ASR_ORACLE to the migration reference JSON");
     let cases: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
     for case in cases.as_array().unwrap() {
         let bytes = std::fs::read(case["pcm"].as_str().unwrap()).unwrap();

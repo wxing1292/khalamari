@@ -3,9 +3,9 @@ use inference_runtime_core::tokenizer::Tokenizer;
 use super::*;
 
 #[test]
-#[ignore = "requires PSI_DEC_QWEN3_ASR_MODEL_DIR"]
+#[ignore = "requires KHALAMARI_QWEN3_ASR_MODEL_DIR"]
 fn test_target_tokenizer_contract() {
-    let model_dir = std::env::var("PSI_DEC_QWEN3_ASR_MODEL_DIR").unwrap();
+    let model_dir = std::env::var("KHALAMARI_QWEN3_ASR_MODEL_DIR").unwrap();
     let tokenizer = load(Path::new(&model_dir)).unwrap();
 
     assert_eq!(tokenizer.token("<|audio_start|>").unwrap().value(), 151_669);

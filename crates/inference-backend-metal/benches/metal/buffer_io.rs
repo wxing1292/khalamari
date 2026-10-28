@@ -14,7 +14,7 @@ use inference_backend_metal::metal::BufferIOFile;
 use inference_backend_metal::metal::BufferIOFileCacheMode;
 use inference_backend_metal::metal::Device;
 
-const BENCH_DIR_ENV: &str = "PSI_DEC_BUFFER_IO_BENCH_DIR";
+const BENCH_DIR_ENV: &str = "KHALAMARI_BUFFER_IO_BENCH_DIR";
 const BUFFER_MIB_VALUES: [u64; 3] = [4, 64, 128];
 const MIB_BYTES: u64 = 1024 * 1024;
 const PATTERN_LEN_BYTES: usize = 1024 * 1024;
@@ -141,7 +141,7 @@ fn bench_dir() -> PathBuf {
 fn bench_file_path(bench_dir: &std::path::Path, len_bytes: u64) -> PathBuf {
     let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
     bench_dir.join(format!(
-        "psi-dec-buffer-io-bench-{}-{timestamp}-{len_bytes}",
+        "khalamari-buffer-io-bench-{}-{timestamp}-{len_bytes}",
         std::process::id()
     ))
 }

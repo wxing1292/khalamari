@@ -1399,7 +1399,7 @@ mod tests {
     fn test_path(name: &str) -> PathBuf {
         let id = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed);
         std::env::temp_dir().join(format!(
-            "psi-dec-state-snapshot-test-{}-{name}-{id}",
+            "khalamari-state-snapshot-test-{}-{name}-{id}",
             std::process::id()
         ))
     }

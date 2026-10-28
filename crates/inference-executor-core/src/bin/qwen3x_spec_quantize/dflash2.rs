@@ -50,7 +50,7 @@ pub fn convert(input_dir: &Path, output_dir: &Path, group_size: usize, bits: usi
 
         Ok(ConversionPlan {
             model_name: "DFlash2",
-            format: "psi-dec-dflash2-affine",
+            format: "khalamari-dflash2-affine",
             source_max_rank: 3,
             group_size,
             bits,

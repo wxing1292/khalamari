@@ -471,7 +471,7 @@ See [`qwen3_asr.md`](qwen3_asr.md) for the resource and executor contract.
 
 ### gRPC audio transcription
 
-The Qwen3-ASR gRPC listener also provides `psi_dec.inference.v1.InferenceRuntime/TranscribeAudio`.
+The Qwen3-ASR gRPC listener also provides `khalamari.inference.v1.InferenceRuntime/TranscribeAudio`.
 It accepts one `AudioTranscribeReq` and returns one `AudioTranscribeResp`.
 The request contains `wav` bytes, `model`, optional `language` and optional `context`.
 The response contains `text` and `language`.
@@ -540,7 +540,7 @@ target/release/asr
 Capture stops automatically after 30 seconds. Select a device or a shorter duration when needed:
 
 ```sh
-target/release/asr --device 0 --duration 10 --context 'psi-dec, cache, LRU'
+target/release/asr --device 0 --duration 10 --context 'khalamari, cache, LRU'
 ```
 
 Convert an existing recording and transcribe it:
@@ -608,7 +608,7 @@ The Rust executable statically links ONNX Runtime and embeds Silero v6.
 Cargo prepares the static runtime during the build. Recording requires no ORT shared library or library-path configuration.
 Whisper supplies language observations. With experimental ASR overlap, it also aligns the Qwen text to audio.
 Silero v6 supplies speech activity. Both auxiliary models run on CPU.
-The existing psi-dec Qwen3-ASR service produces every transcript.
+The existing khalamari Qwen3-ASR service produces every transcript.
 Use `--lid-model /absolute/path/to/local-model` for an existing faster-whisper checkpoint.
 `--model-cache` selects the external Whisper asset directory.
 `--vad-model`, `--onnx-runtime`, and the corresponding JSON fields are removed.
@@ -925,15 +925,15 @@ means that the stream failed.
 The generation RPC is a model-serving substrate. It is not an agent protocol. A future Codex-compatible adapter can
 own durable thread state, approvals, tools, commands, and item history above these RPCs.
 
-| Current psi-dec concept | Codex app-server concept | Current difference |
+| Current khalamari concept | Codex app-server concept | Current difference |
 | --- | --- | --- |
-| gRPC bidirectional stream | initialized JSON-RPC connection plus a loaded thread | psi-dec has no handshake or client capabilities |
-| resident runtime session | `Thread` loaded by `thread/start` or `thread/resume` | psi-dec state is transient and has no resumable thread ID |
-| one `GenerateMessagesRequest` | `turn/start` input | psi-dec receives only the new append-only turn input |
-| reasoning chunk | `item/reasoning/summaryTextDelta` | psi-dec streams model reasoning text, not an agent summary item |
-| text chunk | `item/agentMessage/delta` | psi-dec has no `item/started` or `item/completed` envelope |
-| atomic tool call | tool-call item lifecycle | psi-dec does not execute a tool or manage approval |
-| generation completion | `turn/completed` | psi-dec reports a model stop reason, not an agent turn status |
+| gRPC bidirectional stream | initialized JSON-RPC connection plus a loaded thread | khalamari has no handshake or client capabilities |
+| resident runtime session | `Thread` loaded by `thread/start` or `thread/resume` | khalamari state is transient and has no resumable thread ID |
+| one `GenerateMessagesRequest` | `turn/start` input | khalamari receives only the new append-only turn input |
+| reasoning chunk | `item/reasoning/summaryTextDelta` | khalamari streams model reasoning text, not an agent summary item |
+| text chunk | `item/agentMessage/delta` | khalamari has no `item/started` or `item/completed` envelope |
+| atomic tool call | tool-call item lifecycle | khalamari does not execute a tool or manage approval |
+| generation completion | `turn/completed` | khalamari reports a model stop reason, not an agent turn status |
 | no current operation | `turn/steer` and `turn/interrupt` | future agent adapter owns active-turn control |
 | no current operation | `thread/fork` | future agent adapter owns branch identity and state duplication |
 | caller rebuilds context | `thread/compact/start` | Pi currently owns summary generation and retry |
@@ -1146,7 +1146,7 @@ Use this provider shape in `~/.pi/agent/models.json`. Set the model ID and limit
 ```json
 {
   "providers": {
-    "psi-dec": {
+    "khalamari": {
       "baseUrl": "http://127.0.0.1:8000/v1",
       "api": "openai-completions",
       "apiKey": "unused",
@@ -1162,7 +1162,7 @@ Use this provider shape in `~/.pi/agent/models.json`. Set the model ID and limit
       },
       "models": [{
         "id": "qwen3.6-27b",
-        "name": "psi-dec Qwen3.6 27B",
+        "name": "khalamari Qwen3.6 27B",
         "reasoning": true,
         "thinkingLevelMap": {"xhigh": "xhigh", "max": "xhigh"},
         "input": ["text"],
@@ -1281,14 +1281,14 @@ set -o pipefail
   sw_vers
   sysctl -n machdep.cpu.brand_string hw.memsize
   set -x
-  PSI_QWEN35_CHECK_FINITE=1 PSI_QWEN35_STATE_TRACE=1 RUST_BACKTRACE=full \
+  KHALAMARI_QWEN35_CHECK_FINITE=1 KHALAMARI_QWEN35_STATE_TRACE=1 RUST_BACKTRACE=full \
     cargo run --release --bin qwen3_5_dense -- \
       --grpc-listen-addr 127.0.0.1:50061 \
       --http-listen-addr 127.0.0.1:8000 \
       --hf-model-dir ~/Workspace/models/Qwen3.8-27B-4bit \
       --hf-spec-model-dir ~/Workspace/models/Qwen3.8-27B-MTP-4bit \
       --spec-type mtp --num-spec-tokens 1 --logging debug
-} 2>&1 | tee /tmp/psi-dec-numerical-debug.log
+} 2>&1 | tee /tmp/khalamari-numerical-debug.log
 ```
 
 Send the complete log and the reproducing request. A screenshot omits the preceding request and stage context.
@@ -1382,7 +1382,7 @@ emit a separate INFO event. The `runtime` span belongs to the runtime-core event
 Enqueue and swap-in operations report request counts. Prepare, cancel, and commit operations report counts and latency
 percentiles.
 
-Set `PSI_QWEN35_STATE_TRACE=1` to write executor lifecycle lines to standard error. These lines include:
+Set `KHALAMARI_QWEN35_STATE_TRACE=1` to write executor lifecycle lines to standard error. These lines include:
 
 - Replay cache hit or miss keys
 - GDN restore and commit/publish decisions
@@ -1391,7 +1391,7 @@ Set `PSI_QWEN35_STATE_TRACE=1` to write executor lifecycle lines to standard err
 
 The timing fields are `gqa_us`, `gdn_states_us`, dependent `gdn_metadata_us`, and total `wall_us`.
 
-Set `PSI_GDN_STATE_TRACE=1` only for the detailed GDN request-state transition trace. Both settings are diagnostic.
+Set `KHALAMARI_GDN_STATE_TRACE=1` only for the detailed GDN request-state transition trace. Both settings are diagnostic.
 Leave them unset for throughput measurements.
 
 `--profile component` and `--profile operation` enable the same coarse CPU tree. It contains prepare, model

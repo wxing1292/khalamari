@@ -1,6 +1,6 @@
 # Legacy Firecracker Commands
 
-Warning: These commands are not verified or part of the supported `psi-dec` service workflow. Review the
+Warning: These commands are not verified or part of the supported `khalamari` service workflow. Review the
 [setup notes](setup.md) and each command before use.
 
 ## macOS layer

@@ -19,10 +19,10 @@ use inference_runtime_core::compute::ExecutorHibernationPlan;
 use inference_runtime_core::compute::QueryTokens;
 use inference_runtime_core::runtime::Token;
 
-const MODEL_27B_DIR_ENV: &str = "PSI_DEC_MODEL_STATE_IO_TEST_27B_MODEL_DIR";
-const MTP_27B_DIR_ENV: &str = "PSI_DEC_MODEL_STATE_IO_TEST_27B_MTP_MODEL_DIR";
-const MODEL_35B_DIR_ENV: &str = "PSI_DEC_MODEL_STATE_IO_TEST_35B_MODEL_DIR";
-const MTP_35B_DIR_ENV: &str = "PSI_DEC_MODEL_STATE_IO_TEST_35B_MTP_MODEL_DIR";
+const MODEL_27B_DIR_ENV: &str = "KHALAMARI_MODEL_STATE_IO_TEST_27B_MODEL_DIR";
+const MTP_27B_DIR_ENV: &str = "KHALAMARI_MODEL_STATE_IO_TEST_27B_MTP_MODEL_DIR";
+const MODEL_35B_DIR_ENV: &str = "KHALAMARI_MODEL_STATE_IO_TEST_35B_MODEL_DIR";
+const MTP_35B_DIR_ENV: &str = "KHALAMARI_MODEL_STATE_IO_TEST_35B_MTP_MODEL_DIR";
 const NUM_CACHE_PAGES: usize = 1024;
 const SNAPSHOT_COMPARE_CHUNK_BYTES: usize = 16 * 1024 * 1024;
 
@@ -121,7 +121,7 @@ fn run_hibernation_plan_unload_load(
 ) {
     run_one_decode(model);
     let temp_dir = std::env::temp_dir().join(format!(
-        "psi-dec-model-state-io-{plan_name}-{}-{}",
+        "khalamari-model-state-io-{plan_name}-{}-{}",
         std::process::id(),
         SystemTime::now()
             .duration_since(UNIX_EPOCH)

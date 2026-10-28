@@ -207,7 +207,7 @@ impl Default for LanguageConfig {
 }
 
 #[derive(Parser)]
-#[command(about = "Record or convert audio and transcribe through psi-dec. All online processing runs in Rust.")]
+#[command(about = "Record or convert audio and transcribe through khalamari. All online processing runs in Rust.")]
 pub struct Args {
     #[command(flatten)]
     pub config: Config,

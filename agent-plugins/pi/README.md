@@ -1,6 +1,6 @@
-# psi-dec Pi provider
+# khalamari Pi provider
 
-This Pi extension connects Pi to the psi-dec `GenerateMessagesStream` gRPC API. One HTTP/2 gRPC stream owns one
+This Pi extension connects Pi to the khalamari `GenerateMessagesStream` gRPC API. One HTTP/2 gRPC stream owns one
 resident runtime session. Pi owns conversation history and compaction.
 
 Use this guide to install the extension, configure Pi, and verify a request.
@@ -11,27 +11,27 @@ See the [service guide](../../docs/service.md) for checkpoint downloads and serv
 | Dependency or content | Contract |
 | --- | --- |
 | Pi | `0.84.4` or later |
-| Runtime | Node.js/npm and a built psi-dec text service |
+| Runtime | Node.js/npm and a built khalamari text service |
 | Input | Text and text tool results, no images |
 
 ## Install
 
 Install a detached global copy for normal use. This copy does not depend on the repository path.
 
-Run these commands from the psi-dec repository root:
+Run these commands from the khalamari repository root:
 
 ```sh
-psi_dec_extension="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/extensions/psi-dec"
+khalamari_extension="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/extensions/khalamari"
 
-mkdir -p "$psi_dec_extension/src"
-cp agent-plugins/pi/package.json "$psi_dec_extension/package.json"
-cp agent-plugins/pi/package-lock.json "$psi_dec_extension/package-lock.json"
+mkdir -p "$khalamari_extension/src"
+cp agent-plugins/pi/package.json "$khalamari_extension/package.json"
+cp agent-plugins/pi/package-lock.json "$khalamari_extension/package-lock.json"
 cp crates/inference-runtime-proto/proto/inference_runtime.proto \
-  "$psi_dec_extension/inference_runtime.proto"
+  "$khalamari_extension/inference_runtime.proto"
 sed 's#../../../crates/inference-runtime-proto/proto/inference_runtime.proto#../inference_runtime.proto#' \
-  agent-plugins/pi/src/index.ts > "$psi_dec_extension/src/index.ts"
+  agent-plugins/pi/src/index.ts > "$khalamari_extension/src/index.ts"
 (
-  cd "$psi_dec_extension"
+  cd "$khalamari_extension"
   npm ci --omit=dev --omit=peer
 )
 ```
@@ -56,7 +56,7 @@ pi install "$PWD"
 Pi stores a local package as a path reference. It does not copy the package. Run `pi remove "$PWD"` before you use
 the detached global copy.
 
-## Start psi-dec
+## Start khalamari
 
 Start one text-generation service with gRPC enabled.
 Run this example from the repository root to start Qwen3.8 27B with MTP:
@@ -121,9 +121,9 @@ Keep any existing provider entries.
         }
       ]
     },
-    "psi-dec": {
+    "khalamari": {
       "baseUrl": "http://127.0.0.1:50061",
-      "api": "psi-dec-messages",
+      "api": "khalamari-messages",
       "apiKey": "unused",
       "models": [
         {
@@ -157,13 +157,13 @@ The resident provider uses these fields:
 
 | Field | Owner and effect |
 | --- | --- |
-| `baseUrl` | The extension connects to this psi-dec gRPC endpoint. |
-| `api` | `psi-dec-messages` selects the extension transport. |
-| `id` | Pi uses this value for model selection. The running psi-dec service owns the loaded checkpoint. |
+| `baseUrl` | The extension connects to this khalamari gRPC endpoint. |
+| `api` | `khalamari-messages` selects the extension transport. |
+| `id` | Pi uses this value for model selection. The running khalamari service owns the loaded checkpoint. |
 | `contextWindow` | Pi uses this value for context accounting and compaction. It must not exceed the service limit. |
 | `maxTokens` | The extension sends this value as the default per-turn sampled-token limit. |
 | `temperature`, `top_k`, `top_p` | The extension sends these sampling values for each turn. |
-| `thinkingLevelMap` | Pi maps its thinking level before the extension maps the level to psi-dec reasoning effort. |
+| `thinkingLevelMap` | Pi maps its thinking level before the extension maps the level to khalamari reasoning effort. |
 
 Pi turn options override the model sampling defaults. The plugin does not read model settings from environment
 variables.
@@ -173,7 +173,7 @@ variables.
 Start an interactive Pi session with the resident provider:
 
 ```sh
-pi --model psi-dec/qwen3_5 --thinking high
+pi --model khalamari/qwen3_5 --thinking high
 ```
 
 Use the HTTP provider when you want a stateless request path:
@@ -208,11 +208,11 @@ These conditions control stream reuse:
 Confirm that Pi can see the configured model:
 
 ```sh
-pi --list-models psi-dec
+pi --list-models khalamari
 ```
 
 Run one request through the resident provider:
 
 ```sh
-pi --model psi-dec/qwen3_5 --thinking high --print "Reply with exactly: hello"
+pi --model khalamari/qwen3_5 --thinking high --print "Reply with exactly: hello"
 ```

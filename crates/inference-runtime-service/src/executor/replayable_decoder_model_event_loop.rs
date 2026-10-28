@@ -1136,7 +1136,7 @@ mod tests {
 
     fn test_snapshot_path(test_name: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
-            "psi-dec-{test_name}-{}-{:?}.state",
+            "khalamari-{test_name}-{}-{:?}.state",
             std::process::id(),
             std::thread::current().id()
         ))
@@ -1379,7 +1379,7 @@ mod tests {
                 },
                 vec![],
             ),
-            std::env::temp_dir().join("psi-dec-spec-lifecycle-test.state"),
+            std::env::temp_dir().join("khalamari-spec-lifecycle-test.state"),
         );
         let response = executor.execute(BatchDeviceRequest::new(
             1,

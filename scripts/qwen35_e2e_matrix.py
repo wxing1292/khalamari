@@ -125,7 +125,7 @@ def report(args):
         lines = [
             f"# Qwen3.5-family serving matrix: {title}",
             "",
-            "Times are batch wall latency in milliseconds. Positive differences mean psi-dec is slower.",
+            "Times are batch wall latency in milliseconds. Positive differences mean khalamari is slower.",
             "TTFT ends when every request has its first token. Decode ends when every request finishes.",
             "N/A is not a timing result. Native TensorFold 1.0.4 is not the Python fixed-chain path measured here.",
             "",
@@ -143,7 +143,7 @@ def report(args):
                     lines += [
                         f"### {kind}, requests = {req}",
                         "",
-                        "| ctx | input/request | psi-dec | oMLX | TensorFold Python | psi vs oMLX | psi vs TF |",
+                        "| ctx | input/request | khalamari | oMLX | TensorFold Python | khalamari vs oMLX | khalamari vs TF |",
                         "| ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
                     ]
                     for shape in shapes(args):
@@ -151,7 +151,7 @@ def report(args):
                             continue
                         found = [
                             rows.get(key(engine, mode, shape))
-                            for engine in ("psi-dec", "omlx", "tensorfold")
+                            for engine in ("khalamari", "omlx", "tensorfold")
                         ]
 
                         def cell(row):
@@ -289,7 +289,7 @@ def provenance(args):
             hashlib.sha256(
                 (args.root / "target/release/qwen3_5_dense").read_bytes()
             ).hexdigest()
-            if args.engine == "psi-dec"
+            if args.engine == "khalamari"
             else None
         ),
         hardware=dict(
@@ -306,7 +306,7 @@ def provenance(args):
                 subprocess.check_output(["sysctl", "-n", "hw.memsize"], text=True)
             ),
         ),
-        kv_cache="E4M3FN FP8" if args.engine == "psi-dec" else "BF16",
+        kv_cache="E4M3FN FP8" if args.engine == "khalamari" else "BF16",
         candidate_policy=(
             "fixed chain 7; full vocabulary" if args.mode == "dflash2" else args.mode
         ),
@@ -318,7 +318,7 @@ def provenance(args):
         script_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
         chunk=args.chunk,
         prefix_chunk=args.prefix_chunk,
-        mlx_cache_gib=args.mlx_cache_gib if args.engine != "psi-dec" else None,
+        mlx_cache_gib=args.mlx_cache_gib if args.engine != "khalamari" else None,
         omlx_hot_cache_gib=args.omlx_hot_cache_gib,
         cache_pages_per_request=args.cache_pages_per_request,
         shared_prefix=args.shared_prefix,
@@ -343,7 +343,7 @@ def provenance(args):
         path.write_text(json.dumps(record, indent=2) + "\n")
 
 
-class PSI:
+class KHALAMARI:
     def __init__(self, args, view, req):
         import grpc
         from grpc_tools import protoc
@@ -398,7 +398,7 @@ class PSI:
                 "--num-spec-tokens",
                 str(k),
             ]
-        self.log_path = args.out / f"psi-dec-{args.mode}-server.log"
+        self.log_path = args.out / f"khalamari-{args.mode}-server.log"
         self.log = self.log_path.open("ab")
         self.process = subprocess.Popen(
             command, cwd=args.root, stdout=self.log, stderr=subprocess.STDOUT
@@ -458,7 +458,7 @@ class PSI:
                 text = f.read().decode(errors="replace")
             if "kIOGPUCommandBufferCallbackErrorOutOfMemory" in text:
                 raise RuntimeError(
-                    "[METAL] Insufficient Memory: psi-dec replay submission"
+                    "[METAL] Insufficient Memory: khalamari replay submission"
                 ) from error
             raise
         with self.log_path.open("rb") as f:
@@ -920,7 +920,7 @@ async def run(args):
                 ),
             )
         return
-    if args.engine == "psi-dec" and args.mode.startswith("mtp"):
+    if args.engine == "khalamari" and args.mode.startswith("mtp"):
         depth = int(args.mode[-1])
         unavailable = [s for s in planned if s[3] < depth]
         for s in unavailable:
@@ -942,8 +942,8 @@ async def run(args):
         if not any(s[0] == req for s in planned):
             continue
         engine = (
-            PSI(args, view, req)
-            if args.engine == "psi-dec"
+            KHALAMARI(args, view, req)
+            if args.engine == "khalamari"
             else (
                 await OMLX.create(args, view, req)
                 if args.engine == "omlx"
@@ -960,7 +960,7 @@ async def run(args):
                     [token(0 if args.shared_prefix else r, p, vocab) for p in range(ctx)]
                     for r in range(req)
                 ]
-                if args.engine == "psi-dec" and args.mode.startswith("mtp"):
+                if args.engine == "khalamari" and args.mode.startswith("mtp"):
                     await engine.prime(
                         prefixes,
                         [
@@ -1035,7 +1035,7 @@ async def run(args):
             # Resume only after the memory budget is corrected.
             return 86
         finally:
-            if args.engine == "psi-dec":
+            if args.engine == "khalamari":
                 engine.close()
             else:
                 await engine.close()
@@ -1129,7 +1129,7 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument(
         "--engine",
-        choices=["psi-dec", "omlx", "tensorfold", "all", "report", "plan"],
+        choices=["khalamari", "omlx", "tensorfold", "all", "report", "plan"],
         required=True,
     )
     p.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
@@ -1202,7 +1202,7 @@ def main():
             args.omlx_python and args.tensorfold_python
         ), "--engine all requires both engine Python paths"
         for mode in args.modes:
-            for engine in ("psi-dec", "omlx", "tensorfold"):
+            for engine in ("khalamari", "omlx", "tensorfold"):
                 python = (
                     args.tensorfold_python
                     if engine == "tensorfold"

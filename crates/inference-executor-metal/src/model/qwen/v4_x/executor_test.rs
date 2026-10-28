@@ -18,7 +18,7 @@ use super::*;
 
 #[test]
 fn test_unsupported_metal_geometry_fails_before_weight_io() {
-    let missing_model = std::env::temp_dir().join(format!("psi-missing-qwen4x-{}", std::process::id()));
+    let missing_model = std::env::temp_dir().join(format!("khalamari-missing-qwen4x-{}", std::process::id()));
     assert!(!missing_model.exists());
     for unsupported in ["head_geometry", "expert_count", "shader_dimension", "residual_width"] {
         let mut model: Qwen4xModelConfig = serde_json::from_str(include_str!(concat!(
@@ -166,7 +166,7 @@ impl Drop for Fixture {
 impl Fixture {
     fn new(seed: u64, dense: bool) -> Self {
         let path = std::env::temp_dir().join(format!(
-            "psi-qwen4x-{}-{}",
+            "khalamari-qwen4x-{}-{}",
             std::process::id(),
             NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed)
         ));

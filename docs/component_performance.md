@@ -15,7 +15,7 @@ Those serving results do not replace or remeasure this component dataset.
 | Measured source | `705aaf3c30ae20b622ec88d2041b326233009a5f` plus uncommitted MoE candidate |
 | Machine | M3 Max, 40 GPU cores, 48 GiB, AC power, active desktop |
 | Checkpoints | GQA/GDN/dense `Qwen3.8-27B-4bit`, sparse/MoE `Qwen3.6-35B-A3B-4bit` |
-| Engine order | PSI/oMLX/TF/TF/oMLX/PSI, serial, accepted groups have zero new swap/normal pressure |
+| Engine order | KHALAMARI/oMLX/TF/TF/oMLX/KHALAMARI, serial, accepted groups have zero new swap/normal pressure |
 | Warmup/iterations/runs | Small input `3/5/3`, full Prefill `1/2/3` |
 | Metric | Submission-and-wait wall time, excludes load/compile/preparation |
 | Aggregation | Mean of two per-pass medians, drift is largest same-engine pass difference |
@@ -26,7 +26,7 @@ These framework versions apply to every table:
 
 | Table label | Framework and execution path | Measured version or source | Dependencies |
 | --- | --- | --- | --- |
-| PSI | psi-dec Rust/Metal | `705aaf3c30ae20b622ec88d2041b326233009a5f` plus the uncommitted MoE candidate | See worker hashes in the dataset |
+| KHALAMARI | khalamari Rust/Metal | `705aaf3c30ae20b622ec88d2041b326233009a5f` plus the uncommitted MoE candidate | See worker hashes in the dataset |
 | oMLX | oMLX Python/MLX | `0.7.1.dev1` | MLX `0.32.3`; MLX-LM `0.31.4.dev132+g94cdcae13`; MLX-VLM `0.7.7` |
 | TF Python | TensorFold Python/MLX | `0.6.6` | MLX `0.32.3`; MLX-LM `0.32.0` |
 
@@ -51,27 +51,27 @@ Ctx axis:
 
 These values are component forwards. They do not include complete model or service E2E latency.
 The hidden input is `BF16(((flat_index % 23)-11)*0.03125)`.
-GQA uses PSI FP8 KV and peer BF16 KV. This is a native-path comparison with different cache precision.
-GDN uses the same BF16-valued state fixture. PSI writes final BF16 snapshots. Peers update F32 live recurrence.
+GQA uses KHALAMARI FP8 KV and peer BF16 KV. This is a native-path comparison with different cache precision.
+GDN uses the same BF16-valued state fixture. KHALAMARI writes final BF16 snapshots. Peers update F32 live recurrence.
 Sparse MLP uses identical expert IDs and packed order. Complete MoE uses native routing, which can select different expert IDs.
 Peer request/sequence shapes remain intact. Only ctx-equivalent rows are collapsed in the tables.
 Full Prefill means one component forward from zero history. Different real prefixes were not constructed.
 
 ## Read the tables
 
-All latencies use milliseconds. Negative differences mean PSI is faster.
-Each difference is `100 * (PSI latency / peer latency - 1)`.
+All latencies use milliseconds. Negative differences mean KHALAMARI is faster.
+Each difference is `100 * (KHALAMARI latency / peer latency - 1)`.
 Requests are batch members. Q is the number of input tokens per request.
 Ctx `any` covers `0,1024,2048,4096,8192,16384,32768,65536` for the same hidden input.
 GDN ctx `nonzero` covers the positive values of that axis with one fixed state fixture.
 The JSON dataset retains the expanded ctx rows and their measurement keys.
 Recommendation: Interpret a small difference cautiously when it is below the displayed drift.
-One GQA case has no PSI latency because its partial-state capacity exceeds the shader index domain. Its peer values remain visible.
+One GQA case has no KHALAMARI latency because its partial-state capacity exceeds the shader index domain. Its peer values remain visible.
 The eight-request GQA full-Prefill retries use shape-specific capacities after the shared maximum capacity rejected the initial group.
 
 ## GQA
 
-| Operation | Req | Ctx | Q/req | PSI ms | oMLX ms | TF Python ms | PSI vs oMLX | PSI vs TF | Drift |
+| Operation | Req | Ctx | Q/req | KHALAMARI ms | oMLX ms | TF Python ms | KHALAMARI vs oMLX | KHALAMARI vs TF | Drift |
 | --- | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | append | 1 | 0 | 64 | 1.626 | 1.728 | 2.073 | -5.9% | -21.5% | 5.8% |
 | append | 1 | 0 | 128 | 2.844 | 2.928 | 3.617 | -2.9% | -21.4% | 3.8% |
@@ -188,7 +188,7 @@ The eight-request GQA full-Prefill retries use shape-specific capacities after t
 
 ## GDN
 
-| Operation | Req | Ctx | Q/req | PSI ms | oMLX ms | TF Python ms | PSI vs oMLX | PSI vs TF | Drift |
+| Operation | Req | Ctx | Q/req | KHALAMARI ms | oMLX ms | TF Python ms | KHALAMARI vs oMLX | KHALAMARI vs TF | Drift |
 | --- | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | append | 1 | 0 | 64 | 1.808 | 2.009 | 1.930 | -10.0% | -6.3% | 0.8% |
 | append | 1 | 0 | 128 | 3.287 | 3.341 | 3.274 | -1.6% | +0.4% | 0.3% |
@@ -233,7 +233,7 @@ The eight-request GQA full-Prefill retries use shape-specific capacities after t
 
 ## Dense MLP
 
-| Operation | Req | Ctx | Q/req | PSI ms | oMLX ms | TF Python ms | PSI vs oMLX | PSI vs TF | Drift |
+| Operation | Req | Ctx | Q/req | KHALAMARI ms | oMLX ms | TF Python ms | KHALAMARI vs oMLX | KHALAMARI vs TF | Drift |
 | --- | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | append | 1 | any | 64 | 3.486 | 3.380 | 3.388 | +3.1% | +2.9% | 0.2% |
 | append | 1 | any | 128 | 6.512 | 6.270 | 6.270 | +3.9% | +3.9% | 0.2% |
@@ -266,7 +266,7 @@ The eight-request GQA full-Prefill retries use shape-specific capacities after t
 
 ## Sparse MLP
 
-| Operation | Req | Ctx | Q/req | PSI ms | oMLX ms | TF Python ms | PSI vs oMLX | PSI vs TF | Drift |
+| Operation | Req | Ctx | Q/req | KHALAMARI ms | oMLX ms | TF Python ms | KHALAMARI vs oMLX | KHALAMARI vs TF | Drift |
 | --- | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | append | 1 | any | 64 | 1.337 | 1.511 | 1.520 | -11.5% | -12.0% | 6.5% |
 | append | 1 | any | 128 | 1.477 | 1.415 | 1.471 | +4.4% | +0.4% | 1.2% |
@@ -299,7 +299,7 @@ The eight-request GQA full-Prefill retries use shape-specific capacities after t
 
 ## Complete MoE
 
-| Operation | Req | Ctx | Q/req | PSI ms | oMLX ms | TF Python ms | PSI vs oMLX | PSI vs TF | Drift |
+| Operation | Req | Ctx | Q/req | KHALAMARI ms | oMLX ms | TF Python ms | KHALAMARI vs oMLX | KHALAMARI vs TF | Drift |
 | --- | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | append | 1 | any | 64 | 1.486 | 1.809 | 1.785 | -17.9% | -16.8% | 10.8% |
 | append | 1 | any | 128 | 1.764 | 1.795 | 1.822 | -1.7% | -3.2% | 1.7% |
@@ -366,5 +366,5 @@ python3 /private/tmp/psi-dec-moe-20261014/component_matrix.py --mode run
 
 The snapshot retains worker hashes, checkpoint metadata hashes, commands, versions, source identity, and counter baselines.
 Local raw logs remain under `target/perf/moe-705aaf3c-20261014/`. The repository dataset does not require those logs to read its values.
-Use the [component benchmark controller](executor_benchmarks.md#component-latency-matrix) for future PSI runs and resume.
+Use the [component benchmark controller](executor_benchmarks.md#component-latency-matrix) for future KHALAMARI runs and resume.
 A new comparison must record its own native peer commands and measurement identity. Do not append changed workers to this snapshot.

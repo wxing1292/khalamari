@@ -55,7 +55,7 @@ pub fn retain_recording(saved: Option<&Path>, pcm: &[i16]) -> Result<PathBuf> {
         return Ok(path.to_owned());
     }
     let (file, path) = tempfile::Builder::new()
-        .prefix("psi-dec-asr-")
+        .prefix("khalamari-asr-")
         .suffix(".wav")
         .tempfile()
         .map_err(recording_error)?
