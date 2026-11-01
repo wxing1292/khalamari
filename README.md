@@ -96,28 +96,40 @@ cargo build --release --bin asr
 target/release/asr --setup-models
 ```
 
-Start continuous transcription from the default microphone:
+Prepare the [experimental Community-1 reader](docs/qwen3_asr.md#speaker-reader-protocol) with its native CPU checkpoint in the adjacent `models/` directory.
+Then start continuous transcription from the default microphone:
 
 ```sh
-target/release/asr --stream
+target/release/asr --mode stream
 ```
 
 The default service URL is `http://127.0.0.1:8000/v1/audio/transcriptions`.
 Leave `--language` unset for English, Chinese, and mixed-language speech.
-Press Enter to stop capture and finish pending transcription. Ctrl-C cancels the session.
+Press Enter to stop capture and finish pending transcription. Ctrl-C cancels analysis and saves the recorded prefix.
+The client saves timestamp-named FLAC and JSONL files in the starting directory.
+After live transcription, it runs a separate offline pass. `--no-reprocess` disables that second pass.
+The default mode is `offline`. `--mode offline` records first, then runs the same offline pipeline without live drafts.
+Recording has no default duration limit. `--duration` limits capture in either mode.
+Use `--mode offline --input /absolute/path/to/recording.flac` for unpaced full-recording processing.
+Use `--discard-recording` to delete temporary audio instead of keeping an archive.
+The terminal and JSONL show recording-relative intervals, speaker IDs and text.
+Speaker IDs apply to one pass. Quiet or simultaneous voices can remain unresolved.
+See [speaker attribution](docs/qwen3_asr.md#speaker-attribution) for the model contract and measured limits.
+Use `--speaker-command PATH` to select a reader for both live and offline analysis.
+The [reader protocol](docs/qwen3_asr.md#speaker-reader-protocol) keeps buffering and speaker identity policy inside that backend.
 Use `--list-devices` to list microphones and `--device 0` to select one.
 ONNX Runtime is statically linked, and Silero VAD is embedded. Recording requires no ORT shared-library configuration.
 
 To use the service's gRPC listener instead:
 
 ```sh
-target/release/asr --stream --transport grpc --url http://127.0.0.1:50051
+target/release/asr --mode stream --transport grpc --url http://127.0.0.1:50051
 ```
 
 To replay an audio file at recording speed and emit JSON events:
 
 ```sh
-target/release/asr --stream --input /absolute/path/to/recording.m4a --json
+target/release/asr --mode stream --input /absolute/path/to/recording.m4a --json
 ```
 
 See the [client guide](docs/service.md#microphone-and-file-client) for configuration, vocabulary context, overlap, and the transcript editor.

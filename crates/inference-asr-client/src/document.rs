@@ -5,12 +5,14 @@ use serde::Serialize;
 
 use crate::audio::SAMPLE_RATE;
 use crate::segment::AudioEvent;
+use crate::transcript::SpeakerTurn;
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Update {
     Partial(Line),
     Final(Line),
+    Speakers(Line),
     Correction(Correction),
 }
 
@@ -18,10 +20,27 @@ pub enum Update {
 pub struct Line {
     pub segment: u64,
     pub revision: u64,
-    pub start_sample: u64,
-    pub end_sample: u64,
+    #[serde(rename = "start_sample")]
+    pub start: u64,
+    #[serde(rename = "end_sample")]
+    pub end: u64,
     pub sample_rate: usize,
     pub text: String,
+    #[serde(default)]
+    pub turns: Vec<SpeakerTurn>,
+}
+
+impl Line {
+    pub fn display(&self) -> String {
+        if self.turns.is_empty() {
+            return self.text.clone();
+        }
+        self.turns
+            .iter()
+            .map(SpeakerTurn::display)
+            .collect::<Vec<_>>()
+            .join(" | ")
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -49,27 +68,36 @@ impl Document {
         self.draft.as_ref()
     }
 
-    pub fn observe(&mut self, event: &AudioEvent) {
+    /// Returns whether trusted session output changes the document projection.
+    pub fn observe(&mut self, event: &AudioEvent) -> bool {
         let line = Line {
             segment: event.segment,
             revision: event.revision,
-            start_sample: event.start_sample,
-            end_sample: event.end_sample,
-            sample_rate: event.sample_rate,
-            text: event.transcript.text.clone(),
+            start: event.start,
+            end: event.end,
+            sample_rate: event.result.transcript.sample_rate,
+            text: event.result.transcript.text.clone(),
+            turns: event.result.transcript.turns.clone(),
         };
         self.commit(match event.kind {
             "partial" => Update::Partial(line),
             "final" => Update::Final(line),
+            "speakers" => Update::Speakers(line),
             _ => unreachable!("speech session emits recognition events"),
-        });
+        })
     }
 
-    /// Validates replay and correction input. A closed segment only accepts explicit corrections.
+    /// Validates replay and correction input. Final text accepts explicit corrections; speaker labels can be revised.
     pub fn apply(&mut self, update: Update) -> Result<()> {
         match &update {
-            Update::Partial(line) | Update::Final(line)
-                if line.sample_rate != SAMPLE_RATE || line.start_sample >= line.end_sample || line.revision == 0 =>
+            Update::Partial(line) | Update::Final(line) | Update::Speakers(line)
+                if line.sample_rate != SAMPLE_RATE
+                    || line.start >= line.end
+                    || line.revision == 0
+                    || line
+                        .turns
+                        .iter()
+                        .any(|turn| turn.start < line.start || turn.start > turn.end || turn.end > line.end) =>
             {
                 return Err(Error::invalid_argument(
                     "transcript event requires a nonempty 16 kHz sample range",
@@ -78,10 +106,7 @@ impl Document {
             Update::Final(line) => {
                 if line.segment >= self.lines.len() as u64
                     && (line.segment != self.lines.len() as u64
-                        || self
-                            .lines
-                            .last()
-                            .is_some_and(|previous| line.start_sample < previous.end_sample)
+                        || self.lines.last().is_some_and(|previous| line.start < previous.end)
                         || self
                             .draft
                             .as_ref()
@@ -105,14 +130,22 @@ impl Document {
                     ));
                 }
             },
+            Update::Speakers(line) => {
+                let current = self.lines.get(line.segment as usize);
+                if current.is_none_or(|current| current.start != line.start || current.end != line.end) {
+                    return Err(Error::invalid_argument(
+                        "speaker update must name an existing transcript range",
+                    ));
+                }
+            },
             Update::Partial(_) => {},
         }
         self.commit(update);
         Ok(())
     }
 
-    /// Apply trusted session output or an update validated/prepared by this owner.
-    pub fn commit(&mut self, update: Update) {
+    /// Applies trusted or owner-validated input. Returns whether the document projection changes.
+    pub fn commit(&mut self, update: Update) -> bool {
         match update {
             Update::Partial(line) => {
                 if line.segment >= self.lines.len() as u64
@@ -122,21 +155,46 @@ impl Document {
                     })
                 {
                     self.draft = Some(line);
+                    return true;
                 }
+                false
             },
             Update::Final(line) => {
                 if line.segment < self.lines.len() as u64 {
-                    return;
+                    return false;
                 }
                 if self.draft.as_ref().is_some_and(|draft| draft.segment <= line.segment) {
                     self.draft = None;
                 }
                 self.lines.push(line);
+                true
+            },
+            Update::Speakers(update) => {
+                let line = self.lines.get_mut(update.segment as usize);
+                if let Some(line) = line.filter(|line| {
+                    line.revision == update.revision && line.text == update.text && line.turns != update.turns
+                }) {
+                    line.turns = update.turns;
+                    return true;
+                }
+                false
             },
             Update::Correction(correction) => {
                 let line = &mut self.lines[correction.segment as usize];
                 line.text = correction.text;
+                if let Some((turn, others)) = line.turns.split_first_mut()
+                    && turn.speakers.len() == 1
+                    && others.iter().all(|other| other.speakers == turn.speakers)
+                {
+                    turn.start = line.start;
+                    turn.end = line.end;
+                    turn.text.clone_from(&line.text);
+                    line.turns.truncate(1);
+                } else {
+                    line.turns.clear();
+                }
                 line.revision = correction.revision;
+                true
             },
         }
     }
@@ -157,3 +215,7 @@ impl Document {
         })
     }
 }
+
+#[cfg(test)]
+#[path = "document_test.rs"]
+mod tests;

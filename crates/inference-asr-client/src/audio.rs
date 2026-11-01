@@ -1,10 +1,3 @@
-use std::fs::File;
-use std::io::BufWriter;
-use std::io::Cursor;
-use std::io::Seek;
-use std::io::Write;
-use std::path::Path;
-use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
 
@@ -15,73 +8,76 @@ use tokio::io::AsyncWriteExt;
 use tokio::process::Child;
 use tokio::process::ChildStdout;
 use tokio::process::Command;
+use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
-use crate::config::CaptureConfig;
+use crate::config::Config;
+use crate::config::Mode;
+use crate::recording::AudioRecordingWriter;
 
 pub const SAMPLE_RATE: usize = 16_000;
 pub const FRAME_SAMPLES: usize = 512;
-const WAV_SPEC: hound::WavSpec = hound::WavSpec {
-    channels: 1,
-    sample_rate: SAMPLE_RATE as u32,
-    bits_per_sample: 16,
-    sample_format: hound::SampleFormat::Int,
-};
 
-pub struct WavRecording(hound::WavWriter<BufWriter<File>>);
-impl WavRecording {
-    pub fn create(path: &Path) -> Result<Self> {
-        let file = File::create_new(path).map_err(recording_error)?;
-        Self::new(file)
+/// Capture owns the only recording writer. Analysis and compression have independent readers.
+pub struct AudioCapture {
+    stop: Option<oneshot::Sender<()>>,
+    task: JoinHandle<Result<()>>,
+}
+
+impl AudioCapture {
+    pub fn start(mut source: FfmpegSource, mut recording: AudioRecordingWriter) -> Self {
+        let (stop, mut requested) = oneshot::channel();
+        let task = tokio::spawn(async move {
+            let result = async {
+                let mut stopping = false;
+                let mut deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+                loop {
+                    tokio::select! {
+                        frame = source.next_frame() => {
+                            let Some(frame) = frame? else { break; };
+                            tokio::task::block_in_place(|| recording.append(frame))?;
+                            if !stopping {
+                                deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+                            }
+                        },
+                        _ = &mut requested, if !stopping => {
+                            stopping = true;
+                            source.stop().await?;
+                            deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+                        },
+                        _ = tokio::time::sleep_until(deadline) => {
+                            return Err(Error::deadline_exceeded(if stopping {
+                                "FFmpeg did not stop within 5 seconds"
+                            } else {
+                                "no audio received for 15 seconds; check input device and microphone permission"
+                            }));
+                        },
+                    }
+                }
+                source.finish().await
+            }
+            .await;
+            let sealed = tokio::task::block_in_place(|| recording.stop());
+            result.and(sealed)
+        });
+        Self { stop: Some(stop), task }
     }
 
-    fn new(file: File) -> Result<Self> {
-        Ok(Self(
-            hound::WavWriter::new(BufWriter::new(file), WAV_SPEC).map_err(recording_error)?,
-        ))
+    pub fn stop(&mut self) {
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
     }
 
-    pub fn write(&mut self, pcm: &[i16]) -> Result<()> {
-        write_samples(&mut self.0, pcm)
-    }
-
-    pub fn finish(self) -> Result<()> {
-        self.0.finalize().map_err(recording_error)
+    pub async fn wait(&mut self) -> Result<()> {
+        (&mut self.task).await.expect("capture task must not panic")
     }
 }
 
-pub fn retain_recording(saved: Option<&Path>, pcm: &[i16]) -> Result<PathBuf> {
-    if let Some(path) = saved {
-        return Ok(path.to_owned());
+impl Drop for AudioCapture {
+    fn drop(&mut self) {
+        self.stop();
     }
-    let (file, path) = tempfile::Builder::new()
-        .prefix("khalamari-asr-")
-        .suffix(".wav")
-        .tempfile()
-        .map_err(recording_error)?
-        .keep()
-        .map_err(recording_error)?;
-    let mut recording = WavRecording::new(file)?;
-    recording.write(pcm)?;
-    recording.finish()?;
-    Ok(path)
-}
-
-fn write_samples(writer: &mut hound::WavWriter<impl Write + Seek>, pcm: &[i16]) -> Result<()> {
-    // The fixed mono i16 header uses 36 RIFF bytes before the sample payload.
-    let remaining = (u64::from(u32::MAX) - 36) / 2 - u64::from(writer.len());
-    if pcm.len() as u64 > remaining {
-        return Err(Error::resource_exhausted("saved WAV exceeds the RIFF size limit"));
-    }
-    let mut output = writer.get_i16_writer(pcm.len() as u32);
-    for &sample in pcm {
-        output.write_sample(sample);
-    }
-    output.flush().map_err(recording_error)
-}
-
-fn recording_error(error: impl std::fmt::Display) -> Error {
-    Error::unavailable(format!("WAV output: {error}"))
 }
 
 /// Owns the FFmpeg process, both output pipes, and an incomplete PCM frame.
@@ -90,16 +86,18 @@ pub struct FfmpegSource {
     child: Child,
     stdout: ChildStdout,
     errors: Option<JoinHandle<Vec<u8>>>,
-    pending: Vec<u8>,
+    frame: [u8; FRAME_SAMPLES * 2],
+    filled: usize,
 }
 
 impl FfmpegSource {
-    pub fn open(config: &CaptureConfig, streaming: bool) -> Result<Self> {
+    pub fn open(settings: &Config) -> Result<Self> {
+        let config = &settings.capture;
         let mut command = Command::new(&config.ffmpeg);
         command.args(["-hide_banner", "-loglevel", "error", "-nostats"]);
         match &config.input {
             Some(path) => {
-                if streaming {
+                if settings.mode == Mode::Stream {
                     command.arg("-re");
                 }
                 command.arg("-i").arg(path);
@@ -113,7 +111,7 @@ impl FfmpegSource {
                 command.args(["-f", "avfoundation", "-i", &format!("none:{}", config.device)]);
             },
         }
-        if let Some(duration) = config.duration.filter(|_| config.input.is_none() || streaming) {
+        if let Some(duration) = config.duration {
             command.arg("-t").arg(duration.to_string());
         }
         command.args([
@@ -155,40 +153,29 @@ impl FfmpegSource {
             child,
             stdout,
             errors: Some(errors),
-            pending: Vec::with_capacity(FRAME_SAMPLES * 2),
+            frame: [0; FRAME_SAMPLES * 2],
+            filled: 0,
         })
     }
 
     /// The pending bytes belong to the source, so cancellation preserves a partial read.
-    pub async fn next_frame(&mut self) -> Result<Option<Vec<i16>>> {
-        while self.pending.len() < FRAME_SAMPLES * 2 {
-            let mut bytes = [0; FRAME_SAMPLES * 2];
-            let needed = FRAME_SAMPLES * 2 - self.pending.len();
+    pub async fn next_frame(&mut self) -> Result<Option<&[u8]>> {
+        while self.filled < self.frame.len() {
             let count = self
                 .stdout
-                .read(&mut bytes[..needed])
+                .read(&mut self.frame[self.filled..])
                 .await
                 .map_err(|e| Error::unavailable(format!("FFmpeg audio read: {e}")))?;
             if count == 0 {
                 break;
             }
-            self.pending.extend_from_slice(&bytes[..count]);
+            self.filled += count;
         }
-        if !self.pending.len().is_multiple_of(2) {
+        if !self.filled.is_multiple_of(2) {
             return Err(Error::invalid_argument("FFmpeg returned an incomplete i16 sample"));
         }
-        if self.pending.is_empty() {
-            return Ok(None);
-        }
-        let frame = self
-            .pending
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .map(|p| i16::from_le_bytes([p[0], p[1]]))
-            .collect();
-        self.pending.clear();
-        Ok(Some(frame))
+        let len = std::mem::take(&mut self.filled);
+        Ok((len != 0).then_some(&self.frame[..len]))
     }
 
     pub async fn stop(&mut self) -> Result<()> {
@@ -229,14 +216,6 @@ impl Drop for FfmpegSource {
             errors.abort();
         }
     }
-}
-
-pub fn wav(samples: &[i16]) -> Vec<u8> {
-    let mut buffer = Cursor::new(Vec::with_capacity(samples.len() * 2 + 44));
-    let mut writer = hound::WavWriter::new(&mut buffer, WAV_SPEC).expect("in-memory WAV header");
-    write_samples(&mut writer, samples).expect("bounded in-memory WAV samples");
-    writer.finalize().expect("in-memory WAV finalize");
-    buffer.into_inner()
 }
 
 /// Search 10-ms RMS cells. Prefer a sustained quiet interval over a consonant closure.

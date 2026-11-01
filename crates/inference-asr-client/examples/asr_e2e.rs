@@ -183,24 +183,45 @@ async fn run(args: Args) -> Result<bool> {
         )?;
         let mut flags = case.arguments(frames as u64)?;
         flags.extend([
+            "--discard-recording".into(),
             "--url".into(),
             args.url.clone(),
             "--input".into(),
             case.file.to_string_lossy().into_owned(),
         ]);
-        let replay_flags = [flags.as_slice(), &["--stream".into(), "--json".into()]].concat();
+        let replay_flags = [
+            flags.as_slice(),
+            &[
+                "--mode".into(),
+                "stream".into(),
+                "--no-reprocess".into(),
+                "--json".into(),
+            ],
+        ]
+        .concat();
         let settings: Value = serde_json::from_slice(
             &command(&binary, &[replay_flags.as_slice(), &["--print-config".into()]].concat()).await?,
         )
         .map_err(external)?;
-        let baseline: Value = serde_json::from_slice(
-            &command(
-                &binary,
-                &[flags.as_slice(), &["--no-stream".into(), "--json".into()]].concat(),
-            )
-            .await?,
+        let offline = command(
+            &binary,
+            &[flags.as_slice(), &["--mode".into(), "offline".into(), "--json".into()]].concat(),
         )
-        .map_err(external)?;
+        .await?;
+        let offline: Vec<Value> = std::str::from_utf8(&offline)
+            .map_err(external)?
+            .lines()
+            .map(serde_json::from_str)
+            .collect::<std::result::Result<_, _>>()
+            .map_err(external)?;
+        check(
+            !offline.is_empty()
+                && offline.iter().all(|event| {
+                    event["pass"] == "offline" && matches!(event["type"].as_str(), Some("final" | "speakers"))
+                }),
+            "offline analysis must emit final or speaker updates",
+        )?;
+        let baseline = json!({"text":final_text(&offline),"events":offline});
         let replay = replay(&binary, &replay_flags, frames as f64 / 16000.0).await?;
         let mut row = json!({
             "name":case.name,"command":[binary.to_string_lossy().into_owned()],
@@ -233,7 +254,6 @@ async fn run(args: Args) -> Result<bool> {
                 for key in [
                     "asr_requests",
                     "submitted_audio_seconds",
-                    "lid_windows",
                     "result_cache_hits",
                     "alignment_calls",
                 ] {
@@ -283,7 +303,11 @@ async fn run(args: Args) -> Result<bool> {
 async fn command(binary: &Path, flags: &[String]) -> Result<Vec<u8>> {
     let output = tokio::time::timeout(
         Duration::from_secs(150),
-        Command::new(binary).args(flags).kill_on_drop(true).output(),
+        Command::new(binary)
+            .current_dir(binary.parent().unwrap())
+            .args(flags)
+            .kill_on_drop(true)
+            .output(),
     )
     .await
     .map_err(|_| Error::deadline_exceeded("ASR command timed out"))?
@@ -301,6 +325,7 @@ async fn command(binary: &Path, flags: &[String]) -> Result<Vec<u8>> {
 async fn replay(binary: &Path, flags: &[String], seconds: f64) -> Result<Replay> {
     let started = Instant::now();
     let mut child = Command::new(binary)
+        .current_dir(binary.parent().unwrap())
         .args(flags)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -343,7 +368,7 @@ async fn replay(binary: &Path, flags: &[String], seconds: f64) -> Result<Replay>
                         if let Some(stats) = line.strip_prefix("Audio transport: ") {
                             result.transport = serde_json::from_str(stats).map_err(external)?;
                         }
-                        if result.capture_start.is_none() && line.starts_with("Streaming. Press Enter to stop") {
+                        if result.capture_start.is_none() && line.starts_with("Recording. Press Enter to stop") {
                             result.capture_start = Some(started.elapsed().as_secs_f64());
                         }
                         diagnostics.push_str(&line);
@@ -394,24 +419,37 @@ fn verify(case: &Case, replay: &Replay, frames: u64) -> Result<String> {
     )?;
     integer(&replay.transport["requested_samples"])?;
     let mut revisions = BTreeMap::new();
+    let mut finals = BTreeMap::new();
     let mut next_final = 0;
     let mut final_end = 0;
     for event in &replay.events {
         string(&event["text"])?;
         check(
-            matches!(event["type"].as_str(), Some("partial" | "final")),
+            matches!(event["type"].as_str(), Some("partial" | "final" | "speakers")),
             "unknown event type",
         )?;
         let segment = integer(&event["segment"])?;
         let revision = integer(&event["revision"])?;
         let start = integer(&event["start_sample"])?;
         let end = integer(&event["end_sample"])?;
-        check(segment >= next_final, "event after final")?;
-        check(
-            revision > revisions.get(&segment).copied().unwrap_or(0),
-            "revision did not advance",
-        )?;
-        revisions.insert(segment, revision);
+        if event["type"] == "speakers" {
+            let previous: &&Value = finals
+                .get(&segment)
+                .ok_or_else(|| Error::invalid_argument("speaker update precedes final"))?;
+            check(
+                ["revision", "start_sample", "end_sample", "text"]
+                    .iter()
+                    .all(|key| previous[*key] == event[*key]),
+                "speaker update changed finalized text or coordinates",
+            )?;
+        } else {
+            check(segment >= next_final, "event after final")?;
+            check(
+                revision > revisions.get(&segment).copied().unwrap_or(0),
+                "revision did not advance",
+            )?;
+            revisions.insert(segment, revision);
+        }
         check(start < end && end <= frames, "invalid audio range")?;
         let mut cursor = start;
         for span in array(&event["spans"])? {
@@ -420,8 +458,8 @@ fn verify(case: &Case, replay: &Replay, frames: u64) -> Result<String> {
             check(cursor < span_end && span_end <= end, "invalid ASR span range")?;
             cursor = span_end;
             if let Some(words) = span.get("words") {
-                let audio_start = integer(&span["audio_start_sample"])?;
-                let audio_end = integer(&span["audio_end_sample"])?;
+                let audio_start = integer(span.get("audio_start_sample").unwrap_or(&span["start_sample"]))?;
+                let audio_end = integer(span.get("audio_end_sample").unwrap_or(&span["end_sample"]))?;
                 check(
                     audio_start <= integer(&span["start_sample"])?
                         && cursor <= audio_end
@@ -437,7 +475,9 @@ fn verify(case: &Case, replay: &Replay, frames: u64) -> Result<String> {
                 }
                 if words.is_empty() {
                     check(
-                        normalize(string(&span["text"])?).is_empty() || span["alignment_status"] == "fallback",
+                        normalize(string(&span["text"])?).is_empty()
+                            || span.get("alignment_status").is_none()
+                            || span["alignment_status"] == "fallback",
                         "missing alignment without uncertainty",
                     )?;
                 } else {
@@ -453,8 +493,22 @@ fn verify(case: &Case, replay: &Replay, frames: u64) -> Result<String> {
                 }
             }
         }
+        check(event["pass"] == "live", "unexpected analysis pass")?;
+        for turn in array(&event["turns"])? {
+            let (a, b) = (integer(&turn["start_sample"])?, integer(&turn["end_sample"])?);
+            check(start <= a && a <= b && b <= end, "speaker turn outside its segment")?;
+            array(&turn["speakers"])?;
+        }
+        let turns: Vec<_> = array(&event["turns"])?
+            .iter()
+            .map(|turn| string(&turn["text"]))
+            .collect::<Result<_>>()?;
+        check(
+            normalize(&turns.join(" ")) == normalize(string(&event["text"])?),
+            "speaker turns changed transcript text",
+        )?;
         check(cursor == end, "incomplete ASR coverage")?;
-        for key in ["asr_requests", "lid_windows", "result_cache_hits", "alignment_calls"] {
+        for key in ["asr_requests", "result_cache_hits", "alignment_calls"] {
             integer(&event["metrics"][key])?;
         }
         let uploaded = integer(&event["transport"]["uploaded_samples"])?;
@@ -473,6 +527,7 @@ fn verify(case: &Case, replay: &Replay, frames: u64) -> Result<String> {
         if event["type"] == "final" {
             check(segment == next_final, "missing final segment")?;
             check(start >= final_end, "final audio overlap")?;
+            finals.insert(segment, event);
             final_end = end;
             next_final += 1;
         }

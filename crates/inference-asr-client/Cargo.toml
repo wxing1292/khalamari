@@ -14,7 +14,6 @@ path = "src/main.rs"
 clap = { workspace = true, features = ["derive"] }
 ct2rs = { workspace = true, features = ["accelerate", "ruy"] }
 futures-util = { workspace = true }
-hound = { workspace = true }
 inference-error = { workspace = true }
 inference-runtime-core = { path = "../inference-runtime-core" }
 inference-runtime-proto = { path = "../inference-runtime-proto" }
@@ -22,7 +21,7 @@ libc = { workspace = true }
 prost = { workspace = true }
 ort = { workspace = true, features = ["std", "download-binaries", "tls-native", "api-31"] }
 regex = { workspace = true }
-reqwest = { workspace = true, features = ["json", "multipart", "stream"] }
+reqwest = { workspace = true, features = ["json", "stream"] }
 rustfft = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
@@ -44,3 +43,6 @@ tokenizers = { workspace = true }
 tonic = { workspace = true, features = ["transport"] }
 unicode-normalization = { workspace = true }
 unicode-width = { workspace = true }
+
+[dev-dependencies]
+hound = { workspace = true }

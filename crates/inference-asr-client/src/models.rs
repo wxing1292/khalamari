@@ -1,5 +1,6 @@
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::LazyLock;
 
 use ct2rs::sys::ComputeType;
 use ct2rs::sys::Config;
@@ -10,6 +11,7 @@ use inference_error::Result;
 use ort::session::Session;
 use ort::session::builder::AutoDevicePolicy;
 use ort::value::Tensor;
+use regex::Regex;
 use rustfft::Fft;
 use rustfft::FftPlanner;
 use rustfft::num_complex::Complex32;
@@ -18,8 +20,12 @@ use tokenizers::Tokenizer;
 use crate::audio::FRAME_SAMPLES;
 use crate::audio::SAMPLE_RATE;
 use crate::config::LanguageConfig;
+use crate::config::ModelConfig;
+use crate::transcript::Word;
 
 pub const ALIGNMENT_STEP_SAMPLES: u64 = SAMPLE_RATE as u64 / 50;
+const MAX_WHISPER_FRAMES: usize = 3000;
+const FAST_LID_MIN_FRAMES: usize = 500;
 
 fn model_error(error: impl std::fmt::Display) -> Error {
     Error::unavailable(format!("CPU speech model: {error}"))
@@ -34,9 +40,8 @@ pub struct Vad {
 }
 
 impl Vad {
-    pub fn load() -> Result<Self> {
-        let environment = ort::init().build().map_err(model_error)?;
-        let mut session = Session::builder(&environment)
+    pub fn load(environment: &ort::environment::Environment) -> Result<Self> {
+        let mut session = Session::builder(environment)
             .map_err(model_error)?
             .with_auto_device(AutoDevicePolicy::PreferCPU)
             .map_err(model_error)?
@@ -73,6 +78,12 @@ impl Vad {
         Ok(Self { session, input, h, c })
     }
 
+    pub fn reset(&mut self) {
+        self.input.extract_tensor_mut().1.fill(0.0);
+        self.h.extract_tensor_mut().1.fill(0.0);
+        self.c.extract_tensor_mut().1.fill(0.0);
+    }
+
     pub fn probability(&mut self, pcm: &[i16]) -> Result<f32> {
         debug_assert!(pcm.len() <= FRAME_SAMPLES);
         let (_, input) = self.input.extract_tensor_mut();
@@ -107,13 +118,58 @@ impl Vad {
 #[derive(Clone, Debug)]
 pub struct AlignmentUnit {
     pub text: String,
-    pub start_sample: usize,
-    pub end_sample: usize,
+    pub start: usize,
+    pub end: usize,
     pub probability: f32,
+}
+
+static LEXEME: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"[\x{3400}-\x{9fff}]|[A-Za-z0-9_]+(?:['’][A-Za-z0-9_]+)*|[^\W\d_]+").unwrap());
+
+pub fn timed_words(text: &str, units: &[AlignmentUnit], audio_start: u64) -> Option<Vec<Word>> {
+    let mut cursor = 0;
+    let mut previous_end = 0;
+    let mut ranges = Vec::new();
+    for unit in units {
+        if !text[cursor..].starts_with(&unit.text) || unit.start < previous_end {
+            return None;
+        }
+        ranges.push((cursor..cursor + unit.text.len(), unit));
+        cursor += unit.text.len();
+        previous_end = unit.end;
+    }
+    if cursor != text.len() {
+        return None;
+    }
+    LEXEME
+        .find_iter(text)
+        .map(|word| {
+            let relevant: Vec<_> = ranges
+                .iter()
+                .filter(|(range, _)| range.start < word.end() && range.end > word.start())
+                .collect();
+            let first = relevant.first()?.1;
+            let last = relevant.last()?.1;
+            Some(Word {
+                speakers: Vec::new(),
+                text: word.as_str().to_owned(),
+                byte_start: word.start(),
+                start: audio_start + first.start as u64,
+                end: audio_start + last.end as u64,
+                alignment_score: relevant.iter().map(|(_, unit)| unit.probability).fold(1.0, f32::min),
+                timing_status: if first.start < last.end {
+                    "estimated"
+                } else {
+                    "unresolved"
+                },
+            })
+        })
+        .collect()
 }
 
 /// CPU Whisper is an acoustic classifier and aligner. Qwen owns transcription text.
 pub struct AcousticModel {
+    lid_min_frames: usize,
     whisper: Whisper,
     tokenizer: Tokenizer,
     mel: Mel,
@@ -122,11 +178,11 @@ pub struct AcousticModel {
 }
 
 impl AcousticModel {
-    pub fn load(config: &LanguageConfig) -> Result<Self> {
-        let path = if config.model.contains('/') {
-            Path::new(&config.model).to_path_buf()
+    pub fn load(config: &ModelConfig, language: &LanguageConfig) -> Result<Self> {
+        let path = if config.whisper.contains('/') {
+            Path::new(&config.whisper).to_path_buf()
         } else {
-            config.model_cache.join(format!("whisper-{}", config.model))
+            config.cache.join(format!("whisper-{}", config.whisper))
         };
         let whisper = Whisper::new(
             &path,
@@ -159,6 +215,11 @@ impl AcousticModel {
         let transcribe = special("<|transcribe|>")?;
         let mel = Mel::new(whisper.n_mels());
         Ok(Self {
+            lid_min_frames: if language.fast {
+                FAST_LID_MIN_FRAMES
+            } else {
+                MAX_WHISPER_FRAMES
+            },
             whisper,
             tokenizer,
             mel,
@@ -168,14 +229,16 @@ impl AcousticModel {
     }
 
     pub fn language(&mut self, pcm: &[i16]) -> Result<(String, f32)> {
-        let (features, frames) = self.mel.features(pcm);
-        let mut padded = vec![0.0; self.whisper.n_mels() * 3000];
-        let count = frames.min(3000);
-        for bin in 0..self.whisper.n_mels() {
-            padded[bin * 3000..bin * 3000 + count].copy_from_slice(&features[bin * frames..bin * frames + count]);
+        let (mut features, frames) = self.mel.features(pcm);
+        let width = frames.max(self.lid_min_frames);
+        if width != frames {
+            let mut padded = vec![0.0; self.whisper.n_mels() * width];
+            for (src, dst) in features.chunks_exact(frames).zip(padded.chunks_exact_mut(width)) {
+                dst[..frames].copy_from_slice(src);
+            }
+            features = padded;
         }
-        let (mut features, frames) = (padded, 3000);
-        let view = StorageView::new(&[1, self.whisper.n_mels(), frames], &mut features, Default::default())
+        let view = StorageView::new(&[1, self.whisper.n_mels(), width], &mut features, Default::default())
             .map_err(model_error)?;
         let detected = self.whisper.detect_language(&view).map_err(model_error)?;
         let best = &detected[0][0];
@@ -260,8 +323,8 @@ impl AcousticModel {
             }
             units.push(AlignmentUnit {
                 text: suffix.to_owned(),
-                start_sample,
-                end_sample,
+                start: start_sample,
+                end: end_sample,
                 probability,
             });
             cumulative = decoded;
@@ -321,6 +384,21 @@ fn language_code(name: &str) -> &str {
         .map_or("en", |(code, _)| code)
 }
 
+/// Slaney filter edges for canonical 16 kHz audio, including DC and Nyquist.
+fn mel_edges_hz(bins: usize) -> Vec<f64> {
+    let hz = |mel: f64| {
+        if mel < 15.0 {
+            (200.0 / 3.0) * mel
+        } else {
+            1000.0 * ((6.4f64.ln() / 27.0) * (mel - 15.0)).exp()
+        }
+    };
+    let max_mel = 15.0 + 8.0f64.ln() / (6.4f64.ln() / 27.0);
+    (0..bins + 2)
+        .map(|i| hz(max_mel * i as f64 / (bins + 1) as f64))
+        .collect()
+}
+
 /// Whisper's periodic Hann / reflected STFT / Slaney log-Mel contract.
 /// Add 160 zero samples before the reflected STFT. LID pads the resulting features separately.
 struct Mel {
@@ -332,17 +410,7 @@ struct Mel {
 
 impl Mel {
     fn new(bins: usize) -> Self {
-        let hz = |mel: f64| {
-            if mel < 15.0 {
-                (200.0 / 3.0) * mel
-            } else {
-                1000.0 * ((6.4f64.ln() / 27.0) * (mel - 15.0)).exp()
-            }
-        };
-        let max_mel = 15.0 + 8.0f64.ln() / (6.4f64.ln() / 27.0);
-        let points: Vec<_> = (0..bins + 2)
-            .map(|i| hz(max_mel * i as f64 / (bins + 1) as f64))
-            .collect();
+        let points = mel_edges_hz(bins);
         let filters = (0..bins)
             .map(|i| {
                 (0..201)
@@ -407,12 +475,15 @@ impl Mel {
             *value = (value.max(floor) + 4.0) / 4.0;
         }
         // CT2's Whisper encoder consumes at most 3000 frames.
-        if frames > 3000 {
+        if frames > MAX_WHISPER_FRAMES {
             for bin in 0..self.filters.len() {
-                features.copy_within(bin * frames..bin * frames + 3000, bin * 3000);
+                features.copy_within(
+                    bin * frames..bin * frames + MAX_WHISPER_FRAMES,
+                    bin * MAX_WHISPER_FRAMES,
+                );
             }
-            features.truncate(self.filters.len() * 3000);
-            (features, 3000)
+            features.truncate(self.filters.len() * MAX_WHISPER_FRAMES);
+            (features, MAX_WHISPER_FRAMES)
         } else {
             (features, frames)
         }

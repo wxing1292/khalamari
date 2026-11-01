@@ -19,45 +19,86 @@ use crate::audio::SAMPLE_RATE;
 #[derive(Clone, Debug, Default, Deserialize, Serialize, ClapArgs)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
-    #[command(flatten)]
+    #[arg(long, value_enum, default_value_t = Mode::default(), help_heading = "Workflow", help = "Stream live then reprocess, or record first and analyze offline")]
+    pub mode: Mode,
+    #[command(flatten, next_help_heading = "Input")]
     pub capture: CaptureConfig,
-    #[command(flatten)]
+    #[command(flatten, next_help_heading = "Service")]
     pub service: ServiceConfig,
-    #[command(flatten)]
+    #[command(flatten, next_help_heading = "Streaming")]
     pub streaming: StreamConfig,
-    #[command(flatten)]
+    #[command(flatten, next_help_heading = "Language")]
     pub language: LanguageConfig,
-    #[command(flatten)]
+    #[command(flatten, next_help_heading = "Models")]
+    pub models: ModelConfig,
+    #[command(flatten, next_help_heading = "Output")]
     pub output: OutputConfig,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Deserialize, Serialize, clap::ValueEnum)]
+#[serde(rename_all = "lowercase")]
+pub enum Mode {
+    Stream,
+    #[default]
+    Offline,
+}
+
+impl std::fmt::Display for Mode {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Stream => "stream",
+            Self::Offline => "offline",
+        })
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, ClapArgs)]
 #[serde(default, deny_unknown_fields)]
 pub struct CaptureConfig {
-    #[arg(id = "capture.device", long = "device", default_value_t = Self::default().device)]
+    #[arg(id = "capture.device", help = "Microphone device name or index", value_name = "DEVICE", long = "device", default_value_t = Self::default().device)]
     pub device: String,
-    #[arg(id = "capture.input", long = "input")]
+    #[arg(
+        id = "capture.input",
+        help = "Read a recording instead of the microphone",
+        value_name = "PATH",
+        long = "input"
+    )]
     pub input: Option<PathBuf>,
-    #[arg(id = "capture.duration", long = "duration")]
+    #[arg(
+        id = "capture.duration",
+        help = "Stop recording after this many seconds",
+        value_name = "SECONDS",
+        long = "duration"
+    )]
     pub duration: Option<f64>,
-    #[arg(id = "capture.ffmpeg", long = "ffmpeg", default_value_t = Self::default().ffmpeg)]
+    #[arg(skip)]
     pub ffmpeg: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, ClapArgs)]
 #[serde(default, deny_unknown_fields)]
 pub struct ServiceConfig {
-    #[arg(id = "service.transport", long = "transport", value_enum, default_value_t = Self::default().transport)]
+    #[arg(id = "service.transport", help = "ASR service transport", value_name = "TRANSPORT", long = "transport", value_enum, default_value_t = Self::default().transport)]
     pub transport: Transport,
-    #[arg(id = "service.url", long = "url", default_value_t = Self::default().url)]
+    #[arg(id = "service.url", help = "ASR service endpoint", value_name = "URL", long = "url", default_value_t = Self::default().url)]
     pub url: String,
-    #[arg(id = "service.model", long = "model", default_value_t = Self::default().model)]
+    #[arg(skip)]
     pub model: String,
-    #[arg(id = "service.language", long = "language")]
+    #[arg(
+        id = "service.language",
+        help = "Force a language; omit for mixed speech",
+        value_name = "LANGUAGE",
+        long = "language"
+    )]
     pub language: Option<String>,
-    #[arg(id = "service.context", long = "context")]
+    #[arg(
+        id = "service.context",
+        help = "Vocabulary or transcription context",
+        value_name = "TEXT",
+        long = "context"
+    )]
     pub context: Option<String>,
-    #[arg(id = "service.timeout", long = "timeout", default_value_t = Self::default().timeout)]
+    #[arg(skip)]
     pub timeout: f64,
 }
 
@@ -81,66 +122,117 @@ impl std::fmt::Display for Transport {
 #[derive(Clone, Debug, Deserialize, Serialize, ClapArgs)]
 #[serde(default, deny_unknown_fields)]
 pub struct StreamConfig {
-    #[arg(id = "streaming.enabled", long = "stream", conflicts_with = "no_stream")]
-    pub enabled: bool,
-    #[arg(id = "streaming.window_seconds", long = "window-seconds", default_value_t = Self::default().window_seconds)]
-    pub window_seconds: f64,
-    #[arg(id = "streaming.interval", long = "interval", default_value_t = Self::default().interval)]
-    pub interval: f64,
-    #[arg(id = "streaming.silence_seconds", long = "silence-seconds", default_value_t = Self::default().silence_seconds)]
-    pub silence_seconds: f64,
-    #[arg(id = "streaming.sentence_silence_seconds", long = "sentence-silence-seconds", default_value_t = Self::default().sentence_silence_seconds)]
-    pub sentence_silence_seconds: f64,
-    #[arg(id = "streaming.lookback_seconds", long = "lookback-seconds", default_value_t = Self::default().lookback_seconds)]
-    pub lookback_seconds: f64,
-    #[arg(id = "streaming.overlap_seconds", long = "overlap-seconds", default_value_t = Self::default().overlap_seconds)]
-    pub overlap_seconds: f64,
-    #[arg(id = "streaming.speech_threshold", long = "speech-threshold", default_value_t = Self::default().speech_threshold)]
-    pub speech_threshold: f32,
-    #[arg(id = "streaming.padding_seconds", long = "padding-seconds", default_value_t = Self::default().padding_seconds)]
-    pub padding_seconds: f64,
-    #[arg(id = "streaming.min_partial_seconds", long = "min-partial-seconds", default_value_t = Self::default().min_partial_seconds)]
-    pub min_partial_seconds: f64,
-    #[arg(id = "streaming.max_in_flight", long = "max-in-flight", default_value_t = Self::default().max_in_flight)]
-    pub max_in_flight: usize,
-    #[arg(id = "streaming.max_pending_finals", long = "max-pending-finals", default_value_t = Self::default().max_pending_finals)]
-    pub max_pending_finals: usize,
     #[arg(
-        id = "streaming.reuse_identical_audio",
-        long = "reuse-identical-audio",
-        conflicts_with = "no_reuse_identical_audio"
+        id = "streaming.reprocess",
+        help = "Run offline analysis after streaming",
+        long = "reprocess",
+        conflicts_with = "no_reprocess"
     )]
+    pub reprocess: bool,
+    #[arg(skip)]
+    pub window_seconds: f64,
+    #[arg(skip)]
+    pub interval: f64,
+    #[arg(skip)]
+    pub silence_seconds: f64,
+    #[arg(skip)]
+    pub sentence_silence_seconds: f64,
+    #[arg(skip)]
+    pub lookback_seconds: f64,
+    #[arg(skip)]
+    pub overlap_seconds: f64,
+    #[arg(skip)]
+    pub speech_threshold: f32,
+    #[arg(skip)]
+    pub padding_seconds: f64,
+    #[arg(skip)]
+    pub min_partial_seconds: f64,
+    #[arg(id = "streaming.max_in_flight", help = "Maximum concurrent ASR requests", value_name = "COUNT", long = "max-in-flight", default_value_t = Self::default().max_in_flight)]
+    pub max_in_flight: usize,
+    #[arg(skip)]
+    pub max_pending_finals: usize,
+    #[arg(skip)]
     pub reuse_identical_audio: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, ClapArgs)]
 #[serde(default, deny_unknown_fields)]
 pub struct LanguageConfig {
-    #[arg(id = "language.model", long = "lid-model", default_value_t = Self::default().model)]
-    pub model: String,
-    #[arg(id = "language.model_cache", long = "model-cache", default_value_os_t = Self::default().model_cache)]
-    pub model_cache: PathBuf,
-    #[arg(id = "language.confidence", long = "lid-confidence", default_value_t = Self::default().confidence)]
+    #[arg(
+        id = "language.fast",
+        long = "fast-lid",
+        help = "Use a five-second minimum Whisper input and require at least 0.9 confidence for a language hint"
+    )]
+    pub fast: bool,
+    #[arg(skip)]
     pub confidence: f32,
-    #[arg(id = "language.hop_seconds", long = "lid-hop-seconds", default_value_t = Self::default().hop_seconds)]
+    #[arg(skip)]
     pub hop_seconds: f64,
-    #[arg(id = "language.context_seconds", long = "lid-context-seconds", default_value_t = Self::default().context_seconds)]
+    #[arg(skip)]
     pub context_seconds: f64,
-    #[arg(id = "language.min_seconds", long = "lid-min-seconds", default_value_t = Self::default().min_seconds)]
+    #[arg(skip)]
     pub min_seconds: f64,
-    #[arg(id = "language.cache_windows", long = "lid-cache-windows", default_value_t = Self::default().cache_windows)]
+    #[arg(skip)]
     pub cache_windows: usize,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, ClapArgs)]
+#[serde(default, deny_unknown_fields)]
+pub struct ModelConfig {
+    #[arg(id = "models.whisper", help = "Whisper checkpoint name or directory", value_name = "NAME_OR_PATH", long = "lid-model", default_value_t = Self::default().whisper)]
+    pub whisper: String,
+    #[arg(id = "models.speaker_command", hide_default_value = true, value_name = "PATH", long = "speaker-command", default_value_os_t = Self::default().speaker_command,
+        help = "Speaker reader executable")]
+    pub speaker_command: PathBuf,
+    #[arg(
+        id = "models.speaker_model_dir",
+        long = "speaker-model-dir",
+        value_name = "PATH",
+        help = "Override the speaker reader checkpoint directory"
+    )]
+    pub speaker_model_dir: Option<PathBuf>,
+    #[arg(id = "models.cache", hide_default_value = true, help = "Directory for prepared Whisper checkpoints", value_name = "PATH", long = "model-cache", default_value_os_t = Self::default().cache)]
+    pub cache: PathBuf,
+}
+
+impl Default for ModelConfig {
+    fn default() -> Self {
+        Self {
+            whisper: "tiny".into(),
+            speaker_command: Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/asr-readers/community-1/reader"),
+            speaker_model_dir: None,
+            cache: Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/asr-models"),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, ClapArgs)]
 #[serde(default, deny_unknown_fields)]
 pub struct OutputConfig {
-    #[arg(id = "output.json", long = "json", conflicts_with = "no_json")]
+    #[arg(
+        id = "output.json",
+        help = "Write transcript events as JSON Lines",
+        long = "json",
+        conflicts_with = "no_json"
+    )]
     pub json: bool,
-    #[arg(id = "output.save", long = "save")]
+    #[arg(
+        id = "output.save",
+        help = "Save complete audio to a new WAV or FLAC file",
+        value_name = "PATH",
+        long = "save"
+    )]
     pub save: Option<PathBuf>,
     #[arg(
+        id = "output.discard_recording",
+        help = "Discard complete audio after processing",
+        long = "discard-recording",
+        conflicts_with = "output.save"
+    )]
+    pub discard_recording: bool,
+    #[arg(
         id = "output.editor",
+        value_name = "PATH",
         long = "editor",
         help = "Open a revisable transcript view and save events/text in a new directory"
     )]
@@ -175,7 +267,7 @@ impl Default for StreamConfig {
     fn default() -> Self {
         let silence_seconds = 0.5;
         Self {
-            enabled: false,
+            reprocess: true,
             window_seconds: 24.0,
             interval: 1.0,
             silence_seconds,
@@ -195,8 +287,7 @@ impl Default for StreamConfig {
 impl Default for LanguageConfig {
     fn default() -> Self {
         Self {
-            model: "tiny".into(),
-            model_cache: Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/asr-models"),
+            fast: false,
             confidence: 0.7,
             hop_seconds: 0.5,
             context_seconds: 0.5,
@@ -211,28 +302,41 @@ impl Default for LanguageConfig {
 pub struct Args {
     #[command(flatten)]
     pub config: Config,
-    #[arg(long = "config")]
+    #[arg(
+        long = "config",
+        value_name = "PATH",
+        help_heading = "Configuration",
+        help = "Read advanced settings from a JSON file"
+    )]
     config_file: Option<PathBuf>,
-    #[arg(long)]
+    #[arg(long, help_heading = "Configuration", help = "Print resolved settings and exit")]
     pub print_config: bool,
-    #[arg(long)]
+    #[arg(long, help_heading = "Setup", help = "List microphone devices and exit")]
     pub list_devices: bool,
-    #[arg(long, help = "Prepare the pinned external Whisper-tiny checkpoint and exit")]
+    #[arg(
+        long,
+        help_heading = "Setup",
+        help = "Prepare the pinned Whisper-tiny checkpoint and exit"
+    )]
     pub setup_models: bool,
     #[arg(
         long,
         requires = "setup_models",
+        value_name = "PATH",
+        help_heading = "Setup",
         help = "Copy the pinned checkpoint from a local CT2 snapshot"
     )]
     pub whisper_source: Option<PathBuf>,
-    #[arg(long, conflicts_with_all = ["capture.input", "no_stream", "setup_models", "list_devices"])]
+    #[arg(long, value_name = "PATH", help_heading = "Output", conflicts_with_all = ["capture.input", "mode", "setup_models", "list_devices"])]
     pub replay: Option<PathBuf>,
-    #[arg(long)]
-    no_stream: bool,
-    #[arg(long)]
+    #[arg(
+        long,
+        help_heading = "Output",
+        help = "Override JSON output from the configuration file"
+    )]
     no_json: bool,
-    #[arg(long)]
-    no_reuse_identical_audio: bool,
+    #[arg(long, help_heading = "Streaming", help = "Keep live results without an offline pass")]
+    no_reprocess: bool,
 }
 
 impl Args {
@@ -242,8 +346,7 @@ impl Args {
 
     fn resolve(matches: ArgMatches) -> Result<Self> {
         let mut args = Self::from_arg_matches(&matches).expect("clap validated the declared argument types");
-        let mut sentence_explicit =
-            matches.value_source("streaming.sentence_silence_seconds") == Some(ValueSource::CommandLine);
+        let mut sentence_explicit = false;
         let mut config = match &args.config_file {
             Some(path) => {
                 let bytes = std::fs::read(path)
@@ -261,19 +364,24 @@ impl Args {
                     &mut config.capture.input,
                     &mut config.output.save,
                     &mut config.output.editor,
+                    &mut config.models.speaker_model_dir,
                 ]
                 .into_iter()
                 .flatten()
                 {
-                    if path.is_relative() {
+                    if !path.as_os_str().is_empty() && path.is_relative() {
                         *path = directory.join(&*path);
                     }
                 }
-                if config.language.model_cache.is_relative() {
-                    config.language.model_cache = directory.join(&config.language.model_cache);
+                if config.models.cache.is_relative() {
+                    config.models.cache = directory.join(&config.models.cache);
                 }
-                if config.language.model.contains('/') && Path::new(&config.language.model).is_relative() {
-                    config.language.model = directory.join(&config.language.model).to_string_lossy().into();
+                if config.models.speaker_command.is_relative() {
+                    config.models.speaker_command = directory.join(&config.models.speaker_command);
+                }
+                let model = &mut config.models.whisper;
+                if model.contains('/') && Path::new(model).is_relative() {
+                    *model = directory.join(&*model).to_string_lossy().into();
                 }
                 if config.capture.ffmpeg.contains('/') && Path::new(&config.capture.ffmpeg).is_relative() {
                     config.capture.ffmpeg = directory.join(&config.capture.ffmpeg).to_string_lossy().into();
@@ -284,36 +392,28 @@ impl Args {
         };
         let mut value =
             serde_json::to_value(config).map_err(|e| Error::invalid_argument(format!("configuration: {e}")))?;
-        let serde_json::Value::Object(sections) =
-            serde_json::to_value(&args.config).map_err(|e| Error::invalid_argument(format!("configuration: {e}")))?
-        else {
-            unreachable!()
-        };
-        for (section, fields) in sections {
-            let serde_json::Value::Object(fields) = fields else {
-                unreachable!()
-            };
-            for (field, field_value) in fields {
-                if matches.value_source(&format!("{section}.{field}")) == Some(ValueSource::CommandLine) {
-                    value[&section][&field] = field_value;
-                }
+        let cli =
+            serde_json::to_value(&args.config).map_err(|e| Error::invalid_argument(format!("configuration: {e}")))?;
+        for id in matches.ids() {
+            let id = id.as_str();
+            if matches.value_source(id) != Some(ValueSource::CommandLine) {
+                continue;
+            }
+            if let Some((section, field)) = id.split_once('.') {
+                value[section][field] = cli[section][field].clone();
+            } else if let Some(setting) = cli.get(id) {
+                value[id] = setting.clone();
             }
         }
         config = serde_json::from_value(value).map_err(|e| Error::invalid_argument(format!("configuration: {e}")))?;
-        if args.no_stream {
-            config.streaming.enabled = false;
+        if args.no_reprocess {
+            config.streaming.reprocess = false;
         }
         if args.no_json {
             config.output.json = false;
         }
-        if args.no_reuse_identical_audio {
-            config.streaming.reuse_identical_audio = false;
-        }
         if args.replay.is_some() && config.output.editor.is_none() {
             return Err(Error::invalid_argument("replay requires an editor output directory"));
-        }
-        if args.replay.is_none() && !config.streaming.enabled && config.capture.duration.is_none() {
-            config.capture.duration = Some(30.0);
         }
         if !sentence_explicit {
             config.streaming.sentence_silence_seconds = sentence_silence(config.streaming.silence_seconds);
@@ -325,6 +425,9 @@ impl Args {
             .map(|language| language.trim().to_owned())
             .filter(|language| !language.is_empty());
         config.validate(args.replay.is_some())?;
+        if config.language.fast {
+            config.language.confidence = config.language.confidence.max(0.9);
+        }
         args.config = config;
         Ok(args)
     }
@@ -349,10 +452,19 @@ impl Config {
             return invalid("gRPC URL must be an HTTP origin without a path or query");
         }
         if self.service.model.trim().is_empty()
-            || self.language.model.trim().is_empty()
+            || self.models.whisper.trim().is_empty()
+            || self.models.speaker_command.as_os_str().is_empty()
             || self.capture.ffmpeg.trim().is_empty()
         {
-            return invalid("model names and FFmpeg executable must not be empty");
+            return invalid("model names and executable paths must not be empty");
+        }
+        if self
+            .models
+            .speaker_model_dir
+            .as_ref()
+            .is_some_and(|path| path.as_os_str().is_empty())
+        {
+            return invalid("speaker-model-dir must not be empty");
         }
         let timeout = Duration::try_from_secs_f64(self.service.timeout)
             .map_err(|_| Error::invalid_argument("ASR timeout must be a finite positive duration"))?;
@@ -360,17 +472,24 @@ impl Config {
             return invalid("ASR timeout must fit the monotonic clock");
         }
         if let Some(duration) = self.capture.duration
-            && (!(0.01..=(u64::MAX / SAMPLE_RATE as u64) as f64).contains(&duration)
-                || (!self.streaming.enabled && duration > 30.0))
+            && !(0.01..=(u64::MAX / SAMPLE_RATE as u64) as f64).contains(&duration)
         {
-            return invalid("invalid duration; collected audio must fit 30 seconds");
+            return invalid("duration must be at least 10 ms and fit the recording sample clock");
         }
         let s = &self.streaming;
-        if !(0.01..=s.window_seconds).contains(&s.interval)
-            || !(0.01..=30.0).contains(&s.window_seconds)
-            || (s.enabled && s.window_seconds < 2.0)
+        if self.output.discard_recording && self.output.save.is_some() {
+            return invalid("discard-recording conflicts with save");
+        }
+        if self
+            .output
+            .save
+            .as_ref()
+            .is_some_and(|p| !p.extension().is_some_and(|e| e == "flac" || e == "wav"))
         {
-            return invalid("invalid partial interval or window (streaming window: 2..30 seconds)");
+            return invalid("save must use a .flac or .wav extension");
+        }
+        if !(0.01..=s.window_seconds).contains(&s.interval) || !(2.0..=30.0).contains(&s.window_seconds) {
+            return invalid("invalid partial interval or window (analysis window: 2..30 seconds)");
         }
         if !(0.1..=5.0).contains(&s.silence_seconds) || !(0.1..=s.silence_seconds).contains(&s.sentence_silence_seconds)
         {
@@ -416,7 +535,7 @@ impl Config {
             return invalid("save must name a new file in an existing directory");
         }
         if let Some(path) = &self.output.editor {
-            if (!s.enabled && !replay) || self.output.json {
+            if (self.mode != Mode::Stream && !replay) || self.output.json {
                 return invalid("editor requires streaming and conflicts with JSON stdout");
             }
             if path.exists()

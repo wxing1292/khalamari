@@ -63,6 +63,16 @@ fn wav(path: &Path, pcm: &[u8], silence_samples: usize) -> Result<()> {
     writer.finalize().map_err(external)
 }
 
+fn settings(directory: &Path, name: &str, streaming: Value) -> Result<PathBuf> {
+    let path = directory.join(format!("{name}.json"));
+    std::fs::write(
+        &path,
+        serde_json::to_vec_pretty(&json!({"streaming":streaming})).unwrap(),
+    )
+    .map_err(external)?;
+    Ok(path)
+}
+
 pub async fn synthetic(directory: &Path, paired_overlap: bool) -> Result<Vec<Case>> {
     let mut audio = BTreeMap::new();
     for (name, voice, text) in [
@@ -116,7 +126,12 @@ pub async fn synthetic(directory: &Path, paired_overlap: bool) -> Result<Vec<Cas
     ] {
         let path = directory.join(format!("{name}.wav"));
         wav(&path, &audio[name], 16000)?;
-        cases.push(serde_json::from_value(json!({"name":name,"file":path,"expected_fragments":fragments,"context":context,"window_seconds":if name=="long-mixed"{8}else{24},"expected_final_reasons":if name=="long-mixed"{vec!["limit"]}else{vec![]}})).unwrap());
+        let config = settings(
+            directory,
+            name,
+            json!({"window_seconds":if name=="long-mixed"{8}else{24}}),
+        )?;
+        cases.push(serde_json::from_value(json!({"name":name,"file":path,"expected_fragments":fragments,"context":context,"config":config,"expected_final_reasons":if name=="long-mixed"{vec!["limit"]}else{vec![]}})).unwrap());
     }
     if paired_overlap {
         for (name, voice, text, language, fragments, counts) in [
@@ -149,7 +164,12 @@ pub async fn synthetic(directory: &Path, paired_overlap: bool) -> Result<Vec<Cas
             let path = directory.join(format!("{name}.wav"));
             wav(&path, &pcm, 32000)?;
             for overlap in [0, 1] {
-                let mut case = json!({"name":format!("{name}-overlap-{overlap}"),"file":path,"reference_text":text,"expected_fragments":fragments,"expected_occurrences":counts,"window_seconds":3,"interval":1,"overlap_seconds":overlap,"context":context});
+                let config = settings(
+                    directory,
+                    &format!("{name}-overlap-{overlap}"),
+                    json!({"window_seconds":3,"interval":1,"overlap_seconds":overlap}),
+                )?;
+                let mut case = json!({"name":format!("{name}-overlap-{overlap}"),"file":path,"reference_text":text,"expected_fragments":fragments,"expected_occurrences":counts,"config":config,"context":context});
                 if let Some(language) = language {
                     case["language"] = json!(language);
                 }
@@ -158,7 +178,12 @@ pub async fn synthetic(directory: &Path, paired_overlap: bool) -> Result<Vec<Cas
         }
         for name in ["mixed-native", "long-mixed"] {
             for overlap in [0, 1] {
-                cases.push(serde_json::from_value(json!({"name":format!("{name}-overlap-{overlap}"),"file":directory.join(format!("{name}.wav")),"reference_text":"Please open这个项目 and check缓存机制with streaming output.".repeat(if name=="long-mixed"{4}else{1}),"expected_fragments":["Please open","这个项目","缓存机制","streaming output"],"window_seconds":8,"overlap_seconds":overlap,"context":context})).unwrap());
+                let config = settings(
+                    directory,
+                    &format!("{name}-overlap-{overlap}"),
+                    json!({"window_seconds":8,"overlap_seconds":overlap}),
+                )?;
+                cases.push(serde_json::from_value(json!({"name":format!("{name}-overlap-{overlap}"),"file":directory.join(format!("{name}.wav")),"reference_text":"Please open这个项目 and check缓存机制with streaming output.".repeat(if name=="long-mixed"{4}else{1}),"expected_fragments":["Please open","这个项目","缓存机制","streaming output"],"config":config,"context":context})).unwrap());
             }
         }
     }
@@ -204,7 +229,8 @@ pub async fn official(directory: &Path) -> Result<Vec<Case>> {
         let name = format!("human-{first}-{second}");
         let path = directory.join(format!("{name}.wav"));
         wav(&path, &[&audio[first][..], &[0; 3200], &audio[second]].concat(), 16000)?;
-        result.push(serde_json::from_value(json!({"name":name,"file":path,"expected_fragments":["交易","writing for other people"],"window_seconds":8})).unwrap());
+        let config = settings(directory, &name, json!({"window_seconds":8}))?;
+        result.push(serde_json::from_value(json!({"name":name,"file":path,"expected_fragments":["交易","writing for other people"],"config":config})).unwrap());
     }
     Ok(result)
 }

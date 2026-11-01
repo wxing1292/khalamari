@@ -1,8 +1,20 @@
 # Future Work
 
 This file tracks unresolved implementation work and bounded investigations.
-Current behavior and completed designs belong in the [owning documents](README.md).
-[Engineering conventions](engineering_conventions.md) own shared optimization, validation, and replay rules.
+Current behavior belongs in the [owning documents](README.md).
+[Engineering conventions](engineering_conventions.md) define the verification rules.
+
+## Speaker attribution
+
+[Recording and speaker attribution](qwen3_asr.md#speaker-attribution) describes the implemented path and measured limits.
+The [matched Community-1 experiment](qwen3_asr.md#community-1-streaming-experiment) establishes a 30-second rolling baseline.
+Reduce repeated inference cost without discarding overlap context.
+Improve speaker identity consistency across windows, then measure DER and actual paced label latency.
+The candidate reader uses overlap correspondence and fixed/recent embedding references. It is not a calibrated online clustering model.
+Evaluate cached segmentation/embedding windows with global clustering before increasing the live context window.
+The pinned native pipeline exposes inference artifacts but keeps their layout private. Artifact composition needs an owning upstream API.
+Global reclustering cannot revise a sealed live prefix. Full-recording offline analysis remains a separate pass.
+Cross-recording enrollment and a local speaker/name registry remain separate future work.
 
 ## Qwen4x integration
 
@@ -141,6 +153,8 @@ The session uses CPU VAD, overlapping independent LID windows, language-aware Qw
   Measure genuine repetition retention, boundary omissions, insertions, names, negation, and final-output latency.
 - Replace approximate Whisper attention times when a reliable word aligner is available through the supported runtime.
 - Evaluate mixed-language errors that retain some Han characters and therefore bypass the current audio retry guard.
+  The `human-en-zh` offline replay omits `甚至出现交易` near a request boundary with zero or one second of ASR overlap.
+  The remaining Chinese suffix is recognized. The automatic Mandarin retry does not recover the omitted prefix.
 - Verify server request cancellation after client disconnect before adding a stronger cancellation guarantee.
 - Validate encoder windows and decoder prefixes against uncached execution before model-state reuse.
 - Keep raw transcription, optional Qwen3.8 27B cleanup, and identifier errors separate.

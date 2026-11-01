@@ -1,183 +1,246 @@
-use std::time::Duration;
-use std::time::Instant;
+use std::collections::VecDeque;
+use std::fs::File;
+use std::io::BufWriter;
+use std::path::PathBuf;
 
 use inference_error::Error;
 use inference_error::Result;
 
+use crate::audio::AudioCapture;
 use crate::audio::FfmpegSource;
-use crate::audio::WavRecording;
-use crate::audio::retain_recording;
 use crate::config::Config;
-use crate::config::samples;
+use crate::config::Mode;
 use crate::output::Output;
-use crate::service::AsrClient;
-use crate::service::AudioTranscribeReq;
+use crate::output::write_json;
+use crate::recording::AudioRecordingReader;
+use crate::recording::AudioRecordingWriter;
+use crate::recording::archive;
+use crate::recording::file_stem;
+use crate::segment::AnalysisPass;
 use crate::stream::AudioStream;
+use crate::stream::SpeechModels;
 use crate::terminal::TerminalInput;
 
+/// Capture, analysis, and archive have independent lifetimes and share one recording clock.
 pub struct AudioSession {
     config: Config,
     output: Output,
-    stream: Option<AudioStream>,
     input: Option<TerminalInput>,
-    saved: Option<WavRecording>,
-    capture: FfmpegSource,
+    recording: AudioRecordingReader,
+    stem: PathBuf,
+    capture: Option<AudioCapture>,
 }
 
 impl AudioSession {
-    pub async fn open(config: Config) -> Result<Self> {
+    pub async fn run(config: Config, cancelled: impl std::future::Future<Output = ()>) -> Result<()> {
         let output = Output::open(&config.output)?;
-        let stream = if config.streaming.enabled {
-            eprintln!("Loading native CPU speech models.");
-            Some(AudioStream::load(&config).await?)
-        } else {
-            None
-        };
+        let (recording, spool) = AudioRecordingWriter::create()?;
+        let reader = recording.reader();
         let input = TerminalInput::new(config.capture.input.is_none() || output.is_editor(), output.is_editor())?;
-        let saved = config.output.save.as_deref().map(WavRecording::create).transpose()?;
-        let capture = FfmpegSource::open(&config.capture, stream.is_some())?;
-
-        Ok(Self {
+        let stem = std::env::current_dir().map_err(session_error)?.join(file_stem()?);
+        let destination = if config.output.discard_recording {
+            None
+        } else {
+            Some(
+                config
+                    .output
+                    .save
+                    .clone()
+                    .unwrap_or_else(|| stem.with_extension("flac")),
+            )
+        };
+        let source = FfmpegSource::open(&config)?;
+        eprintln!("Recording recovery file: {} (16 kHz, mono, s16le)", spool.display());
+        let archive = destination.map(|destination| {
+            let recording = reader.clone();
+            let ffmpeg = config.capture.ffmpeg.clone();
+            tokio::spawn(async move {
+                archive(recording, &ffmpeg, &destination).await?;
+                eprintln!("Recording saved: {}", destination.display());
+                Ok(())
+            })
+        });
+        let capture = AudioCapture::start(source, recording);
+        let mut session = Self {
             config,
             output,
-            stream,
             input,
-            saved,
-            capture,
-        })
+            recording: reader,
+            stem,
+            capture: Some(capture),
+        };
+        eprintln!("Recording. Press Enter to stop and flush; Ctrl-C cancels analysis and saves the recording.");
+        let result = tokio::select! {
+            result = session.process() => result,
+            _ = cancelled => Err(Error::cancelled("analysis cancelled")),
+        };
+        let captured = session.stop_capture().await;
+        let result = captured.and(result).and(session.output.finish());
+        if let Some(task) = archive
+            && let Err(error) = task.await.expect("recording archive task must not panic")
+        {
+            if session.recording.end() == 0 {
+                return result.and(Err(error));
+            }
+            let path = spool.keep().map_err(session_error)?;
+            return Err(Error::unavailable(format!(
+                "{error}. Recover 16 kHz mono s16le audio at {}",
+                path.display()
+            )));
+        }
+        result
     }
 
-    pub async fn run(self) -> Result<()> {
-        let Self {
-            config,
-            mut output,
-            mut stream,
-            mut input,
-            mut saved,
-            mut capture,
-        } = self;
-        eprintln!(
-            "{}",
-            if stream.is_some() {
-                "Streaming. Press Enter to stop and flush; Ctrl-C cancels."
-            } else {
-                "Recording. Press Enter to stop; Ctrl-C cancels."
-            }
-        );
-        output.status(
-            "Recording. :replace ID TEXT | :sub OLD => NEW | Enter: stop/save | Ctrl-C: cancel",
+    async fn process(&mut self) -> Result<()> {
+        self.output.status(
+            "Recording. :replace ID TEXT | :sub OLD => NEW | Enter: stop | Ctrl-C: cancel",
             "",
         )?;
-        let mut collected = Vec::new();
-        let mut stopping = None;
-        let mut last_audio = Instant::now();
-        let mut capture_done = false;
-        loop {
-            if let Some(stream) = &mut stream {
-                stream.schedule()?;
-            }
-            if capture_done && stream.as_ref().is_none_or(AudioStream::is_drained) {
-                break;
-            }
-            let deadline = stopping.map_or(last_audio + Duration::from_secs(15), |started| {
-                started + Duration::from_secs(5)
-            });
-            tokio::select! {
-                frame = capture.next_frame(), if !capture_done => {
-                    let Some(frame) = frame? else {
-                        capture.finish().await?;
-                        capture_done = true;
-                        let samples = match &mut stream {
-                            Some(stream) => stream.finish()?,
-                            None => collected.len() as u64,
-                        };
-                        if samples == 0 {
-                            return Err(Error::invalid_argument("recording contains no audio"));
-                        }
-                        output.status(
-                            "Capture ended. Finals will finish here; edit text, or Enter to save/exit.",
-                            &input.as_ref().map_or(String::new(), TerminalInput::line),
-                        )?;
-                        continue;
-                    };
-                    last_audio = Instant::now();
-                    if let Some(writer) = &mut saved {
-                        writer.write(&frame)?;
-                    }
-                    if let Some(stream) = &mut stream {
-                        tokio::task::block_in_place(|| stream.feed(&frame))?;
-                    } else {
-                        if collected.len() + frame.len() > samples(config.capture.duration.unwrap()) {
-                            return Err(Error::invalid_argument("audio exceeds the configured collected duration"));
-                        }
-                        collected.extend(frame);
-                    }
-                },
-                events = async {
-                    match &mut stream {
-                        Some(stream) => stream.next().await,
-                        None => std::future::pending().await,
-                    }
-                } => {
-                    for event in events? {
-                        output.emit(&event, &input.as_ref().map_or(String::new(), TerminalInput::line))?;
-                    }
-                },
-                command = async {
-                    match &mut input {
-                        Some(input) => input.wait().await,
-                        None => std::future::pending().await,
-                    }
-                }, if stopping.is_none() && (output.is_editor() || !capture_done) => {
-                    if output.input(command?, &input.as_ref().unwrap().line())? {
-                        if !capture_done {
-                            capture.stop().await?;
-                        }
-                        stopping = Some(Instant::now());
-                    }
-                },
-                _ = tokio::time::sleep_until(deadline.into()), if !capture_done => {
-                    return Err(Error::deadline_exceeded(if stopping.is_some() {
-                        "FFmpeg did not stop within 5 seconds"
-                    } else { "no audio received for 15 seconds; check input device and microphone permission" }));
-                },
-            }
+        let pass = if self.config.mode == Mode::Stream {
+            AnalysisPass::Live
+        } else {
+            self.wait_capture().await?;
+            eprintln!("Processing the complete recording.");
+            AnalysisPass::Offline
+        };
+        eprintln!("Loading native CPU speech models.");
+        let models = {
+            let config = self.config.clone();
+            self.wait_analysis(SpeechModels::load(&config)).await
+        };
+        let mut models = match models {
+            Ok(models) => models,
+            Err(error) => {
+                eprintln!("Analysis could not start: {error}.");
+                self.wait_capture().await?;
+                return Err(error);
+            },
+        };
+        let first = self.analyze(&mut models, pass, VecDeque::new()).await;
+        if let Err(error) = &first {
+            eprintln!("{} analysis stopped: {error}.", pass.name());
         }
-        if let Some(stream) = &mut stream {
-            let stats = stream.finish_transport().await?;
-            if config.output.json {
-                eprintln!("Audio transport: {}", serde_json::to_string(&stats).unwrap());
-            }
+        self.wait_capture().await?;
+        let (live_cuts, first) = match first {
+            Ok(cuts) => (cuts, Ok(())),
+            Err(error) => (VecDeque::new(), Err(error)),
+        };
+        if pass == AnalysisPass::Live && self.config.streaming.reprocess {
+            eprintln!("Processing the complete recording.");
+            self.analyze(&mut models, AnalysisPass::Offline, live_cuts).await?;
         }
-        if let Some(saved) = saved {
-            saved.finish()?;
+        first?;
+        if self.output.is_editor()
+            && let Some(input) = &mut self.input
+        {
+            self.output.edit(input).await?;
         }
-        if stream.is_none() {
-            if collected.len() < 160 {
-                return Err(Error::invalid_argument(
-                    "recording must contain at least 10 ms of audio",
-                ));
-            }
-            let client = AsrClient::new(config.service.clone())?;
-            let result = match client
-                .transcribe(AudioTranscribeReq {
-                    audio: &collected,
-                    language: config.service.language.as_deref().unwrap_or(""),
-                })
-                .await
-            {
-                Ok(result) => result,
-                Err(error) => {
-                    let path = retain_recording(config.output.save.as_deref(), &collected)?;
-                    eprintln!("Recording retained at {}; retry with --input.", path.display());
-                    return Err(error);
-                },
-            };
-            output.collected(&result)?;
-        }
-        if output.is_editor() && stopping.is_none() {
-            output.edit(input.as_mut().unwrap()).await?;
-        }
-        output.finish()
+        Ok(())
     }
+
+    async fn analyze(
+        &mut self,
+        models: &mut SpeechModels,
+        pass: AnalysisPass,
+        live_cuts: VecDeque<u64>,
+    ) -> Result<VecDeque<u64>> {
+        let mut log = self.events(pass.name())?;
+        let mut stream = {
+            let config = self.config.clone();
+            self.wait_analysis(AudioStream::open(
+                &config,
+                self.recording.clone(),
+                pass,
+                models,
+                live_cuts,
+            ))
+            .await?
+        };
+        let mut cuts = VecDeque::new();
+        while let Some(events) = self.wait_analysis(stream.next()).await? {
+            for event in events {
+                if pass == AnalysisPass::Live
+                    && self.config.streaming.reprocess
+                    && event.kind == "final"
+                    && matches!(event.reason, "silence" | "sentence" | "speaker")
+                {
+                    cuts.push_back(event.end);
+                }
+                write_json(&mut log, &event)?;
+                if pass == AnalysisPass::Live || !self.output.is_editor() {
+                    self.output
+                        .emit(&event, &self.input.as_ref().map_or(String::new(), TerminalInput::line))?;
+                }
+            }
+        }
+        let stats = self.wait_analysis(stream.stop()).await?;
+        if self.config.output.json {
+            eprintln!("Audio transport: {}", serde_json::to_string(&stats).unwrap());
+        }
+        Ok(cuts)
+    }
+
+    /// Keep capture and terminal control responsive during initialization, inference and connection drain.
+    async fn wait_analysis<T>(&mut self, operation: impl std::future::Future<Output = Result<T>>) -> Result<T> {
+        let mut operation = std::pin::pin!(operation);
+        loop {
+            tokio::select! {
+                result = &mut operation => return result,
+                captured = async { self.capture.as_mut().unwrap().wait().await }, if self.capture.is_some() => {
+                    self.capture.take();
+                    captured?;
+                    self.output.status("Capture ended. Processing retained audio.", "")?;
+                },
+                command = async { self.input.as_mut().unwrap().wait().await }, if self.input.is_some() => {
+                    self.handle_input(command?)?;
+                },
+            }
+        }
+    }
+
+    fn handle_input(&mut self, command: Option<String>) -> Result<()> {
+        let line = self.input.as_ref().unwrap().line();
+        if self.output.input(command, &line)? {
+            if let Some(capture) = &mut self.capture {
+                capture.stop();
+            }
+            self.input.take();
+        }
+        Ok(())
+    }
+
+    async fn wait_capture(&mut self) -> Result<()> {
+        while self.capture.is_some() {
+            tokio::select! {
+                captured = self.capture.as_mut().unwrap().wait() => {
+                    self.capture.take();
+                    captured?;
+                },
+                command = async { self.input.as_mut().unwrap().wait().await }, if self.input.is_some() => {
+                    self.handle_input(command?)?;
+                },
+            }
+        }
+        Ok(())
+    }
+
+    async fn stop_capture(&mut self) -> Result<()> {
+        let Some(capture) = &mut self.capture else {
+            return Ok(());
+        };
+        capture.stop();
+        let result = capture.wait().await;
+        self.capture.take();
+        result
+    }
+
+    fn events(&self, pass: &str) -> Result<BufWriter<File>> {
+        let path = self.stem.with_extension(format!("{pass}.jsonl"));
+        eprintln!("Transcript events: {}", path.display());
+        Ok(BufWriter::new(File::create_new(path).map_err(session_error)?))
+    }
+}
+
+fn session_error(error: impl std::fmt::Display) -> Error {
+    Error::unavailable(format!("audio session: {error}"))
 }

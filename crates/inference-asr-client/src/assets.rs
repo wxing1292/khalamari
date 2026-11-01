@@ -35,65 +35,82 @@ const FILES: &[(&str, u64, &str)] = &[
     ),
 ];
 
-/// Prepare only Whisper. ORT and Silero already belong to the executable.
+/// Prepare the external CPU checkpoints. ORT and Silero belong to the executable.
 pub async fn prepare(cache: &Path, source: Option<&Path>) -> Result<()> {
     let directory = cache.join("whisper-tiny");
     std::fs::create_dir_all(&directory).map_err(asset_error)?;
     let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(120))
+        .timeout(Duration::from_secs(600))
         .build()
         .map_err(asset_error)?;
     for &(name, bytes, digest) in FILES {
-        let destination = directory.join(name);
-        if source.is_none() && destination.is_file() {
-            match copy_verified(
-                file_chunks(File::open(&destination).map_err(asset_error)?),
-                std::io::sink(),
+        prepare_file(
+            &client,
+            &directory.join(name),
+            &format!("https://huggingface.co/Systran/faster-whisper-tiny/resolve/{REVISION}/{name}"),
+            bytes,
+            digest,
+            source.map(|source| source.join(name)).as_deref(),
+        )
+        .await?;
+    }
+    eprintln!("CPU speech assets ready: {}", cache.display());
+    Ok(())
+}
+
+async fn prepare_file(
+    client: &reqwest::Client,
+    destination: &Path,
+    url: &str,
+    bytes: u64,
+    digest: &str,
+    source: Option<&Path>,
+) -> Result<()> {
+    if source.is_none() && destination.is_file() {
+        match copy_verified(
+            file_chunks(File::open(destination).map_err(asset_error)?),
+            std::io::sink(),
+            bytes,
+            digest,
+        )
+        .await
+        {
+            Ok(()) => return Ok(()),
+            Err(Error::InvalidArgument(error)) => {
+                eprintln!("Replacing invalid checkpoint {}: {error}", destination.display())
+            },
+            Err(error) => return Err(error),
+        }
+    }
+    let mut temporary = tempfile::NamedTempFile::new_in(destination.parent().unwrap()).map_err(asset_error)?;
+    match source {
+        Some(source) => {
+            copy_verified(
+                file_chunks(File::open(source).map_err(asset_error)?),
+                &mut temporary,
                 bytes,
                 digest,
             )
-            .await
-            {
-                Ok(()) => continue,
-                Err(Error::InvalidArgument(error)) => {
-                    eprintln!("Replacing invalid checkpoint {}: {error}", destination.display())
-                },
-                Err(error) => return Err(error),
-            }
-        }
-        let mut temporary = tempfile::NamedTempFile::new_in(&directory).map_err(asset_error)?;
-        match source {
-            Some(source) => {
-                copy_verified(
-                    file_chunks(File::open(source.join(name)).map_err(asset_error)?),
-                    &mut temporary,
-                    bytes,
-                    digest,
-                )
-                .await?;
-            },
-            None => {
-                eprintln!("Downloading Whisper {name}.");
-                let response = client
-                    .get(format!(
-                        "https://huggingface.co/Systran/faster-whisper-tiny/resolve/{REVISION}/{name}"
-                    ))
-                    .send()
-                    .await
-                    .and_then(reqwest::Response::error_for_status)
-                    .map_err(asset_error)?;
-                copy_verified(
-                    response.bytes_stream().map(|chunk| chunk.map_err(asset_error)),
-                    &mut temporary,
-                    bytes,
-                    digest,
-                )
-                .await?;
-            },
-        }
-        temporary.persist(&destination).map_err(asset_error)?;
+            .await?
+        },
+        None => {
+            eprintln!("Downloading {}.", destination.display());
+            let response = client
+                .get(url)
+                .send()
+                .await
+                .and_then(reqwest::Response::error_for_status)
+                .map_err(asset_error)?;
+            copy_verified(
+                response.bytes_stream().map(|chunk| chunk.map_err(asset_error)),
+                &mut temporary,
+                bytes,
+                digest,
+            )
+            .await?;
+        },
     }
-    eprintln!("Whisper assets ready: {}", directory.display());
+    temporary.persist(destination).map_err(asset_error)?;
     Ok(())
 }
 
@@ -139,5 +156,5 @@ fn file_chunks(file: File) -> impl Stream<Item = Result<Vec<u8>>> {
 }
 
 fn asset_error(error: impl std::fmt::Display) -> Error {
-    Error::unavailable(format!("Whisper setup: {error}"))
+    Error::unavailable(format!("CPU model setup: {error}"))
 }

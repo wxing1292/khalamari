@@ -501,13 +501,13 @@ gRPC: wav  + model + language + context -+       |
 Use the same Rust client with gRPC:
 
 ```sh
-target/release/asr --stream --transport grpc --url http://127.0.0.1:50051
+target/release/asr --mode stream --transport grpc --url http://127.0.0.1:50051
 ```
 
 `--transport` defaults to `http`. The JSON setting is `service.transport`.
 For gRPC, `--url` must be a plaintext HTTP origin without an endpoint path or query.
-`--timeout` bounds connection establishment, individual recognition, stalled writes and graceful stream finish.
-The recording connection has no whole-session deadline. Collected gRPC requests carry their own deadline.
+`service.timeout` bounds connection establishment, individual recognition, stalled writes and graceful stream finish.
+The recording connection has no whole-session deadline. Unary gRPC requests carry their own deadline.
 The client uses the same language routing, revisions, overlap and editor with either transport.
 Each call processes an independent snapshot. It does not retain decoder KV between audio snapshots.
 
@@ -537,7 +537,7 @@ Record the default microphone. Press Enter to stop, or Ctrl-C to cancel:
 target/release/asr
 ```
 
-Capture stops automatically after 30 seconds. Select a device or a shorter duration when needed:
+The default records until Enter, then runs the full offline pipeline. Use `--duration` to limit capture:
 
 ```sh
 target/release/asr --device 0 --duration 10 --context 'khalamari, cache, LRU'
@@ -552,20 +552,23 @@ target/release/asr --input /absolute/path/to/recording.m4a --json
 `--url` selects the full transcription endpoint. `--language` supplies an explicit checkpoint language name.
 Leave `--language` unset for automatic detection, including mixed-language recordings.
 The client trims the language hint. An empty hint also selects automatic detection.
-`--save /absolute/path/to/recording.wav` retains the converted WAV and must name a new file.
-If transcription fails, the client retains the converted recording and reports its retry path.
-Remove that file after retry or when it is no longer needed.
+The client saves a timestamp-named FLAC in the starting directory by default.
+`--save /absolute/path/to/recording.wav` selects a new WAV or FLAC path.
+`--discard-recording` removes temporary audio after readers finish.
+Recording continues if live inference fails. Archive publication does not depend on inference success.
+If publication fails, the client reports the retained S16LE spool path.
 See [client ownership and verification](qwen3_asr.md#standalone-client).
 
 #### Continuous microphone transcription
 
-Streaming uses the Rust client, FFmpeg and external Whisper assets.
+Streaming uses the Rust client, FFmpeg, external Whisper assets and a speaker reader.
+Prepare the [Community-1 reader and models](qwen3_asr.md#speaker-reader-protocol) before starting ASR.
 Build with CMake and a C++ compiler, then prepare assets once:
 
 ```sh
 cargo build --release --bin asr
 target/release/asr --setup-models
-target/release/asr --stream
+target/release/asr --mode stream
 ```
 
 The executable also prepares the external Whisper checkpoint. This workflow requires no Python.
@@ -583,68 +586,88 @@ target/release/asr --config scripts/asr.example.json --print-config
 ```
 
 Configuration precedence is built-in defaults, then the JSON file, then explicit CLI options.
+The CLI exposes operational options. Advanced window, VAD, LID and queue settings use the JSON file.
+The reader has no runtime environment configuration or experimental policy controls.
 The Serde and Clap declarations share one configuration schema and one default implementation.
 CLI defaults do not overwrite file values. An explicitly supplied default value does overwrite the file.
 The loader rejects unknown sections, unknown keys, invalid types, and invalid values before opening resources.
 File paths in the JSON file are relative to that file. CLI paths are relative to the current directory.
-For `language.model`, a relative path must contain `/`, such as `./whisper`. A bare name selects a prepared cache entry.
+For `models.whisper`, a relative path must contain `/`, such as `./whisper`. A bare name selects a prepared cache entry.
 `--print-config` exits before FFmpeg, microphone capture, or CPU model loading.
-The existing flags remain available. Boolean settings support explicit overrides such as `--no-json` and `--no-stream`.
+`--mode stream|offline` selects the workflow. The JSON key is `mode`. Its default is `offline`.
+This selector replaces the previous streaming and offline Boolean flags.
+Boolean settings support explicit overrides such as `--no-json` and `--no-reprocess`.
 
-| JSON section | Settings |
+| JSON key or section | Settings |
 | --- | --- |
+| `mode` | `stream` for live analysis followed by offline analysis, or `offline` for analysis after capture |
 | `capture` | Device, input file, duration, FFmpeg executable |
 | `service` | URL, model, language hint, vocabulary context, timeout |
 | `streaming` | Partial interval, endpoint thresholds, lookback, overlap, VAD threshold, padding, in-flight limit, queue allowance, result reuse |
-| `language` | Whisper checkpoint/cache, confidence, analysis windows and observation cache capacity |
-| `output` | JSON output, saved WAV path, and optional editor directory |
+| `models` | Whisper checkpoint cache, speaker reader executable and optional checkpoint-directory override |
+| `language` | Confidence, analysis windows and observation cache capacity |
+| `output` | JSON stdout, archive path or discard policy, and optional editor directory |
 
 Copy `scripts/asr.example.json` and edit only the required settings. Resolved settings remain fixed during each session.
 
-`--setup-models` prepares only Whisper-tiny under `target/asr-models/whisper-tiny`.
-It validates pinned file sizes and SHA-256 values before atomic publication.
-`--whisper-source` selects a local copy of that pinned snapshot.
-The Rust executable statically links ONNX Runtime and embeds Silero v6.
-Cargo prepares the static runtime during the build. Recording requires no ORT shared library or library-path configuration.
-Whisper supplies language observations. With experimental ASR overlap, it also aligns the Qwen text to audio.
-Silero v6 supplies speech activity. Both auxiliary models run on CPU.
-The existing khalamari Qwen3-ASR service produces every transcript.
-Use `--lid-model /absolute/path/to/local-model` for an existing faster-whisper checkpoint.
-`--model-cache` selects the external Whisper asset directory.
-`--vad-model`, `--onnx-runtime`, and the corresponding JSON fields are removed.
-An explicit `--language` bypasses language detection and its model load.
-With zero ASR overlap, this mode requires no external auxiliary model files.
-Overlap still loads the Whisper model for alignment when `--language` is explicit.
+`--setup-models` prepares pinned Whisper-tiny files under `--model-cache`.
+It verifies file sizes and SHA-256 values before publication. `--whisper-source` selects a local Whisper snapshot.
+The Rust executable statically links ONNX Runtime and embeds Silero v6 for CPU VAD.
+Whisper supplies continuous language observations and approximate fixed-text alignment.
+The existing Qwen3-ASR service produces every transcript.
+`--lid-model` selects a local Whisper checkpoint. JSON uses `models.cache` and `models.whisper`.
+`--speaker-command PATH` or `models.speaker_command` selects one speaker reader for live and offline analysis.
+The default is `target/asr-readers/community-1/reader` under the repository root.
+The reader loads its adjacent `models/` directory by default. `--speaker-model-dir PATH` overrides that directory.
+Prepare the experimental Community-1 reader and its models before starting ASR.
+See the [speaker reader protocol and setup](qwen3_asr.md#speaker-reader-protocol).
+The process reads the shared PCM log. Its pipes carry progress and label updates only.
+Reader initialization failures report their checkpoint path and cause through the readiness response.
+For shorter Whisper language-detection inputs, use `--fast-lid` or `language.fast`. The default uses the full reference input.
+An explicit `--language` bypasses LID. Whisper still supplies word alignment.
+See [speaker attribution](qwen3_asr.md#speaker-attribution) for reference results and known limits.
 Recommendation: Leave `--language` unset for English/Chinese mixtures.
 
-Press Enter to stop capture and transcribe pending speech. Ctrl-C cancels client work.
-Capture failure cancels submitted inference before final flush.
-`--stream` has no default recording duration. Use `--duration` for a bounded session.
+Press Enter to stop capture and transcribe pending speech. Enter also works during model or speaker-reader initialization.
+Ctrl-C cancels analysis and completes the recording archive.
+Capture failures report an error. The recorded prefix remains recoverable.
+Neither recording mode has a default duration. Use `--duration` for a bounded session.
+After capture ends, `--mode stream` automatically runs the full offline pipeline and saves final events in `.offline.jsonl`.
+`--no-reprocess` disables this second pass. Live boundary hints can guide offline segmentation, but offline ASR regenerates the text.
+`--mode offline` waits for capture to end and runs that same offline pipeline once, with no live drafts.
+`--mode offline --input PATH` selects the same analysis without real-time file pacing.
+All modes use the same final-event schema, language routing, word alignment, and speaker attribution.
 The default partial interval is one second of new audio. This interval is not a latency guarantee.
-A 0.5-second VAD speech pause closes a segment. `--silence-seconds` changes this threshold.
+A 0.5-second VAD speech pause closes a segment. `streaming.silence_seconds` changes this threshold.
 Two consecutive matching drafts with sentence-ending punctuation can close the segment after a shorter pause.
 The latest matching snapshot must cover the most recent detected speech. New speech makes older punctuation insufficient.
-`--sentence-silence-seconds` selects this shorter threshold. Its default is half `--silence-seconds`, with a 0.1-second minimum.
+`streaming.sentence_silence_seconds` selects this shorter threshold. Its default is half `streaming.silence_seconds`, with a 0.1-second minimum.
 The default shorter threshold is 0.25 seconds. Set both thresholds equal to use only the ordinary pause threshold.
 Omit `sentence_silence_seconds` to calculate it from the ordinary pause threshold.
 An explicit JSON value must be a number. `null` is not a threshold.
 These thresholds are PoC policy choices. They are not model requirements or calibrated optimal values.
 Shorter thresholds reduce endpoint waiting but can split a hesitation into separate segments.
 They do not bound language analysis, service inference, or final-output latency.
-`--window-seconds` is a maximum segment duration. Its default is 24 seconds. Its supported range is 2 through 30 seconds.
-A duration cut first searches the preceding `--lookback-seconds` for sustained quiet. The lookback defaults to three seconds.
+`streaming.window_seconds` is a maximum segment duration. Its default is 24 seconds. Its supported range is 2 through 30 seconds.
+A duration cut first searches the preceding `streaming.lookback_seconds` for sustained quiet. The lookback defaults to three seconds.
 The client finalizes the prefix and retains the complete suffix for the next segment.
 It can split a word if no suitable pause exists.
 
-Experimental timestamp-constrained ASR overlap is opt-in:
+Timestamp-constrained ASR overlap is opt-in. Write these settings to `asr-overlap.json`:
 
-```sh
-target/release/asr --stream --overlap-seconds 1 --json
+```json
+{"streaming":{"overlap_seconds":1}}
 ```
 
-`--overlap-seconds` defaults to zero. A positive value supplies that much left and right ASR context around owned audio ranges.
-Its minimum is 0.1 seconds. It must not exceed half `--window-seconds`.
-`--window-seconds + 2 * --overlap-seconds` must not exceed the server's 30-second audio limit.
+Run the client with this configuration:
+
+```sh
+target/release/asr --mode stream --config asr-overlap.json --json
+```
+
+`streaming.overlap_seconds` defaults to zero. A positive value supplies that much left and right ASR context around owned audio ranges.
+Its minimum is 0.1 seconds. It must not exceed half `streaming.window_seconds`.
+`streaming.window_seconds + 2 * streaming.overlap_seconds` must not exceed the server's 30-second audio limit.
 Final jobs wait for the selected right context. Capture continues during this wait. Stop flushes available context without waiting for more audio.
 This wait can increase final-output latency. It is separate from the VAD pause threshold.
 The client preserves each Qwen transcript and derives approximate word times with Whisper attention alignment.
@@ -661,19 +684,19 @@ This mode does not use a text LLM. It does not guarantee that attention times or
 Emit JSON Lines events and retain a recording for replay:
 
 ```sh
-target/release/asr --stream --json --duration 60 \
+target/release/asr --mode stream --json --duration 60 \
   --save /absolute/path/to/new-recording.wav
 ```
 
 Replay an existing file at recording speed:
 
 ```sh
-target/release/asr --stream --input /absolute/path/to/recording.wav --json
+target/release/asr --mode stream --input /absolute/path/to/recording.wav --json
 ```
 
 A segment is one bounded speech interval. One interval can contain several languages.
 Each `partial` replaces that segment's complete draft. Each `final` commits the segment exactly once.
-Final `reason` values are `sentence`, `silence`, `limit`, or `end`.
+Final `reason` values are `sentence`, `silence`, `speaker`, `limit`, or `end`.
 The client allocates `revision` when it submits a job. Emitted revisions increase and can have gaps after discarded drafts.
 A recognition consumer must ignore older revisions and further recognition events after final.
 The optional editor accepts explicit corrections after final, as described below.
@@ -697,15 +720,15 @@ Actual `spans` list the contiguous internal ASR ranges, language hints, detected
 The service's `language` value does not identify the language of each individual word.
 Overlapping LID windows analyze consecutive 0.5-second cells with up to 0.5 seconds of context on each side.
 LID overlap is independent of the optional ASR context overlap.
-The language score threshold defaults to 0.7. `--lid-confidence` changes it. Scores are not calibrated correctness probabilities.
+The language score threshold defaults to 0.7. `language.confidence` changes it. Scores are not calibrated correctness probabilities.
 The client merges compatible language ranges and requires sustained quiet before internal ASR cuts.
 Uncertain ranges use automatic Qwen detection.
 If independent observations detect Mandarin but automatic ASR produces no Han characters, the client retries the same audio with a Chinese hint.
 It accepts that retry only if the result contains Han characters. It never translates returned text back into Chinese.
 This guard does not detect every partial translation or recognition error.
 
-The Rust client owns each run in `session.rs`. `segment.rs` owns its timeline, segments and revisions.
-Collected mode uses independent WAV calls. Streaming mode uploads each new PCM range once over one duplex connection.
+The Rust client owns each run in `session.rs`. `recording.rs` owns audio publication. `segment.rs` owns segments and revisions.
+Both modes upload each new PCM range once over one duplex connection per analysis pass.
 `stream.rs` owns the VAD, segmenter, task capacity and ordered completion for one recording.
 The service retains uploaded PCM for range requests. Model inference remains independent for each request.
 Bounded tasks run concurrent ASR requests while microphone capture continues.
@@ -713,14 +736,14 @@ The tasks share one Whisper model. CPU model access is serialized through `SyncT
 Concurrent jobs share one HTTP WebSocket or gRPC audio connection. Each job owns its request metrics.
 Overlap reconciliation waits for the preceding final commit after recognition and alignment finish.
 Pending partials coalesce into the latest snapshot. Final jobs take priority.
-The final queue capacity is `max_pending_finals + ceil(overlap_seconds / sentence_silence_seconds)`.
-`max_pending_finals` defaults to two. `--max-pending-finals` changes the base allowance.
-The extra bounded allowance lets short segments collect right context. Without ASR overlap, the queue capacity remains two.
-The client reports live overload and stops if another final cannot fit.
-At EOF, the already-buffered active range can become one additional final while input is closed.
+`max_pending_finals` bounds the final queue in both passes.
+`max_pending_finals` defaults to two. `streaming.max_pending_finals` changes the base allowance.
+A final reads its right context from the published recording when those samples arrive.
+The analysis reader stops advancing when its final queue is full. Capture continues appending to the spool.
+At EOF, the last active range waits for a free queue slot.
 The session skips partial requests without newly detected speech.
 It can reuse the last Qwen result for the same recording sample range and language.
-`--no-reuse-identical-audio` disables result reuse. This cache does not reuse encoder state or decoder KV state.
+`streaming.reuse_identical_audio=false` disables result reuse. This cache does not reuse encoder state or decoder KV state.
 JSON events expose `metrics`: wait/processing seconds, service request count, submitted audio seconds, language windows, result cache hits, and alignment calls.
 These metrics describe emitted jobs. They exclude discarded or cancelled jobs.
 `wait_seconds` includes right-context collection and worker backlog. `processing_seconds` covers one worker job.
@@ -728,12 +751,25 @@ These durations do not directly measure speech-end-to-final latency. Submitted a
 `submitted_audio_seconds` measures recognition input, not network traffic.
 Event `transport` snapshots and the final JSON-mode stderr `Audio transport: { ... }` report connection work, including cancelled requests.
 `uploaded_samples * 2` gives uploaded PCM bytes. Graceful finish reports zero retained cache samples.
-Recommendation: Use `--save` when a continuous session needs replay after failure.
+The default archive includes silence and every captured sample.
+Each analysis pass writes `<start timestamp>.<pass>.jsonl` in the starting directory.
+Events contain `pass="live"` or `pass="offline"`. Segment identities are local to each pass.
+The second pass runs after capture with larger context and no partial requests. It can reuse live cut positions and exact-range LID observations.
+`--no-reprocess` disables the second pass. `--mode offline --input PATH` processes a complete file without real-time pacing.
+The editor keeps live text and manual edits. Offline events stay in their separate JSONL file. A correction can retain a single speaker at segment precision.
+Each span includes raw speaker activity intervals and aligned words. The terminal, editor and JSONL show the resulting speaker turns.
+Each timed word selects the speaker with the greatest union of covered samples. Equal coverage retains multiple IDs.
+Raw activity can include secondary speakers that do not own that word. Empty word IDs mean unresolved attribution.
+Turn projection joins unaligned text when neighboring speaker evidence agrees and no activity inside that text conflicts.
+It also joins contiguous internal language spans for the same speaker. Word timestamps and uncertainty remain unchanged.
+One turn covering a complete transcript span uses span precision. It does not claim exact speech boundaries.
+Terminal views omit speaker updates with unchanged turns. Raw JSONL events retain revised activity boundaries.
+These labels do not establish that ASR recovered every simultaneous voice.
 Context does not automatically carry between segments. `--context` supplies caller vocabulary to every internal request.
 For a programming discussion, supply domain vocabulary:
 
 ```sh
-target/release/asr --stream --context "Software engineering discussion. Vocabulary: cache, KV cache, cached data, memory."
+target/release/asr --mode stream --context "Software engineering discussion. Vocabulary: cache, KV cache, cached data, memory."
 ```
 
 Context can resolve homophones such as `cache` and `cash`. It biases decoding; it does not enforce an exact glossary.
@@ -746,7 +782,7 @@ See [session ownership and limits](qwen3_asr.md#continuous-client) for the data 
 Open the terminal transcript view with a new output directory:
 
 ```sh
-target/release/asr --stream --editor target/asr-editor
+target/release/asr --mode stream --editor target/asr-editor
 ```
 
 This mode requires interactive stdin and stdout. It cannot use `--json`.

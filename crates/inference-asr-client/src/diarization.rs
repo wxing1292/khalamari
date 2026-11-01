@@ -8,6 +8,8 @@ use crate::analysis::AudioAnalysisUpdate;
 use crate::analysis::AudioSpan;
 use crate::recording::AudioRecordingReader;
 
+pub mod process;
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct SpeakerSpan {
     #[serde(rename = "start_sample")]

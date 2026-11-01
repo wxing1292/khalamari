@@ -7,9 +7,10 @@ use inference_error::Result;
 use serde::Serialize;
 
 use crate::config::OutputConfig;
+use crate::document::Document;
 use crate::editor::Editor;
+use crate::segment::AnalysisPass;
 use crate::segment::AudioEvent;
-use crate::service::AudioTranscribeResp;
 use crate::terminal::TerminalInput;
 use crate::terminal::display_text;
 use crate::terminal::prefix;
@@ -18,7 +19,12 @@ use crate::terminal::visible_suffix;
 
 pub enum Output {
     Json,
-    Text { tty: bool, partial: Option<(u64, String)> },
+    Text {
+        tty: bool,
+        partial: Option<(u64, String)>,
+        document: Document,
+        pass: AnalysisPass,
+    },
     Editor(Box<Editor>),
 }
 
@@ -32,6 +38,8 @@ impl Output {
             Self::Text {
                 tty: std::io::stdout().is_terminal(),
                 partial: None,
+                document: Document::default(),
+                pass: AnalysisPass::Live,
             }
         })
     }
@@ -40,36 +48,50 @@ impl Output {
         matches!(self, Self::Editor(_))
     }
 
-    pub fn collected(&self, recognition: &AudioTranscribeResp) -> Result<()> {
-        let mut output = std::io::stdout().lock();
-        match self {
-            Self::Json => write_json(&mut output, recognition),
-            Self::Text { .. } => {
-                writeln!(output, "{}", recognition.text).map_err(output_error)?;
-                output.flush().map_err(output_error)
-            },
-            Self::Editor(_) => unreachable!("editor configuration requires streaming"),
-        }
-    }
-
     pub fn emit(&mut self, event: &AudioEvent, command: &str) -> Result<()> {
         let (tty, partial) = match self {
             Self::Json => return write_json(&mut std::io::stdout().lock(), event),
             Self::Editor(editor) => {
-                editor.emit(event)?;
-                return editor.render(command);
+                if editor.emit(event)? {
+                    editor.render(command)?;
+                }
+                return Ok(());
             },
-            Self::Text { tty, partial } => (tty, partial),
+            Self::Text {
+                tty,
+                partial,
+                document,
+                pass,
+            } => {
+                if *pass != event.pass {
+                    *document = Document::default();
+                    *partial = None;
+                    *pass = event.pass;
+                }
+                if !document.observe(event) {
+                    return Ok(());
+                }
+                (tty, partial)
+            },
         };
         let mut output = std::io::stdout().lock();
-        let prefix = prefix(
-            event.kind,
-            event.segment,
-            event.revision,
-            event.start_sample,
-            event.end_sample,
-        );
-        let text = display_text(&event.transcript.text);
+        let mut prefix = prefix(event.kind, event.segment, event.revision, event.start, event.end);
+        if event.pass == crate::segment::AnalysisPass::Offline {
+            prefix.insert_str(0, "[offline] ");
+        }
+        let text = if event.result.transcript.turns.is_empty() {
+            display_text(&event.result.transcript.text)
+        } else {
+            let separator = if event.kind == "partial" { " | " } else { "\n" };
+            event
+                .result
+                .transcript
+                .turns
+                .iter()
+                .map(|turn| display_text(&turn.display()))
+                .collect::<Vec<_>>()
+                .join(separator)
+        };
         if *tty {
             let draft = event.kind == "partial";
             let text = if draft {

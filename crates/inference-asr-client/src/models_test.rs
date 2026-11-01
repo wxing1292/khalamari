@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn test_vad_recurrence() {
-    let mut vad = Vad::load().unwrap();
+    let mut vad = Vad::load(fixture_environment()).unwrap();
     let (mut h, mut c) = (vec![0.0f32; 128], vec![0.0f32; 128]);
     let mut context = [0.0; 64];
     for (index, count) in [512, 17, 512, 31, 511, 512].into_iter().enumerate() {
@@ -35,9 +35,9 @@ fn test_vad_recurrence() {
 #[test]
 #[ignore = "requires native speech assets and KHALAMARI_ASR_ORACLE reference data"]
 fn test_models_migration() {
-    let config = LanguageConfig::default();
-    let mut vad = Vad::load().unwrap();
-    let mut model = AcousticModel::load(&config).unwrap();
+    let config = ModelConfig::default();
+    let mut vad = Vad::load(fixture_environment()).unwrap();
+    let mut model = AcousticModel::load(&config, &crate::config::LanguageConfig::default()).unwrap();
     let path = std::env::var("KHALAMARI_ASR_ORACLE").expect("set KHALAMARI_ASR_ORACLE to the migration reference JSON");
     let cases: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
     for case in cases.as_array().unwrap() {
@@ -74,9 +74,15 @@ fn test_models_migration() {
         let text = case["text"].as_str().unwrap();
         if let Some(units) = model.align(&pcm, text, &language).unwrap() {
             assert_eq!(units.iter().map(|unit| unit.text.as_str()).collect::<String>(), text);
-            assert!(crate::overlap::timed_words(text, &units, 0).is_some());
+            assert!(timed_words(text, &units, 0).is_some());
         } else {
             panic!("reference text must align: {}", case["name"]);
         }
     }
+}
+
+fn fixture_environment() -> &'static ort::environment::Environment {
+    static ENVIRONMENT: std::sync::LazyLock<ort::environment::Environment> =
+        std::sync::LazyLock::new(|| ort::init().build().unwrap());
+    &ENVIRONMENT
 }

@@ -137,10 +137,11 @@ pub fn size() -> (usize, usize) {
     // ioctl initializes winsize on success. stdout is borrowed for this call only.
     if unsafe { libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ, size.as_mut_ptr()) } == 0 {
         let size = unsafe { size.assume_init() };
-        (usize::from(size.ws_col).max(1), usize::from(size.ws_row).max(1))
-    } else {
-        (80, 24)
+        if size.ws_col > 0 && size.ws_row > 0 {
+            return (usize::from(size.ws_col), usize::from(size.ws_row));
+        }
     }
+    (80, 24)
 }
 
 pub fn visible_suffix(text: &str, available: usize) -> String {

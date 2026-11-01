@@ -54,10 +54,9 @@ impl Editor {
         Ok(editor)
     }
 
-    pub fn emit(&mut self, event: &AudioEvent) -> Result<()> {
+    pub fn emit(&mut self, event: &AudioEvent) -> Result<bool> {
         write_json(&mut self.events, event)?;
-        self.document.observe(event);
-        Ok(())
+        Ok(self.document.observe(event))
     }
 
     pub fn replay(&mut self, path: &Path) -> Result<()> {
@@ -167,8 +166,8 @@ impl Editor {
             .chain(self.document.draft().into_iter().map(|line| (line, "partial")))
             .rev()
         {
-            let prefix = prefix(kind, line.segment, line.revision, line.start_sample, line.end_sample);
-            let text = display_text(&line.text);
+            let prefix = prefix(kind, line.segment, line.revision, line.start, line.end);
+            let text = display_text(&line.display());
             let available = columns.saturating_sub(prefix.len() + 1);
             let wrapped = if available >= 2 {
                 wrap(&text, available)
@@ -203,7 +202,7 @@ impl Editor {
     fn save(&mut self) -> Result<()> {
         if let Some(mut transcript) = self.transcript.take() {
             for line in self.document.lines() {
-                writeln!(transcript, "{}", line.text).map_err(editor_error)?;
+                writeln!(transcript, "{}", line.display()).map_err(editor_error)?;
             }
             transcript.flush().map_err(editor_error)?;
         }

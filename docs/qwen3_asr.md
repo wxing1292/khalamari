@@ -16,7 +16,7 @@ Unresolved work is in [`future_work.md`](future_work.md).
 | Checkpoint | `mlx-community/Qwen3-ASR-1.7B-8bit`, Apple Silicon |
 | Decoder/encoder | Shared Qwen3 decoder, model-owned Audio executor and processor |
 | Input | One WAV/resource/request, integer or F32 -> mono F32 at 16 kHz |
-| Duration | At most 30 seconds after resampling |
+| Duration per ASR request | At most 30 seconds after resampling |
 | Server output | Greedy, collected HTTP/gRPC response; continuous client output uses language-aware speech snapshots |
 | Resource lifetime | Private/request, common async-task/resource lifecycle, no cross-request materialization sharing |
 
@@ -40,41 +40,28 @@ The executable owns capture, streaming and external checkpoint preparation. The 
 
 | Client source | Owner |
 | --- | --- |
-| `audio.rs` | FFmpeg child and pipes, canonical PCM, shared WAV encoding and recording lifecycle |
-| `recording.rs` | Single PCM writer, positional readers, archive encoding and atomic publication |
-| `analysis.rs` | Append/replace/seal contracts, label timelines, bounded CPU processors and reader tasks |
-| `diarization.rs` | Speaker intervals and the append/replace/seal diarizer contract |
-| `assets.rs` | Pinned Whisper download/copy, byte and SHA-256 validation, atomic publication |
+| `audio.rs` | Independent capture task, FFmpeg child and pipes, canonical PCM and quiet-boundary search |
+| `recording.rs` | Single append writer, positional readers, archive encoding and atomic publication |
+| `analysis.rs` | Shared append/replace/seal contracts, label timelines, bounded CPU processors and reader tasks |
+| `vad.rs` | Speech-detector contract and stateful Silero implementation |
+| `diarization.rs`, `diarization/process.rs` | Diarizer contract, external process lifetime and validated activity updates |
+| `assets.rs` | Pinned external checkpoints, byte and SHA-256 validation, atomic publication |
 | `config.rs` | One Serde/Clap schema, defaults, explicit CLI precedence and external validation |
 | `session.rs` | `AudioSession`: capture, processing, output and recording lifetime |
-| `segment.rs` | `AudioSegmenter`: sample timeline, bounded audio, immutable `AudioSegmentReq` snapshots, endpoints, revisions and final ordering |
-| `models.rs` | CPU Silero state, native CT2 language detection/alignment and log-Mel |
-| `language.rs` | Bounded acoustic observations and candidate language ranges |
-| `transcribe.rs` | Shared CPU model/cache, Qwen routing, last-result reuse, Mandarin retry and alignment |
-| `stream.rs` | `AudioStream`: VAD, segmenter, bounded tasks, cancellation and committed overlap history |
+| `segment.rs` | `AudioSegmenter`: analysis cursor, immutable `AudioSegmentTranscribeReq` snapshots, endpoints and revisions |
+| `models.rs` | CPU Silero state, native CT2 language detection/alignment, acoustic word construction and log-Mel |
+| `language.rs` | `Acoustics`: shared Whisper weights, LID lifecycle/cache, fixed-text alignment and language-range planning |
+| `transcribe.rs` | Qwen routing, last-result reuse, Mandarin retry and overlap reconciliation |
+| `transcript.rs` | Transcript, span, word and turn records; speaker attribution and turn projection |
+| `stream.rs` | `AudioStream`: independent analysis readers, bounded tasks, final ordering, speaker revisions and overlap history |
 | `overlap.rs` | Timestamp ownership and deterministic reconciliation |
-| `service.rs`, `service/stream.rs` | Collected WAV calls, duplex PCM transport, bounded commands, request cancellation and connection statistics |
+| `service.rs`, `service/stream.rs` | Transcription response, duplex PCM transport, bounded commands, request cancellation and connection statistics |
 | `output.rs` | Exclusive JSON/text/editor selection, output errors and the shared edit loop |
-| `editor.rs`, `document.rs` | Raw event log, minimal text projection, explicit corrections and final-text snapshot |
+| `editor.rs`, `document.rs` | Raw event log, speaker-attributed text projection, explicit corrections and final-text snapshot |
 | `terminal.rs` | Independent input descriptor, UTF-8 command input and shared display formatting |
 | `main.rs` | Startup commands, replay and process cancellation |
 
-The native `asr_e2e` example generates fixtures and replays the production executable through the service.
-
-### Recording and analysis primitives
-
-`AudioRecordingWriter` publishes a readable end only after it writes complete PCM samples.
-`AudioRecordingReader` uses positional reads. Each reader owns its notification cursor.
-`AudioReaderTask` owns analysis progress and one queued result batch. Notifications can coalesce without losing samples.
-`AudioTimeline` applies authoritative replacements and contiguous seals. Labels have a separate lifetime from PCM.
-
-```text
-writer appends samples [0, 512) -> publish end 512
-writer appends samples [512, 1024) -> publish end 1024
-  reader A at 0   -> reads [0, 1024)
-  reader B at 512 -> reads [512, 1024)
-  both retain the same PCM file; each advances its own cursor
-```
+The native `asr_e2e` example replays the production executable through the service. The `asr_speaker_score` example scores file-local speaker intervals against RTTM.
 
 ### Client composition and trust
 
@@ -89,30 +76,25 @@ The example configuration contains only workload overrides.
 ```text
 example window: x[0:32000], mono i16, 16000 Hz
 
-FFmpeg emits x[0:512], x[512:1024], ...
-  +-> optional Recording: same PCM -> fixed WAV format -> buffered file
-  |
-  +-> collected mode: retain x[0:32000] -> one HTTP/gRPC request
-  |
-  +-> AudioStream owns VAD + AudioSegmenter + bounded tasks
-        VAD: each PCM frame -> speech flag
-        AudioSegmenter: source sample clock -> immutable AudioSegmentReq x[start:end]
-          AudioTranscriber: shared Whisper gate/cache + immutable service client
-            LID ranges -> Qwen requests -> text/spans + per-job metrics
-              ordered final events -> publish overlap history once
-                Output selects JSON, plain text, or editor
-                  editor: raw event -> append log -> current text projection
+FFmpeg -> one writer appends x[0:512], x[512:1024], ... to the recording
+  archive reader -> FLAC
+  live readers -> independent VAD, LID and diarization timelines -> segment ranges
+    immutable job + language evidence -> Qwen service -> aligned text and speaker intervals
+      ordered events -> JSONL, terminal or revisable editor
+  sealed recording -> same offline pipeline, optional live boundary hints -> independent final events
 
 HTTP/gRPC request -> service WAV validation -> log-Mel[128, frames]
   prepared source -> runtime cache miss -> Audio Tower -> resource embeddings
     decoder + embeddings -> transcription text -> client response
 ```
 
-`AudioSession` owns capture, processing, terminal input, saved WAV and output for one run.
-Its event loop waits for capture, completion, terminal input or a deadline.
-`AudioStream` owns the service connection, streaming admission and completion. `AudioSegmenter` owns source coordinates and segment state.
-It schedules available jobs before it waits for capture, completion, terminal input, or a deadline.
-`AudioSegmentReq` owns its immutable audio allocation. Its read end derives from the allocation length.
+`AudioSession` owns capture, terminal input, archive publication, and output.
+Its event loop handles input, capture completion and analysis events.
+The same control loop stays active during model loading, reader readiness and connection drain.
+Enter stops capture while analysis initializes; initialization does not restart after a terminal event.
+`AudioStream` owns one pass, connection, bounded jobs and ordered final commits.
+`AudioSegmenter` owns segmentation progress and revisions. The recording writer owns the source clock.
+`AudioSegmentTranscribeReq` owns its immutable audio allocation. Its read end derives from the allocation length.
 Its final status derives from its endpoint reason.
 Service-call metrics belong to the segment request. Streaming requests share one duplex connection for the recording.
 Submitted audio counts remain integer samples until JSON serialization.
@@ -121,7 +103,7 @@ Submitted audio counts remain integer samples until JSON serialization.
 | --- | --- |
 | CLI/JSON configuration | Validate schema, values, paths and relationships once |
 | FFmpeg pipe | Validate complete i16 samples, retain incomplete frames across cancellation |
-| Submitted job | Keep immutable audio and stable source coordinates after pruning |
+| Submitted job | Keep immutable audio and stable source coordinates after segmentation advances |
 | Service/model output | Validate bounded responses and native output contracts at their owners |
 | Live document update | Apply trusted session output without repeating replay validation |
 | Replay or manual correction | Validate external coordinates, commit order or current revision before trusted commit |
@@ -129,11 +111,13 @@ Submitted audio counts remain integer samples until JSON serialization.
 
 Normal EOF drains inference. The editor can then use the same edit loop as event replay.
 An empty terminal command requests stop, drains pending inference, saves output, and exits.
-Cancellation drops the stream tasks and capture child. The editor attempts to save accepted final text and restores its terminal.
+Cancellation drops ASR tasks, stops capture, and finishes archive publication. The editor attempts to save accepted final text and restores its terminal.
 
 The raw event and document line have different lifetimes.
 The log retains acoustic spans and metrics. The document retains only text, revision, and source coordinates.
-The plain view retains one rendered draft. Both terminal views share formatting and JSON output routines.
+Both terminal views use `Document` for the current text and speaker turns.
+The plain view also retains one rendered draft. It starts a fresh document for each analysis pass.
+Both views suppress speaker updates that do not change the document. The raw JSONL log retains these updates.
 
 Whisper and Qwen retain separate log-Mel implementations because their preprocessing contracts differ.
 Whisper appends 160 zero samples and uses its own frame/padding convention and window precision.
@@ -143,42 +127,63 @@ The service normalizes decoded input before resampling. It repeats normalization
 
 ### Task contracts
 
-The client uses concrete request and response contracts at each processing boundary.
-
 | Contract | Scope |
 | --- | --- |
-| `AudioSegmentReq` / `AudioSegmentResp` | One segment revision: immutable PCM snapshot to text, spans and metrics |
-| `AudioLangRecognitionReq` / `AudioLangRecognitionResp` | One source range to merged language observations and work count |
-| `AudioTranscribeReq` / `AudioTranscribeResp` | One collected WAV request to Qwen text and language |
-| `AudioStreamReq` / `AudioStreamResp` | PCM append/release, range recognition, cancellation and graceful connection finish |
+| `AudioSpeechDetector` | start / append / detect / stop on continuous recording input |
+| `AudioLanguageRecognizer` | start / append / recognize / stop; unknown language remains valid |
+| `AudioDiarizer` | start / append / diarize / stop; backend owns buffering and speaker state |
+| `AudioAnalysisUpdate<T>` | Replace labels in an explicit range, or seal the next prefix |
+| `AudioSegmentTranscribeReq / AudioSegmentTranscribeResp` | One immutable segment revision to text, alignment and metrics |
+| `AudioTranscribeReq / AudioTranscribeResp` | Collected WAV request to Qwen text and language |
+| `AudioStreamReq / AudioStreamResp` | Incremental PCM transport, range recognition and release |
 
-A segment can produce several requests. Its revision is allocated only at submission.
-The session schedules asynchronous work with `JoinSet`. It cancels individual obsolete partials by their abort handles.
-The client reuses `SyncTaskPool` for CPU language analysis and alignment.
-The optional `Acoustics` owner creates and releases its model, language state, CPU pool and shutdown guard together.
-Forced-language jobs without overlap do not create this owner.
-`AudioTranscriber` retains a private shared connection handle for recognition. It does not expose transport lifecycle operations.
-Its result cache keys use recording sample ranges and language. Recording coordinates identify immutable PCM within one connection.
-The cache does not copy or compare PCM. Model and prompt context remain fixed for the connection.
-Each language response counts its own uncached observations. The analyzer retains only its bounded observation cache.
-The runtime core `AsyncTaskPool` retains its runtime request IDs and scheduler completion channels.
-The client does not adapt audio segment identity to those runtime IDs.
-Task futures own execution. The client does not add a second task struct that duplicates a request.
+Every analyzer accepts each sample exactly once. Its append range must start at its previous accepted end.
+The analyzer can read overlap from the log. Input notifications do not copy PCM.
+Stop closes input. The next analysis call must flush and seal all accepted input.
+A call can return no updates. An empty Replace removes existing labels in its range.
+Seal freezes this analyzer's labels for this pass. It does not delete PCM or speaker memory.
+Each component has its own seal. The offline pass starts independent timelines.
+
+`AudioProcessor` owns one serial CPU slot through the existing runtime `SyncTaskPool`.
+It acquires the model guard before submission. Cancellation cannot create an unbounded native-work queue.
+`AudioReaderTask` owns its progress cursor and one queued output batch.
+It consumes coalesced watch notifications without losing samples. It checks the final extent after writer closure.
+The I/O batch limit does not select model inference windows.
+`Acoustics` owns Whisper weights, LID progress and the observation cache.
+It implements the LID lifecycle directly. LID and fixed-text alignment share one model and CPU slot.
+LID advances on the configured sample grid, including when context is zero.
+Only stopped input permits a short final cell. Notification granularity does not select analysis ranges.
+VAD and diarization have separate slots. The session event loop executes no model inference.
+
+`AudioStream` owns admitted asynchronous Qwen tasks, cancellation, final ordering and overlap history.
+`AudioSegmenter` owns active/pending ranges, endpoint decisions and request revisions.
+A revision is allocated at submission. An old partial cannot replace an accepted newer revision or final.
 
 ```text
-AudioSession
-  PCM i16[512] -> AudioStream -> AudioSegmenter -> AudioSegmentReq[segment, revision]
-    append new PCM once -> AudioStreamClient -> service PCM cache
-    spawn job -> AudioTranscriber
-      shared CPU gate -> SyncTaskPool -> AudioLangRecognitionResp[ranges]
-      private connection handle -> recognize[start,end,hint] -> HTTP WebSocket or gRPC -> text/language
-      optional CPU alignment -> AudioSegmentResp[text, spans, metrics]
-    accept revision / order finals -> AudioEvent -> Output -> Editor -> Document
+PCM log R[0:N), 16000 Hz, mono i16
+  VAD reader        -> speech spans, sealed prefix V
+  LID reader        -> language/unknown spans, sealed prefix L
+  diarizer reader   -> speaker spans, independently revisable prefix D
+          |                    |                        |
+          +---------- AudioStream timelines ------------+
+                                |
+                 AudioSegmenter selects [start,end)
+                                |
+       AudioSegmentTranscribeReq(segment,revision,immutable PCM,language evidence)
+                                |
+                  Qwen RPC -> fixed-text alignment
+                                |
+              ordered final or current partial
+                                |
+       latest speaker timeline -> turns -> JSONL / terminal / Document
+
+speaker Replace after text final -> speakers event for the same text revision
+                                    -> update turns, preserve manual edits
 ```
 
-Collected WAV RPCs retain their request and response schemas.
-Streaming events retain their partial/final revision contract and add a `transport` statistics snapshot.
-The editor owns the document through the session output path. Replay can create the same editor without audio capture.
+Sample fields use `start` / `end` in Rust. Existing transcript JSON keeps `start_sample` / `end_sample`.
+Task metrics count Qwen calls, submitted audio, result reuse and alignment.
+Continuous LID work is shared across tasks and is not counted again per task.
 
 ### Incremental audio transport
 
@@ -415,63 +420,303 @@ A process restart cancels active requests and rebuilds resources for later reque
 
 The Rust client records the macOS microphone or converts an audio file through one FFmpeg implementation.
 FFmpeg converts external codecs, sample rates and channel layouts to mono S16LE at 16 kHz.
-The Rust adapter converts complete byte pairs to `i16` samples.
+The writer appends complete byte pairs directly. Model readers convert only their requested ranges to `i16`.
 No Python interpreter participates in online audio processing or transcription state.
 
 ```text
-100 ms at 48000 Hz, stereo = 4800 frames x 2 channels
-  FFmpeg: decode + mix + resample
-    stdout: 1600 mono S16LE samples = 3200 bytes
-      FfmpegSource: retain incomplete reads; emit at most 512 i16 samples
-        AudioSegmenter: own continuous PCM and sample positions
-          AudioSegmentReq: immutable Arc<[i16]> + owned/read ranges
-            bounded tasks: CPU LID -> concurrent Qwen service calls -> optional CPU alignment
-          Event: revisable partial or immutable final
+48000-Hz stereo input -> FFmpeg -> mono i16 PCM at 16000 Hz
+  AudioCapture owns the only AudioRecordingWriter
+    append R[0:N) to a temporary PCM file, including silence
+    publish N after the complete write
+      +-> archive reader -> FFmpeg FLAC -> atomic publication
+      +-> VAD reader -> speech spans
+      +-> LID reader -> language spans, including unknown
+      +-> speaker reader -> revisable speaker spans
+              timelines -> segmenter -> immutable ASR range snapshots
+                Qwen service / shared CPU alignment -> live JSONL and terminal
+capture EOF -> sync and seal R -> archive completes independently of ASR
+            -> full-recording analysis with new state -> offline JSONL
 ```
 
 `FfmpegSource` owns the child, pipes, incomplete frame and bounded stderr diagnostics.
-Enter requests shutdown, drains remaining audio and flushes transcription.
-The client validates the FFmpeg exit before it flushes final inference. Capture failure cancels submitted jobs.
-The client registers Ctrl-C, SIGTERM and SIGHUP handlers before native initialization. These signals cancel client work.
-Dropping the source kills FFmpeg. Dropping an active service future cancels its HTTP request or gRPC stream.
-Immediate server GPU cancellation is a separate contract.
-Collected mode accepts 10 ms through 30 seconds and retains a failed request's recording for retry.
-`--save` must name a new file. It also retains a complete continuous recording.
-The writer buffers PCM writes. Finalization flushes the buffer and updates the WAV header before success.
+`AudioRecordingWriter` owns append order and the published sample extent. Readers use positional reads and independent notification cursors.
+The operating-system page cache supplies shared recent data. Each admitted model job owns a bounded contiguous snapshot.
+The PCM spool and compressed output coexist during capture. Analysis components do not retain separate complete audio copies.
+A slow analysis reader stops advancing when its bounded queue is full. Capture continues writing the same spool.
+An inference error stops that analysis pass without stopping capture.
+Archive publication runs independently. A slow or failed archive does not delay live finals or the offline pass.
+Publication follows a complete write. It does not imply `fsync` per frame or power-loss durability.
+Capture completion synchronizes and seals the PCM file. A failed archive keeps the spool and reports its path.
+Successful archive publication, or explicit discard, permits spool deletion after analysis readers finish.
 
-### Community-1 reader and scoring tools
-
-`examples/readers/community_1.rs` provides a standalone speaker reader for the shared PCM log.
-Build it in the speakrs checkout at `5a8f5804c189defe597e8aebb6a82bbfedde9f48` with the `cpu` feature.
-The reader loads `models/` beside its executable. `--model-dir PATH` overrides that directory.
-`--recording PATH` selects the read-only 16 kHz mono S16LE log. `--pass live` or `--pass offline` selects the pass.
-
-The caller sends contiguous progress ranges. The reader owns inference windows, speaker identity and output sealing.
-An empty replacement removes existing labels inside its range.
+Enter stops capture and drains analysis. Ctrl-C, SIGTERM, and SIGHUP cancel analysis, then finish capture and archive publication.
+Default files use the capture-start timestamp in the starting directory: `.flac` and one `.<pass>.jsonl` per analysis pass.
+`--save` selects a new WAV or FLAC destination. `--discard-recording` suppresses the archive and deletes the temporary recording.
+Recording has no default duration limit. `--duration` limits microphone or file capture in either mode.
+Each ASR request still fits the service's 30-second limit.
+The second pass uses the complete recording, bounded larger-context requests, and no partials.
+`--no-reprocess` disables it. `--mode offline --input PATH` runs this pass without real-time pacing.
+The two passes use the same sample clock but have independent segment and speaker IDs.
+Live pause and speaker cuts are candidates in the offline window lookback. The offline pass uses the same bounded LID observation cache.
+ASR regenerates text from the recording. Original live events and manual edits remain separate.
+`--mode offline`, including the default invocation, waits for capture to finish and runs the same offline pipeline.
+It uses VAD, LID, language-aware requests, Mandarin recovery, word alignment, and speaker attribution.
+All modes emit the same JSONL event schema. Offline output contains final and speaker updates, without partials.
+The `.offline.jsonl` file contains the final result. Speaker updates replace attribution for the referenced segment revision.
+The client no longer sends a separate unary whole-recording request or retains a separate collected-output path.
 
 ```text
-PCM log samples [0, 16000), already written
-  caller -> {"start":0,"end":16000,"stopped":true}
-  reader -> protocol readiness, then speaker replacements and a seal
-  PCM stays in the log; the pipe carries only progress and labels
+source samples [0, N) -> one writer -> PCM log + compressed archive
+  --mode stream: readers advance during capture -> live events + boundary hints
+  capture ends: seal [0, N)
+    default / --mode offline / live reprocess
+      -> fresh offline readers over [0, N)
+      -> bounded language-aware ASR ranges -> aligned text + speaker turns
+      -> final / speakers events in .offline.jsonl
 ```
 
-`examples/asr_speaker_score.rs` compares speaker intervals against RTTM references.
-It reports missed speech, false alarms, speaker confusion and DER with an explicit scoring range.
+`--no-reprocess` suppresses only the second pass after live analysis. It does not disable offline-only analysis.
+
+### Speaker reader protocol
+
+`--speaker-command PATH` (`models.speaker_command`) selects the reader for both passes.
+The default path is `target/asr-readers/community-1/reader` under the repository root.
+The client starts one process per pass with `--recording PATH --pass live|offline`.
+The reader opens the canonical PCM log read-only. It must read only announced sample ranges.
+Standard input and output carry newline-delimited JSON. Standard error carries diagnostics.
+Before accepting input, the reader must send `{"protocol":1}` on success or `{"error":"reason"}` on initialization failure.
+An initialization failure terminates the reader. The client reports its reason without treating it as a truncated activity response.
+
+```text
+reader -> client: {"protocol":1}
+client -> reader: {"start":0,"end":16000,"stopped":false}
+reader -> client: []                         (insufficient evidence)
+client -> reader: {"start":16000,"end":32000,"stopped":false}
+reader -> client: [{"type":"replace","range":{"start":0,"end":32000},"spans":[
+                     {"start_sample":8000,"end_sample":24000,"speaker":0}]}]
+client -> reader: {"start":32000,"end":32000,"stopped":true}
+reader -> client: [{"type":"seal","range":{"start":0,"end":32000}}]
+```
+
+Each request must receive one response. The reader must flush each response.
+Replacements must stay inside accepted audio, cover a continuous timeline and preserve sealed prefixes.
+Spans can overlap when speakers overlap. An empty replacement is an authoritative empty result.
+Seals must advance a continuous covered prefix. The stop response must seal all accepted input.
+The process adapter validates these external contracts before passing updates to the internal timeline.
+Cancellation terminates the child and reaps it outside the session event loop.
+The archive remains independent of process success.
+
+The [Community-1 reader](../crates/inference-asr-client/examples/readers/community_1.rs) is an experimental backend.
+Build it in the pinned [speakrs checkout](https://github.com/avencera/speakrs/tree/5a8f5804c189defe597e8aebb6a82bbfedde9f48).
+It adds no dependency to the main Cargo workspace.
+
+Set `SPEAKRS` to that checkout directory. Place its prepared native CPU checkpoint beside the installed reader in `models/`.
+The checkpoint must contain segmentation, WeSpeaker embedding and PLDA files, as documented by speakrs.
+
+```sh
+cp crates/inference-asr-client/examples/readers/community_1.rs "$SPEAKRS/examples/khalamari_reader.rs"
+cp crates/inference-asr-client/examples/readers/community_1_test.rs "$SPEAKRS/examples/community_1_test.rs"
+cargo build --release --manifest-path "$SPEAKRS/Cargo.toml" --features cpu --example khalamari_reader
+mkdir -p target/asr-readers/community-1/models
+cp "$SPEAKRS/target/release/examples/khalamari_reader" target/asr-readers/community-1/reader
+cp -R /absolute/path/to/community-1/models/. target/asr-readers/community-1/models/
+target/release/asr --mode stream
+```
+
+The backend reads native CPU weights and PLDA files from `models/` beside its executable, independent of the working directory.
+`--speaker-model-dir PATH` (`models.speaker_model_dir`) passes an explicit `--model-dir PATH` to the reader.
+An invalid override fails instead of loading another checkpoint. No runtime environment variable selects the checkpoint.
+Client setup does not download these files or build the reader.
+The previous offline-only RTTM process contract and native diarizer are removed.
+
+### Speaker attribution
+
+The Community-1 experiment uses overlapping bounded windows for live processing and the complete recording offline.
+The candidate live settings are a 30-second window, a 2-second update interval and a 10-second revision tail.
+Shared-audio overlap establishes candidate speaker correspondence. Any positive overlap can preserve a short activity without an embedding.
+One-to-one assignment keeps different local voices distinct. Unmatched voices use the configured cosine threshold.
+Each identity retains its first valid embedding and its latest valid embedding. Matching uses the better cosine score.
+The first reference remains fixed. Repeated overlapping windows do not average it into a different voice.
+An unmatched cluster that exists only before the seal does not enroll a new identity.
+Only clusters that reach the mutable output range refresh their references.
+The offline pass can revise the complete recording and uses independent speaker IDs.
+These policies belong to the backend. They do not appear in `AudioDiarizer`.
+
+```text
+single writer -> PCM log [0, N) -> Community-1 reader owns model and identity state
+  local model activity + embeddings for [window_start, N)
+    -> shared sample intervals -> one-to-one existing IDs
+    -> unmatched: compare fixed and recent references -> existing ID or new ID
+       sealed-only unmatched activity -> no enrollment
+    -> Replace [sealed, N) -> Seal next prefix -> ASR attribution
+
+each ID: first valid reference + latest valid reference
+PCM, labels and identity references have separate owners and lifetimes
+```
+
+The reader uses a fixed 30-second window, 2-second update interval, 10-second revision tail and 0.7 similarity threshold.
+The former experimental environment controls are removed. Alternate historical policies below are measurements from retained experiment binaries.
+The reader processes coalesced progress in order. It does not skip unprocessed audio when the window advances.
+These experiment controls do not establish a quality or latency guarantee.
+
+Each transcript span includes speaker activity and approximate word times.
+`transcript.rs` owns these records and their attribution rules. `transcribe.rs` owns inference execution.
+Rust `Span.speaker_activity` retains raw activity. Its JSON key remains `spans[].speakers`.
+Word and turn `speakers` fields contain attribution IDs.
+A timed word uses the speaker with the most covered samples across its complete interval.
+Coverage uses the union of each speaker's activity intervals. Overlapping rows for one speaker do not count twice.
+Equal coverage retains multiple IDs. Raw activity retains every observed ID, including brief secondary activity.
+This separates activity detection from text attribution, as in [WhisperX](https://github.com/m-bain/whisperX/blob/main/whisperx/diarize.py).
+Zero-duration words retain unresolved word attribution and unchanged times.
+
+Turn projection uses the common speaker IDs on both sides of unaligned text.
+At a span edge, it uses the available neighboring attribution.
+Conflicting activity inside the unaligned range prevents this inference. Different neighboring speakers remain distinct.
+If no words have timing, one observed ID can support span-level attribution; multiple IDs remain unresolved.
+Adjacent turns with the same IDs merge. Contiguous internal language spans do not create an extra turn for the same voice.
+A single resulting turn uses its transcript span's range. Its times have span precision, not exact speech-boundary precision.
+These rules do not change word times or claim recovery of every overlapping voice.
+The terminal, editor and JSONL show `[start, end)` speaker text turns.
+
+A `speakers` event revises attribution for an existing final text revision.
+It does not repeat transcription or allocate a new text revision.
+Raw activity boundaries can change without changing the displayed turns. JSONL retains those changes; terminal views do not repeat the same document.
+
+```text
+word "前" [18.308, 18.488): 2880 samples
+  speaker_0 covers [18.308, 18.488): 2880 samples
+  speaker_1 covers [18.374125, 18.488): 1822 samples
+                      |
+                      v
+  text attribution: speaker_0; raw activity still contains both IDs
+  unaligned text:   speaker_0 ... 蒙(?) ... speaker_0
+                      |
+                      v
+  turn projection: speaker_0 ... 蒙 ...; original word times stay unresolved
+  Document: changed turns -> terminal/editor; unchanged turns -> no redraw
+```
+The editor applies it only to matching text and revision. A manual correction retains precedence.
+A replacement that leaves the clipped speaker labels unchanged emits no transcript update.
+An empty replacement still clears prior attribution. Label timelines stay ordered by start sample.
+Scheduling and attribution stop scanning at the requested end, without traversing future labels.
+Overlapping spans of the same speaker represent one active voice.
+Only finals whose speaker ranges remain unsealed need retained attribution state.
+Speaker revisions do not extend the lifetime of language observations; each timeline retains only its own consumers' ranges.
+VAD-negative audio stays in the recording. Positive speaker evidence can preserve speech for segmentation.
+Late speaker revisions update attribution. They do not re-run completed ASR ranges or backfill old VAD-negative ranges.
+The offline pass can choose new ranges from the complete recording.
+
+### Community-1 streaming experiment
+
+This is a matched comparison of the same native CPU Community-1 pipeline with different context policies.
+It does not compare different ASR models or claim equivalence to every pyannote configuration.
+
+```text
+same 16-kHz mono PCM, same model files, one process at a time
+  progress every 1 s -> reader inference -> Replace / Seal
+    first labels and revised labels -> 10-ms reference grid -> DER
+    measured call durations + source arrival times -> simulated FIFO latency
+```
+
+The three far-field inputs are AMI ES2004a, IS1009a and TS3003a, each restricted to `[50,150)` seconds.
+DER includes overlap, uses no collar, and permits one file-global speaker permutation.
+The aggregate weights errors by reference speaker time. Lower is better.
+The latency column gives the range of per-recording P95 values. It is simulated source-time-to-first-label latency,
+not measured microphone-to-text latency. Offline waits for EOF.
+
+```text
+Policy                  First DER  Revised DER  CPU work / 300 s  Label P95
+----------------------  ---------  -----------  ----------------  -----------
+Full recording offline     14.12%       14.12%             12.11 s  EOF only
+Growing prefix, every 2 s  25.64%       14.12%            290.16 s  24.20-24.76 s
+30 s window, 10 s tail     30.80%       18.84%            122.82 s   2.84-2.85 s
+30 s window, 20 s tail     30.80%       19.11%            122.21 s   2.84-2.85 s
+10 s window, 5 s tail      43.34%       41.05%             16.77 s   2.01-2.02 s
+```
+
+The 30-second/10-second candidate uses about 327 MiB peak process RSS.
+Its simulated seal P95 is 12.84-12.85 seconds. Provisional labels and text do not wait for that seal.
+In a separate 30-second two-speaker recording, its first/revised DER is 26.04%/8.91%; offline DER is 5.71%.
+The initial four-speaker IS1009a excerpt exposes identity fragmentation: the live reader produces six IDs and 24.82% revised DER;
+the offline pass produces four IDs and 11.04% DER.
+Keep 30/2/10 as the experiment default. Longer revision time did not improve aggregate accuracy.
+Full-prefix recomputation accumulates work. Short windows lose speaker context.
+The backend remains experimental; the offline pass remains useful.
+
+Evidence was recorded on Apple M3 Max, 48 GiB, macOS 27.2, with no ASR service running.
+The base commit was `3d21fa70c4aa6eff40c7934675d800abf2f15529` with the reader-contract rewrite dirty.
+The reference checkout was `5a8f5804c189defe597e8aebb6a82bbfedde9f48`.
+The measured reader SHA-256 was `23bac6f6171d9736efb12514681831cf75e56f862bcf74463bcd0895f1b25399`.
+Raw commands, PCM hashes, dirty-tree hashes, updates and scores are in
+`target/asr-community-stream-eval/report.json` and `target/asr-community-hold-eval/report.json`.
+The initial reader removes per-call diagnostics and handles coalesced progress without changing the tested one-second inference windows.
+Its SHA-256 is `0f7718a10554e61625dc34471675a9bdecf7b3b66296b92e91382386506e1892`.
+A paced 30-second replay measured first-label P95 at 2.54 seconds, seal P95 at 12.54 seconds, and EOF drain at 1.04 seconds.
+It produced the same first/revised DER as the unpaced two-speaker case.
+A single coalesced notification for all 100 seconds of ES2004a preserved the incremental run's final DER of 18.30%.
+These checks are recorded in `target/asr-community-paced-eval/report.json` and `target/asr-community-coalesced-eval/report.json`.
+
+#### Identity-state audit
+
+The matched audit uses the same four recordings, CPU checkpoints, 30/2/10 policy, cosine threshold and scoring rules.
+The reader now accepts short shared-audio correspondence, retains fixed/recent references, and avoids enrolling sealed-only activity.
+The model and its offline clustering are unchanged.
+
+```text
+Three far-field recordings, 300 s total       Before       Current      Offline
+------------------------------------------  -----------  -----------  -----------
+First-label DER                              30.80%       29.54%       EOF only
+Revised DER                                  18.84%       18.79%       14.12%
+IS1009a hypothesis IDs, four reference voices  6            5            4
+CPU work                                     122.37 s     122.11 s     12.21 s
+Simulated first-label P95                     2.84-2.85 s  2.84 s       EOF only
+```
+
+IS1009a first/revised DER changes from 41.70%/24.82% to 38.19%/24.67%.
+Both other far-field recordings and the separate two-speaker recording retain their previous DER.
+The CPU work difference is small. This measurement does not establish a throughput improvement.
+Peak RSS remains about 329-335 MiB. Each identity retains one additional embedding vector.
+Five live IDs for four reference voices still show fragmentation. The current matcher does not solve global clustering.
+ES2004a and TS3003a retain zero identity-confusion time. Most remaining errors there are missed speech, not fragmented IDs.
+Dropping unmatched activities with no embedding regressed the two-speaker recording and was rejected.
+Global overlap assignment did not improve this comparison, so the reader retains the simpler matching procedure.
+The separate paced 30-second replay measures first-label P95 at 2.54 seconds, seal P95 at 12.54 seconds, and EOF drain at 0.99 seconds.
+Production HTTP/gRPC acceptance retains two voices in both passes, bilingual text, and an archive that decodes to the exact source PCM.
+
+The three focused reader regressions run in the pinned checkout after copying both reader files:
+
+```sh
+cargo test --manifest-path "$SPEAKRS/Cargo.toml" --features cpu --example khalamari_reader
+```
+
+The base commit is `80eea6a854390cbb29fbb129980df2362b1d69a6` with the reader audit dirty.
+The machine is Apple M3 Max, 48 GiB, macOS 27.2. No ASR service runs during these reader measurements.
+The reference checkout remains `5a8f5804c189defe597e8aebb6a82bbfedde9f48`.
+The current reader SHA-256 is `12569c63886524640d61b52329252cfddabe1238500a09b301328a0f26944bcd`.
+`target/asr-speaker-identity-audit/` retains paired commands, binary/source/checkpoint hashes, updates, scores and rejected candidate replays.
+
+Real Qwen acceptance passed eight HTTP cases and three gRPC cases, including bilingual speech and repeated words.
+After the pass-ownership audit, four focused cases passed again, including default LID and timestamp-constrained overlap.
+Finals remained in audio order. Speaker-only events preserved the finalized text and revision.
+A separate live/offline replay completed both passes. Its FLAC decoded to the exact source PCM.
+An invalid reader response terminated that reader while capture saved all 48,000 requested samples.
+Cancellation during reader readiness reaped the child and saved the recorded prefix in 0.55 seconds.
+The E2E reports are under `target/asr-community-e2e/` and `target/asr-community-final/`.
 
 ### Native model setup
 
-Build the Rust client and prepare assets once:
+Build the Rust client and prepare Whisper assets once.
+Also complete the [speaker reader setup](#speaker-reader-protocol) before starting ASR:
 
 ```sh
 cargo build --release --bin asr
 target/release/asr --setup-models
-target/release/asr --stream
+target/release/asr --mode stream
 ```
 
 CMake and the Xcode command-line tools are required to build the macOS client.
 Cargo downloads the checksum-pinned ONNX Runtime 1.31 static archive supplied by `ort-sys` during the first build.
-The macOS archive also contains CoreML support. The VAD explicitly selects CPU execution.
+The macOS archive also contains CoreML support. The embedded Silero model selects CPU execution.
 The build script links Xcode's compiler runtime for the archive's Objective-C availability checks.
 On Apple Silicon, the ASR deployment target defaults to macOS 13.4 to match the pinned archive.
 An explicit `MACOSX_DEPLOYMENT_TARGET` must be 13.4 or later.
@@ -485,14 +730,14 @@ run:   PCM[512] + retained context/state -> embedded Silero on CPU -> speech pro
        external Whisper directory      -> language detection / fixed-text alignment
 ```
 
-`--setup-models` prepares only the pinned multilingual CT2 Whisper-tiny checkpoint.
+`--setup-models` prepares the pinned multilingual CT2 Whisper-tiny checkpoint.
 It checks each file's byte count and SHA-256 before it replaces the destination.
 It validates cached files before reuse and replaces corrupt entries from the pinned source.
 A cancelled or failed preparation removes its temporary file.
 `--whisper-source` copies the same pinned files from a local snapshot instead of downloading them.
 The client does not download models during recording.
-If the Whisper checkpoint cannot load, startup reports its path and the setup command before capture starts.
-`--model-cache` selects the external Whisper asset directory.
+If a checkpoint cannot load, analysis reports the error. Capture continues and retains the recording.
+`--model-cache` selects the shared external model directory.
 `--lid-model` accepts a local CT2 checkpoint directory or a name under that directory.
 The former `--vad-model` and `--onnx-runtime` flags and JSON settings are removed.
 Silero explicitly selects CPU execution and retains recurrent state for one recording.
@@ -518,9 +763,9 @@ The service's Qwen log-Mel preparation also stores nonzero filter entries and re
 That scratch belongs to the preparation call. The shared preprocessor remains immutable for concurrent requests.
 Service FFT bin `k` uses frequency `sample_rate * k / n_fft` for both odd and even FFT lengths.
 
-Whisper uses CPU int8 computation for LID and optional alignment.
+Whisper uses CPU int8 computation for LID and fixed-text alignment.
 Qwen3-ASR remains the only transcript generator.
-An explicit `--language` bypasses LID. Positive overlap still needs Whisper alignment.
+An explicit `--language` bypasses LID. Speaker attribution still needs Whisper alignment.
 Recommendation: Leave `--language` unset for English/Chinese mixtures.
 See [service commands](service.md#microphone-and-file-client).
 
@@ -528,10 +773,12 @@ See [service commands](service.md#microphone-and-file-client).
 
 | Owner | Contract |
 | --- | --- |
-| `AudioSegmenter` | Continuous timeline, active range, pending finals and revision state |
-| Submitted `AudioSegmentReq` | Immutable audio and stable coordinates after old buffers are pruned |
-| `AudioTranscriber` | Shared acoustic model, bounded LID cache, concurrent service calls and last completed result |
-| `AudioStream` | VAD/segmenter lifetime, bounded task admission, completion and committed overlap history |
+| `AudioRecordingWriter` | Append-only samples, publication extent and temporary file |
+| `AudioRecordingReader` | Independent notifications and range reads |
+| `AudioSegmenter` | Analysis cursor, active range, pending finals and revision state |
+| Submitted `AudioSegmentTranscribeReq` | One shared immutable job owns bounded audio, language evidence and source coordinates |
+| `AudioTranscriber` | Shared alignment model, concurrent service calls and last completed result |
+| `AudioStream` | Independent label timelines, segmenter, task admission, final ordering and overlap history |
 | Consumer | Replace the complete partial; commit each final once |
 
 Initialization converts validated duration settings to sample counts once.
@@ -550,13 +797,13 @@ pause / stable sentence + short pause / duration limit / stop
     next segment starts at or after end
 
 retained audio:
-  active range + pending final ranges + configured overlap/padding
-  submitted jobs own Arc allocations independently of session pruning
+  complete PCM stays in the recording spool
+  jobs own bounded Arc snapshots; segments retain ranges, not another PCM queue
 ```
 
 Sample positions start at recording start and include silence.
-They do not reset at segment boundaries or after pruning.
-Right context and endpoint padding clamp to captured audio, including near the `u64` timeline limit.
+They do not reset at segment boundaries or between analysis passes.
+Right context and endpoint padding clamp to captured audio, within the validated file-offset domain.
 Events expose `start_sample`, `end_sample`, `sample_rate`, `start_ms` and `end_ms`.
 Millisecond values derive from the integer sample coordinates.
 A partial can revise every word in its complete draft.
@@ -592,15 +839,18 @@ The partial interval defaults to one second of new audio.
 The ordinary VAD pause defaults to 0.5 seconds.
 Two matching sentence-ending drafts can close a segment after 0.25 seconds.
 The latest matching snapshot must cover the most recent speech.
-`--silence-seconds` and `--sentence-silence-seconds` configure these heuristics.
+`streaming.silence_seconds` and `streaming.sentence_silence_seconds` configure these heuristics.
 These thresholds are policy choices, not calibrated model requirements.
 
 The maximum owned range defaults to 24 seconds.
 A duration cut searches the preceding three seconds for at least 80 ms of sustained quiet.
 It retains the complete suffix. A forced cut can split a word without a suitable pause.
-`--window-seconds` and `--lookback-seconds` configure this policy.
+`streaming.window_seconds` and `streaming.lookback_seconds` configure this policy.
 
 LID uses 0.5-second cells with up to 0.5 seconds of context on each side.
+The default Whisper encoder pads each observation to its 30-second reference input.
+`--fast-lid` (`language.fast`) uses a five-second minimum encoder extent and requires a language score of at least `max(0.9, language.confidence)` to set a hint.
+Longer observations keep all their frames. This option changes the LID compute and confidence policy. It preserves the ASR window and the recording clock.
 The observation cache is bounded to 256 windows by default.
 Candidate language changes need nearby sustained quiet before they become ASR cuts.
 Compatible ranges merge. Uncertain ranges use automatic Qwen decoding.
@@ -627,7 +877,7 @@ audio + completion + Enter + deadline -> AudioSession event loop -> AudioStream 
   overlap: recognize/align ahead -> wait for preceding commit -> reconcile
 ```
 
-The client shares one Whisper model and one bounded observation cache across jobs.
+The LID reader and alignment tasks share one Whisper model. The LID reader owns its bounded observation cache.
 It acquires the CPU-model guard asynchronously before it submits work to the runtime core `SyncTaskPool`.
 The fixed pool has one runner. Whisper retains its existing internal thread setting.
 A canceled queued task is skipped. A running native call finishes without publishing its canceled result.
@@ -636,18 +886,18 @@ Tasks share one HTTP WebSocket or gRPC audio connection. Each segment request re
 Only ordered final commits publish overlap words to later jobs.
 
 Final work has priority. Unsubmitted partials coalesce into the latest snapshot.
-The live final queue capacity is `max_pending_finals + ceil(overlap_seconds / sentence_silence_seconds)`.
-Live overload returns an explicit error before audio is silently lost.
-At EOF, the already-buffered active range can become one additional final. Input is then closed.
+The final queue capacity is `max_pending_finals` in both modes. Published context remains available independently of this limit.
+Queue backpressure suspends segmentation. Analysis readers have separate bounded output queues. Capture continues into the complete recording.
+At EOF, the final active range waits for a queue slot.
 Graceful flush waits for pending inference results.
 Jobs reuse the last completed Qwen result only for the same recording sample range and language.
 This does not reuse encoder computation or decoder KV.
-Events report wait/processing durations, request count, submitted audio, LID work, cache hits and alignment calls.
+Events report wait/processing durations, request count, submitted audio, cache hits and alignment calls.
 These metrics describe emitted jobs. They exclude discarded or cancelled jobs.
 
 ### Optional ASR overlap
 
-`--overlap-seconds` defaults to zero.
+`streaming.overlap_seconds` defaults to zero.
 A positive value supplies bounded left and right context around disjoint owned ranges.
 The owned window plus both contexts must fit 30 seconds.
 
@@ -680,13 +930,36 @@ Recommendation: Keep the zero default until natural code-switch audio establishe
 
 ### Verification
 
+The reader-contract audit compared the same Qwen3-ASR 1.7B 8-bit service, Whisper-tiny, Community-1 reader and PCM inputs
+on Apple M3 Max, 48 GiB, macOS 27.2. The baseline was `2ce30814`; the candidate included the local audit changes.
+The comparison records dirty state, binary hashes, commands and model hashes under `target/asr-agreement-audit/`.
+
+```text
+Same published PCM and model outputs
+  before: notifications select short LID cells; each speaker Replace rewrites output
+  after:  configured sample grid selects LID cells; changed owned labels rewrite output
+          capture/input/completion stay serviced while analysis awaits readiness
+```
+
+| Concrete risk | Before | After |
+| --- | --- | --- |
+| Zero LID context, English then Chinese | Chinese audio was transcribed as English; Chinese evidence was absent | Chinese evidence reaches the existing recovery path; bilingual reference passes |
+| Speaker updates, human English/Chinese | 11 events | 7 events; identical final text and latest turns |
+| Speaker updates, repeated mixed-language words | 8 events | 0 events; identical final text and latest turns |
+| Enter during a controlled four-second reader startup | Capture continued to 4.544 seconds | Capture ended at 1.024 seconds; analysis still drained |
+
+The startup check used a terminal and a file-backed capture substitute. It did not record a live microphone.
+Both archives decoded to the exact source prefix. These measurements concern control and redundant output;
+they do not establish improved Community-1 diarization accuracy or a general latency bound.
+
+
 Run the core client contracts:
 
 ```sh
 cargo test -p inference-asr-client
 ```
 
-These tests cover audio ownership, revisions, endpointing, suffix retention, overlap ambiguity and VAD recurrence.
+These tests cover publication/read ownership, cancellation, revisions, endpointing, suffix retention, overlap ambiguity and VAD recurrence.
 The ignored native migration-oracle test accepts reference JSON through `KHALAMARI_ASR_ORACLE`.
 It compares log-Mel values, recurrent VAD outputs, language labels and fixed-text alignment coverage.
 Native LID scores and attention times can differ between builds. They are not numerical parity guarantees.
@@ -706,7 +979,7 @@ A JSON `--manifest` can supply recordings, required fragments, repetition counts
 Relative recording and configuration paths resolve against the manifest directory.
 `--prepare-only` writes the recordings and manifest without inference.
 The runner copies one release binary into its output directory and uses that copy for every case.
-Reports retain its hash, audio hashes, settings, evaluator source hash/Git state, collected baselines and raw streaming events.
+Reports retain its hash, audio hashes, settings, evaluator source hash/Git state, offline baselines and raw streaming events.
 `--binary-commit` records the caller's declared binary source commit. The evaluator does not infer this commit from its own checkout.
 Protocol checks remain separate from transcription-quality checks.
 Reports also retain the capture-ready time and each event's receipt time on one monotonic clock.

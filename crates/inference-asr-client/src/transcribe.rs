@@ -4,78 +4,46 @@ use std::sync::Mutex;
 use std::time::Instant;
 
 use inference_error::Result;
-use inference_runtime_core::channel::Shutdown;
-use inference_runtime_core::channel::ShutdownGuard;
-use inference_runtime_core::runtime::tasks::SyncTaskPool;
 use serde::Serialize;
 use serde::Serializer;
 use tokio::sync::watch;
 
+use crate::analysis::AudioProcessor;
 use crate::audio::SAMPLE_RATE;
 use crate::config::Config;
-use crate::config::LanguageConfig;
 use crate::config::samples;
-use crate::language::AudioLangRecognitionReq;
-use crate::language::LanguageAnalyzer;
+use crate::language::Acoustics;
 use crate::language::LanguageRange;
-use crate::models::AcousticModel;
 use crate::models::is_han;
-use crate::overlap::Word;
 use crate::overlap::stitch;
-use crate::overlap::timed_words;
-use crate::segment::AudioSegmentReq;
+use crate::segment::AudioSegmentTranscribeReq;
 use crate::service::AudioTranscribeResp;
 use crate::service::stream::AudioStreamClient;
 use crate::service::stream::AudioTransportStats;
+use crate::transcript::AudioTranscript;
+use crate::transcript::Overlap;
+use crate::transcript::Span;
+use crate::transcript::Word;
 
-#[derive(Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default, Serialize)]
 pub struct Metrics {
     pub wait_seconds: f64,
     pub processing_seconds: f64,
     pub asr_requests: u64,
     #[serde(rename = "submitted_audio_seconds", serialize_with = "serialize_audio_seconds")]
     pub submitted_audio_samples: u64,
-    pub lid_windows: u64,
     pub result_cache_hits: u64,
     pub alignment_calls: u64,
 }
 
-#[derive(Debug, Serialize)]
-pub struct AudioSegmentResp {
-    pub text: String,
-    pub language: String,
-    pub spans: Vec<Span>,
+#[derive(Clone, Debug, Serialize)]
+pub struct AudioSegmentTranscribeResp {
+    #[serde(flatten)]
+    pub transcript: AudioTranscript,
     pub metrics: Metrics,
     pub transport: AudioTransportStats,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub language_ranges: Option<Vec<LanguageRange>>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct Span {
-    pub start_sample: u64,
-    pub end_sample: u64,
-    pub language_hint: String,
-    pub language: String,
-    pub chinese_audio_retry: bool,
-    pub text: String,
-    #[serde(flatten)]
-    pub overlap: Option<Overlap>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct Overlap {
-    audio_start_sample: u64,
-    audio_end_sample: u64,
-    raw_text: String,
-    alignment_source: &'static str,
-    alignment_status: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    alignment_error: Option<&'static str>,
-    deduplicated_prefix_words: usize,
-    transcription_audio_start_sample: u64,
-    transcription_audio_end_sample: u64,
-    pub words: Vec<Word>,
 }
 
 struct CachedRecognition {
@@ -84,61 +52,36 @@ struct CachedRecognition {
     result: AudioTranscribeResp,
 }
 
-struct Acoustics {
-    model: AcousticModel,
-    analyzer: LanguageAnalyzer,
-    cpu: SyncTaskPool,
-    _shutdown: ShutdownGuard,
-}
-
-impl Acoustics {
-    fn load(config: &LanguageConfig) -> Result<Self> {
-        let model = AcousticModel::load(config)?;
-        let shutdown = Shutdown::new();
-        let cpu = SyncTaskPool::new(shutdown.clone(), 1)?;
-        Ok(Self {
-            model,
-            analyzer: LanguageAnalyzer::new(config),
-            cpu,
-            _shutdown: ShutdownGuard::new(shutdown),
-        })
-    }
-}
-
 /// Segment tasks share CPU speech models and a private handle to the stream's service connection.
 pub struct AudioTranscriber {
     client: Arc<AudioStreamClient>,
-    acoustics: Option<Arc<tokio::sync::Mutex<Acoustics>>>,
+    acoustics: AudioProcessor<Acoustics>,
     overlap: usize,
+    language_minimum: usize,
     reuse: bool,
     last: Mutex<Option<CachedRecognition>>,
 }
 
 impl AudioTranscriber {
-    pub fn load(config: &Config, client: Arc<AudioStreamClient>) -> Result<Self> {
-        let acoustics = if config.service.language.is_none() || config.streaming.overlap_seconds > 0.0 {
-            let acoustics = tokio::task::block_in_place(|| Acoustics::load(&config.language))?;
-            Some(Arc::new(tokio::sync::Mutex::new(acoustics)))
-        } else {
-            None
-        };
-        Ok(Self {
+    pub fn new(config: &Config, client: Arc<AudioStreamClient>, acoustics: AudioProcessor<Acoustics>) -> Self {
+        Self {
             client,
             acoustics,
             overlap: samples(config.streaming.overlap_seconds),
+            language_minimum: samples(config.language.min_seconds),
             reuse: config.streaming.reuse_identical_audio,
             last: Mutex::new(None),
-        })
+        }
     }
 
     async fn request(
         &self,
-        job: &AudioSegmentReq,
+        job: &AudioSegmentTranscribeReq,
         range: Range<usize>,
         language: &str,
         metrics: &mut Metrics,
     ) -> Result<AudioTranscribeResp> {
-        let range = job.audio_start_sample + range.start as u64..job.audio_start_sample + range.end as u64;
+        let range = job.audio_start + range.start as u64..job.audio_start + range.end as u64;
         if self.reuse
             && let Some(last) = self
                 .last
@@ -165,7 +108,7 @@ impl AudioTranscriber {
 
     async fn recognize(
         &self,
-        job: &AudioSegmentReq,
+        job: &AudioSegmentTranscribeReq,
         range: Range<usize>,
         language: &str,
         chinese: bool,
@@ -185,7 +128,7 @@ impl AudioTranscriber {
 
     async fn align(
         &self,
-        job: &AudioSegmentReq,
+        job: &Arc<AudioSegmentTranscribeReq>,
         range: Range<usize>,
         result: &AudioTranscribeResp,
         metrics: &mut Metrics,
@@ -194,62 +137,37 @@ impl AudioTranscriber {
             return Ok(Some(Vec::new()));
         }
         metrics.alignment_calls += 1;
-        let mut acoustics = self.acoustics.as_ref().unwrap().clone().lock_owned().await;
-        let cpu = acoustics.cpu.clone();
-        let audio = job.audio.clone();
-        let start = job.audio_start_sample + range.start as u64;
+        let snapshot = job.clone();
+        let start = job.audio_start + range.start as u64;
         let text = result.text.clone();
         let language = result.language.clone();
-        cpu.spawn(move || {
-            let units = acoustics.model.align(&audio[range], &text, &language)?;
-            Ok(units.and_then(|units| timed_words(&text, &units, start)))
-        })
-        .await
-        .expect("CPU pool returns every accepted task result")
+        self.acoustics
+            .process(move |acoustics| acoustics.align(&snapshot.audio[range], &text, &language, start))
+            .await
     }
 
     pub async fn process(
         &self,
-        job: &AudioSegmentReq,
+        job: &Arc<AudioSegmentTranscribeReq>,
         mut committed: watch::Receiver<(u64, Vec<Word>)>,
-    ) -> Result<AudioSegmentResp> {
+    ) -> Result<AudioSegmentTranscribeResp> {
         let started = Instant::now();
         let mut metrics = Metrics::default();
         let ranges = if let Some(language) = self.client.language() {
             vec![LanguageRange {
-                start_sample: job.start_sample,
-                end_sample: job.end_sample,
+                start: job.start,
+                end: job.end,
                 language_hint: language.to_owned(),
                 chinese_observed: false,
             }]
         } else {
-            // Acquire before spawning. Cancellation cannot leave an unbounded queue of blocking CPU calls.
-            let mut acoustics = self.acoustics.as_ref().unwrap().clone().lock_owned().await;
-            let cpu = acoustics.cpu.clone();
-            let job = job.clone();
-            let response = cpu
-                .spawn(move || {
-                    let Acoustics { model, analyzer, .. } = &mut *acoustics;
-                    analyzer.plan(
-                        model,
-                        &AudioLangRecognitionReq {
-                            segment: job.segment,
-                            start_sample: job.start_sample,
-                            end_sample: job.end_sample,
-                            audio: job.owned(),
-                        },
-                    )
-                })
-                .await
-                .expect("CPU pool returns every accepted task result")?;
-            metrics.lid_windows = response.windows;
-            response.ranges
+            crate::language::plan(job.owned(), job.start, &job.languages, self.language_minimum)
         };
         let combined;
         let plan = if self.overlap > 0 && ranges.len() > 1 {
             combined = vec![LanguageRange {
-                start_sample: job.start_sample,
-                end_sample: job.end_sample,
+                start: job.start,
+                end: job.end,
                 language_hint: String::new(),
                 chinese_observed: ranges.iter().any(|r| r.chinese_observed),
             }];
@@ -259,8 +177,8 @@ impl AudioTranscriber {
         };
         let mut spans = Vec::new();
         for range in plan {
-            let start = (range.start_sample - job.audio_start_sample) as usize;
-            let end = (range.end_sample - job.audio_start_sample) as usize;
+            let start = (range.start - job.audio_start) as usize;
+            let end = (range.end - job.audio_start) as usize;
             let read_start = start.saturating_sub(self.overlap);
             let read_end = (end + self.overlap).min(job.audio.len());
             let (mut result, mut retry) = self
@@ -272,9 +190,9 @@ impl AudioTranscriber {
                     &mut metrics,
                 )
                 .await?;
-            let metadata = if self.overlap > 0 {
-                let audio_start = job.audio_start_sample + read_start as u64;
-                let audio_end = job.audio_start_sample + read_end as u64;
+            let (metadata, words) = if self.overlap > 0 {
+                let audio_start = job.audio_start + read_start as u64;
+                let audio_end = job.audio_start + read_end as u64;
                 let raw = result.text.clone();
                 let aligned = self.align(job, read_start..read_end, &result, &mut metrics).await?;
                 // Recognition and alignment can run ahead. Boundary ownership needs the preceding final.
@@ -287,13 +205,13 @@ impl AudioTranscriber {
                 let stitched = aligned.and_then(|words| {
                     let quiet_end = job.is_final() && matches!(job.reason, "silence" | "sentence");
                     if words.iter().any(|word| {
-                        word.start_sample < range.end_sample
-                            && word.end_sample > range.end_sample
-                            && (quiet_end || word.start_sample < range.end_sample.saturating_sub(self.overlap as u64))
+                        word.start < range.end
+                            && word.end > range.end
+                            && (quiet_end || word.start < range.end.saturating_sub(self.overlap as u64))
                     }) {
                         return None;
                     }
-                    stitch(&raw, &words, &history, range.start_sample, range.end_sample)
+                    stitch(&raw, &words, &history, range.start, range.end)
                 });
                 let (status, words, skipped, transcription_start, transcription_end) = match stitched {
                     Some((text, words, skipped)) => {
@@ -318,46 +236,47 @@ impl AudioTranscriber {
                             .align(job, start..end, &result, &mut metrics)
                             .await?
                             .unwrap_or_default();
-                        ("fallback", words, 0, range.start_sample, range.end_sample)
+                        ("fallback", words, 0, range.start, range.end)
                     },
                 };
-                Some(Overlap {
-                    audio_start_sample: audio_start,
-                    audio_end_sample: audio_end,
-                    raw_text: raw,
-                    alignment_source: "whisper-attention",
-                    alignment_status: status,
-                    alignment_error: (status == "fallback")
-                        .then_some("attention times do not establish boundary ownership; decoded owned audio"),
-                    deduplicated_prefix_words: skipped,
-                    transcription_audio_start_sample: transcription_start,
-                    transcription_audio_end_sample: transcription_end,
+                (
+                    Some(Overlap {
+                        audio_start_sample: audio_start,
+                        audio_end_sample: audio_end,
+                        raw_text: raw,
+                        alignment_source: "whisper-attention",
+                        alignment_status: status,
+                        alignment_error: (status == "fallback")
+                            .then_some("attention times do not establish boundary ownership; decoded owned audio"),
+                        deduplicated_prefix_words: skipped,
+                        transcription_audio_start_sample: transcription_start,
+                        transcription_audio_end_sample: transcription_end,
+                    }),
                     words,
-                })
+                )
             } else {
-                None
+                (
+                    None,
+                    self.align(job, start..end, &result, &mut metrics)
+                        .await?
+                        .unwrap_or_default(),
+                )
             };
-            spans.push(Span {
-                start_sample: range.start_sample,
-                end_sample: range.end_sample,
+            let span = Span {
+                start: range.start,
+                end: range.end,
                 language_hint: range.language_hint.clone(),
                 language: result.language,
                 chinese_audio_retry: retry,
                 text: result.text,
+                words,
+                speaker_activity: Vec::new(),
                 overlap: metadata,
-            });
+            };
+            spans.push(span);
         }
-        let text = join_text(spans.iter().map(|span| span.text.as_str()));
-        let mut languages = Vec::new();
-        for span in &spans {
-            if !span.language.is_empty() && !languages.contains(&span.language.as_str()) {
-                languages.push(span.language.as_str());
-            }
-        }
-        Ok(AudioSegmentResp {
-            text,
-            language: languages.join(","),
-            spans,
+        Ok(AudioSegmentTranscribeResp {
+            transcript: AudioTranscript::from_spans(spans),
             transport: self.client.stats(),
             language_ranges: (self.overlap > 0).then_some(ranges),
             metrics: Metrics {
@@ -371,20 +290,4 @@ impl AudioTranscriber {
 
 fn serialize_audio_seconds<S: Serializer>(samples: &u64, serializer: S) -> std::result::Result<S::Ok, S::Error> {
     serializer.serialize_f64(*samples as f64 / SAMPLE_RATE as f64)
-}
-
-fn join_text<'a>(parts: impl IntoIterator<Item = &'a str>) -> String {
-    let mut result = String::new();
-    for part in parts {
-        let part = part.trim();
-        if !result.is_empty()
-            && !part.is_empty()
-            && (result.chars().next_back().unwrap().is_ascii_alphanumeric()
-                || part.chars().next().unwrap().is_ascii_alphanumeric())
-        {
-            result.push(' ');
-        }
-        result.push_str(part);
-    }
-    result
 }

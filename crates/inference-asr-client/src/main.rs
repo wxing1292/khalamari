@@ -21,24 +21,21 @@ mod editor;
 mod language;
 mod models;
 mod output;
-mod recording;
 mod overlap;
+mod recording;
 mod segment;
 mod service;
 mod session;
 mod stream;
 mod terminal;
 mod transcribe;
+mod transcript;
+mod vad;
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn main() -> ExitCode {
     let result = match cancelled() {
-        Ok(cancelled) => {
-            tokio::select! {
-                result = run() => result,
-                _ = cancelled => Err(Error::cancelled("recording cancelled")),
-            }
-        },
+        Ok(cancelled) => run(cancelled).await,
         Err(error) => Err(error),
     };
     match result {
@@ -71,15 +68,25 @@ fn cancelled() -> Result<impl std::future::Future<Output = ()>> {
     })
 }
 
-async fn run() -> Result<()> {
+async fn run(cancelled: impl std::future::Future<Output = ()>) -> Result<()> {
     let args = Args::load()?;
+    if args.print_config || args.setup_models || args.list_devices || args.replay.is_some() {
+        return tokio::select! {
+            result = command(&args) => result,
+            _ = cancelled => Err(Error::cancelled("ASR command cancelled")),
+        };
+    }
+    AudioSession::run(args.config, cancelled).await
+}
+
+async fn command(args: &Args) -> Result<()> {
     let config = &args.config;
     if args.print_config {
         println!("{}", serde_json::to_string_pretty(&config).unwrap());
         return Ok(());
     }
     if args.setup_models {
-        return assets::prepare(&config.language.model_cache, args.whisper_source.as_deref()).await;
+        return assets::prepare(&config.models.cache, args.whisper_source.as_deref()).await;
     }
     if args.list_devices {
         let output = tokio::process::Command::new(&config.capture.ffmpeg)
@@ -105,7 +112,7 @@ async fn run() -> Result<()> {
         output.edit(&mut input).await?;
         return output.finish();
     }
-    AudioSession::open(args.config).await?.run().await
+    unreachable!("the caller selected an ASR command")
 }
 
 fn io_error(error: std::io::Error) -> Error {
