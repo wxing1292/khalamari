@@ -116,8 +116,26 @@ Cancellation drops ASR tasks, stops capture, and finishes archive publication. T
 The raw event and document line have different lifetimes.
 The log retains acoustic spans and metrics. The document retains only text, revision, and source coordinates.
 Both terminal views use `Document` for the current text and speaker turns.
-The plain view also retains one rendered draft. It starts a fresh document for each analysis pass.
+The plain view tracks whether a draft row is visible. It renders the current draft from `Document` after each accepted update.
+It starts a fresh document for each analysis pass. It does not cache a second formatted copy of the draft.
 Both views suppress speaker updates that do not change the document. The raw JSONL log retains these updates.
+Status messages clear the visible draft row before writing and then restore it from the document.
+The complete draft render fits one physical row, including metadata and wide Unicode characters.
+If metadata leaves no room for useful text, the draft shows the transcript suffix without the metadata prefix.
+Resize uses the current terminal width. Final lines and redirected output retain complete text.
+The archive task publishes audio independently. The session reports its final path through the output owner.
+
+```text
+immutable recognition event -> Document owns final lines + current draft
+                                  |
+status / older final / resize -----+--> render current draft at current width
+                                       20 columns: at most 19 display cells
+                                       80 columns: at most 79 display cells
+                                  |
+                                  +--> final lines: complete text
+raw event ----------------------------> JSONL: complete acoustic evidence
+archive task -------------------------> file publication; session reports completion
+```
 
 Whisper and Qwen retain separate log-Mel implementations because their preprocessing contracts differ.
 Whisper appends 160 zero samples and uses its own frame/padding convention and window precision.

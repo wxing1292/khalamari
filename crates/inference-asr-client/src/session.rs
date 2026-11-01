@@ -50,14 +50,12 @@ impl AudioSession {
             )
         };
         let source = FfmpegSource::open(&config)?;
-        eprintln!("Recording recovery file: {} (16 kHz, mono, s16le)", spool.display());
         let archive = destination.map(|destination| {
             let recording = reader.clone();
             let ffmpeg = config.capture.ffmpeg.clone();
             tokio::spawn(async move {
                 archive(recording, &ffmpeg, &destination).await?;
-                eprintln!("Recording saved: {}", destination.display());
-                Ok(())
+                Ok(destination)
             })
         });
         let capture = AudioCapture::start(source, recording);
@@ -69,41 +67,49 @@ impl AudioSession {
             stem,
             capture: Some(capture),
         };
-        eprintln!("Recording. Press Enter to stop and flush; Ctrl-C cancels analysis and saves the recording.");
         let result = tokio::select! {
             result = session.process() => result,
             _ = cancelled => Err(Error::cancelled("analysis cancelled")),
         };
         let captured = session.stop_capture().await;
-        let result = captured.and(result).and(session.output.finish());
-        if let Some(task) = archive
-            && let Err(error) = task.await.expect("recording archive task must not panic")
-        {
-            if session.recording.end() == 0 {
-                return result.and(Err(error));
+        let mut result = captured.and(result);
+        if let Some(task) = archive {
+            match task.await.expect("recording archive task must not panic") {
+                Ok(destination) => session.status(&format!("Recording saved: {}", destination.display()))?,
+                Err(error) if session.recording.end() == 0 => result = result.and(Err(error)),
+                Err(error) => {
+                    let path = spool.keep().map_err(session_error)?;
+                    result = Err(Error::unavailable(format!(
+                        "{error}. Recover 16 kHz mono s16le audio at {}",
+                        path.display()
+                    )));
+                },
             }
-            let path = spool.keep().map_err(session_error)?;
-            return Err(Error::unavailable(format!(
-                "{error}. Recover 16 kHz mono s16le audio at {}",
-                path.display()
-            )));
         }
-        result
+        result.and(session.output.finish())
     }
 
     async fn process(&mut self) -> Result<()> {
-        self.output.status(
-            "Recording. :replace ID TEXT | :sub OLD => NEW | Enter: stop | Ctrl-C: cancel",
-            "",
-        )?;
+        self.status(&format!(
+            "Recording recovery file: {} (16 kHz, mono, s16le)",
+            self.recording.path().display()
+        ))?;
+        self.status(if self.config.capture.input.is_some() {
+            "Reading audio file. Ctrl-C cancels analysis and saves the recording."
+        } else {
+            "Recording. Press Enter to stop and flush; Ctrl-C cancels analysis and saves the recording."
+        })?;
+        if self.output.is_editor() {
+            self.status("Recording. :replace ID TEXT | :sub OLD => NEW | Enter: stop | Ctrl-C: cancel")?;
+        }
         let pass = if self.config.mode == Mode::Stream {
             AnalysisPass::Live
         } else {
             self.wait_capture().await?;
-            eprintln!("Processing the complete recording.");
+            self.status("Processing the complete recording.")?;
             AnalysisPass::Offline
         };
-        eprintln!("Loading native CPU speech models.");
+        self.status("Loading native CPU speech models.")?;
         let models = {
             let config = self.config.clone();
             self.wait_analysis(SpeechModels::load(&config)).await
@@ -111,14 +117,14 @@ impl AudioSession {
         let mut models = match models {
             Ok(models) => models,
             Err(error) => {
-                eprintln!("Analysis could not start: {error}.");
+                self.status(&format!("Analysis could not start: {error}."))?;
                 self.wait_capture().await?;
                 return Err(error);
             },
         };
         let first = self.analyze(&mut models, pass, VecDeque::new()).await;
         if let Err(error) = &first {
-            eprintln!("{} analysis stopped: {error}.", pass.name());
+            self.status(&format!("{} analysis stopped: {error}.", pass.name()))?;
         }
         self.wait_capture().await?;
         let (live_cuts, first) = match first {
@@ -126,7 +132,7 @@ impl AudioSession {
             Err(error) => (VecDeque::new(), Err(error)),
         };
         if pass == AnalysisPass::Live && self.config.streaming.reprocess {
-            eprintln!("Processing the complete recording.");
+            self.status("Processing the complete recording.")?;
             self.analyze(&mut models, AnalysisPass::Offline, live_cuts).await?;
         }
         first?;
@@ -189,7 +195,7 @@ impl AudioSession {
                 captured = async { self.capture.as_mut().unwrap().wait().await }, if self.capture.is_some() => {
                     self.capture.take();
                     captured?;
-                    self.output.status("Capture ended. Processing retained audio.", "")?;
+                    self.status("Capture ended. Processing retained audio.")?;
                 },
                 command = async { self.input.as_mut().unwrap().wait().await }, if self.input.is_some() => {
                     self.handle_input(command?)?;
@@ -234,10 +240,16 @@ impl AudioSession {
         result
     }
 
-    fn events(&self, pass: &str) -> Result<BufWriter<File>> {
+    fn status(&mut self, message: &str) -> Result<()> {
+        self.output
+            .status(message, &self.input.as_ref().map_or(String::new(), TerminalInput::line))
+    }
+
+    fn events(&mut self, pass: &str) -> Result<BufWriter<File>> {
         let path = self.stem.with_extension(format!("{pass}.jsonl"));
-        eprintln!("Transcript events: {}", path.display());
-        Ok(BufWriter::new(File::create_new(path).map_err(session_error)?))
+        let log = BufWriter::new(File::create_new(&path).map_err(session_error)?);
+        self.status(&format!("Transcript events: {}", path.display()))?;
+        Ok(log)
     }
 }
 

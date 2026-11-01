@@ -557,6 +557,8 @@ The client saves a timestamp-named FLAC in the starting directory by default.
 `--discard-recording` removes temporary audio after readers finish.
 Recording continues if live inference fails. Archive publication does not depend on inference success.
 If publication fails, the client reports the retained S16LE spool path.
+The session reports the final archive path after it joins recording and analysis work.
+The archive file becomes visible when compression completes, independently of that message.
 See [client ownership and verification](qwen3_asr.md#standalone-client).
 
 #### Continuous microphone transcription
@@ -628,7 +630,8 @@ An explicit `--language` bypasses LID. Whisper still supplies word alignment.
 See [speaker attribution](qwen3_asr.md#speaker-attribution) for reference results and known limits.
 Recommendation: Leave `--language` unset for English/Chinese mixtures.
 
-Press Enter to stop capture and transcribe pending speech. Enter also works during model or speaker-reader initialization.
+Press Enter to stop microphone capture and transcribe pending speech. Enter also works during model or speaker-reader initialization.
+Plain file input runs to EOF. Ctrl-C cancels analysis and preserves the captured recording.
 Ctrl-C cancels analysis and completes the recording archive.
 Capture failures report an error. The recorded prefix remains recoverable.
 Neither recording mode has a default duration. Use `--duration` for a bounded session.
@@ -710,6 +713,8 @@ An interactive terminal replaces its visible partial line.
 If the draft exceeds the terminal width, the line shows its latest text and marks the omitted beginning with `…`.
 The revision and audio range remain visible when the terminal has sufficient width.
 Final output and redirected text output retain complete text.
+The plain terminal view renders its current draft from `Document` after status messages and older final events.
+The complete draft fits one physical row at the current terminal width. A narrow view prioritizes transcript text over metadata.
 
 ```json
 {"type":"partial","segment":0,"revision":1,"start_sample":0,"end_sample":32768,"reason":"update","text":"Please open","language":"English","spans":[{"start_sample":0,"end_sample":32768,"language_hint":"English","language":"English","chinese_audio_retry":false,"text":"Please open"}]}

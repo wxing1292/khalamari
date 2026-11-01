@@ -5,9 +5,11 @@ use std::path::Path;
 use inference_error::Error;
 use inference_error::Result;
 use serde::Serialize;
+use unicode_width::UnicodeWidthStr;
 
 use crate::config::OutputConfig;
 use crate::document::Document;
+use crate::document::Line;
 use crate::editor::Editor;
 use crate::segment::AnalysisPass;
 use crate::segment::AudioEvent;
@@ -21,7 +23,7 @@ pub enum Output {
     Json,
     Text {
         tty: bool,
-        partial: Option<(u64, String)>,
+        draft_visible: bool,
         document: Document,
         pass: AnalysisPass,
     },
@@ -37,7 +39,7 @@ impl Output {
         } else {
             Self::Text {
                 tty: std::io::stdout().is_terminal(),
-                partial: None,
+                draft_visible: false,
                 document: Document::default(),
                 pass: AnalysisPass::Live,
             }
@@ -49,7 +51,7 @@ impl Output {
     }
 
     pub fn emit(&mut self, event: &AudioEvent, command: &str) -> Result<()> {
-        let (tty, partial) = match self {
+        let (tty, draft_visible, document, pass) = match self {
             Self::Json => return write_json(&mut std::io::stdout().lock(), event),
             Self::Editor(editor) => {
                 if editor.emit(event)? {
@@ -59,57 +61,36 @@ impl Output {
             },
             Self::Text {
                 tty,
-                partial,
+                draft_visible,
                 document,
                 pass,
             } => {
                 if *pass != event.pass {
                     *document = Document::default();
-                    *partial = None;
                     *pass = event.pass;
                 }
                 if !document.observe(event) {
                     return Ok(());
                 }
-                (tty, partial)
+                (tty, draft_visible, document, pass)
             },
         };
         let mut output = std::io::stdout().lock();
-        let mut prefix = prefix(event.kind, event.segment, event.revision, event.start, event.end);
-        if event.pass == crate::segment::AnalysisPass::Offline {
-            prefix.insert_str(0, "[offline] ");
-        }
-        let text = if event.result.transcript.turns.is_empty() {
-            display_text(&event.result.transcript.text)
-        } else {
-            let separator = if event.kind == "partial" { " | " } else { "\n" };
-            event
-                .result
-                .transcript
-                .turns
-                .iter()
-                .map(|turn| display_text(&turn.display()))
-                .collect::<Vec<_>>()
-                .join(separator)
-        };
         if *tty {
-            let draft = event.kind == "partial";
-            let text = if draft {
-                visible_suffix(&text, size().0.saturating_sub(prefix.len() + 2))
-            } else {
-                text
-            };
-            write!(output, "\r\x1b[2K{prefix}{text}{}", if draft { "" } else { "\n" }).map_err(output_error)?;
-            if draft {
-                *partial = Some((event.segment, format!("{prefix}{text}")));
-            } else if let Some((segment, draft)) = partial.take()
-                && segment > event.segment
-            {
-                write!(output, "{draft}").map_err(output_error)?;
-                *partial = Some((segment, draft));
-            }
+            clear_draft(&mut output, draft_visible)?;
+        }
+        let line = if event.kind == "partial" {
+            document.draft().expect("accepted partial owns the current draft")
         } else {
+            &document.lines()[event.segment as usize]
+        };
+        if !*tty || event.kind != "partial" {
+            let prefix = line_prefix(event.kind, *pass, line);
+            let text = line.display(if event.kind == "partial" { " | " } else { "\n" });
             writeln!(output, "{prefix}{text}").map_err(output_error)?;
+        }
+        if *tty {
+            render_draft(&mut output, draft_visible, document, *pass)?;
         }
         output.flush().map_err(output_error)
     }
@@ -124,9 +105,29 @@ impl Output {
     pub fn status(&mut self, status: &str, command: &str) -> Result<()> {
         if let Self::Editor(editor) = self {
             editor.status(status);
-            editor.render(command)?;
+            return editor.render(command);
         }
-        Ok(())
+        let mut output = std::io::stdout().lock();
+        if let Self::Text {
+            tty: true,
+            draft_visible,
+            ..
+        } = self
+        {
+            clear_draft(&mut output, draft_visible)?;
+        }
+        output.flush().map_err(output_error)?;
+        writeln!(std::io::stderr().lock(), "{}", display_text(status)).map_err(output_error)?;
+        if let Self::Text {
+            tty: true,
+            draft_visible,
+            document,
+            pass,
+        } = self
+        {
+            render_draft(&mut output, draft_visible, document, *pass)?;
+        }
+        output.flush().map_err(output_error)
     }
 
     pub fn replay(&mut self, path: &Path) -> Result<()> {
@@ -148,6 +149,15 @@ impl Output {
     pub fn finish(&mut self) -> Result<()> {
         if let Self::Editor(editor) = self {
             editor.finish()?;
+        } else if let Self::Text {
+            tty: true,
+            draft_visible,
+            ..
+        } = self
+        {
+            let mut output = std::io::stdout().lock();
+            clear_draft(&mut output, draft_visible)?;
+            output.flush().map_err(output_error)?;
         }
         Ok(())
     }
@@ -155,10 +165,47 @@ impl Output {
 
 impl Drop for Output {
     fn drop(&mut self) {
-        if matches!(self, Self::Text { partial: Some(_), .. }) {
+        if matches!(
+            self,
+            Self::Text {
+                draft_visible: true,
+                ..
+            }
+        ) {
             let _ = writeln!(std::io::stdout());
         }
     }
+}
+
+fn line_prefix(kind: &str, pass: AnalysisPass, line: &Line) -> String {
+    let mut prefix = prefix(kind, line.segment, line.revision, line.start, line.end);
+    if pass == AnalysisPass::Offline {
+        prefix.insert_str(0, "[offline] ");
+    }
+    prefix
+}
+
+fn clear_draft(output: &mut impl Write, visible: &mut bool) -> Result<()> {
+    if std::mem::take(visible) {
+        write!(output, "\r\x1b[2K").map_err(output_error)?;
+    }
+    Ok(())
+}
+
+fn render_draft(output: &mut impl Write, visible: &mut bool, document: &Document, pass: AnalysisPass) -> Result<()> {
+    if let Some(line) = document.draft() {
+        // Keep the complete render inside one physical row, including its prefix and wide Unicode text.
+        let available = size().0.saturating_sub(1);
+        let mut prefix = line_prefix("partial", pass, line);
+        // Prefer transcript text when metadata would leave no room for an ellipsis and one wide character.
+        if prefix.width() + 3 > available {
+            prefix.clear();
+        }
+        let text = visible_suffix(&line.display(" | "), available.saturating_sub(prefix.width()));
+        write!(output, "\r\x1b[2K{prefix}{text}").map_err(output_error)?;
+        *visible = true;
+    }
+    Ok(())
 }
 
 pub fn write_json(output: &mut impl Write, value: &impl Serialize) -> Result<()> {

@@ -167,7 +167,7 @@ impl Editor {
             .rev()
         {
             let prefix = prefix(kind, line.segment, line.revision, line.start, line.end);
-            let text = display_text(&line.display());
+            let text = line.display(" | ");
             let available = columns.saturating_sub(prefix.len() + 1);
             let wrapped = if available >= 2 {
                 wrap(&text, available)
@@ -202,7 +202,7 @@ impl Editor {
     fn save(&mut self) -> Result<()> {
         if let Some(mut transcript) = self.transcript.take() {
             for line in self.document.lines() {
-                writeln!(transcript, "{}", line.display()).map_err(editor_error)?;
+                writeln!(transcript, "{}", line.display(" | ")).map_err(editor_error)?;
             }
             transcript.flush().map_err(editor_error)?;
         }

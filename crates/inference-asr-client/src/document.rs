@@ -5,6 +5,7 @@ use serde::Serialize;
 
 use crate::audio::SAMPLE_RATE;
 use crate::segment::AudioEvent;
+use crate::terminal::display_text;
 use crate::transcript::SpeakerTurn;
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -31,15 +32,15 @@ pub struct Line {
 }
 
 impl Line {
-    pub fn display(&self) -> String {
+    pub fn display(&self, separator: &str) -> String {
         if self.turns.is_empty() {
-            return self.text.clone();
+            return display_text(&self.text);
         }
         self.turns
             .iter()
-            .map(SpeakerTurn::display)
+            .map(|turn| display_text(&turn.display()))
             .collect::<Vec<_>>()
-            .join(" | ")
+            .join(separator)
     }
 }
 
