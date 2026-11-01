@@ -439,6 +439,26 @@ Collected mode accepts 10 ms through 30 seconds and retains a failed request's r
 `--save` must name a new file. It also retains a complete continuous recording.
 The writer buffers PCM writes. Finalization flushes the buffer and updates the WAV header before success.
 
+### Community-1 reader and scoring tools
+
+`examples/readers/community_1.rs` provides a standalone speaker reader for the shared PCM log.
+Build it in the speakrs checkout at `5a8f5804c189defe597e8aebb6a82bbfedde9f48` with the `cpu` feature.
+The reader loads `models/` beside its executable. `--model-dir PATH` overrides that directory.
+`--recording PATH` selects the read-only 16 kHz mono S16LE log. `--pass live` or `--pass offline` selects the pass.
+
+The caller sends contiguous progress ranges. The reader owns inference windows, speaker identity and output sealing.
+An empty replacement removes existing labels inside its range.
+
+```text
+PCM log samples [0, 16000), already written
+  caller -> {"start":0,"end":16000,"stopped":true}
+  reader -> protocol readiness, then speaker replacements and a seal
+  PCM stays in the log; the pipe carries only progress and labels
+```
+
+`examples/asr_speaker_score.rs` compares speaker intervals against RTTM references.
+It reports missed speech, false alarms, speaker confusion and DER with an explicit scoring range.
+
 ### Native model setup
 
 Build the Rust client and prepare assets once:
