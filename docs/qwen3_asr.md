@@ -41,6 +41,9 @@ The executable owns capture, streaming and external checkpoint preparation. The 
 | Client source | Owner |
 | --- | --- |
 | `audio.rs` | FFmpeg child and pipes, canonical PCM, shared WAV encoding and recording lifecycle |
+| `recording.rs` | Single PCM writer, positional readers, archive encoding and atomic publication |
+| `analysis.rs` | Append/replace/seal contracts, label timelines, bounded CPU processors and reader tasks |
+| `diarization.rs` | Speaker intervals and the append/replace/seal diarizer contract |
 | `assets.rs` | Pinned Whisper download/copy, byte and SHA-256 validation, atomic publication |
 | `config.rs` | One Serde/Clap schema, defaults, explicit CLI precedence and external validation |
 | `session.rs` | `AudioSession`: capture, processing, output and recording lifetime |
@@ -57,6 +60,21 @@ The executable owns capture, streaming and external checkpoint preparation. The 
 | `main.rs` | Startup commands, replay and process cancellation |
 
 The native `asr_e2e` example generates fixtures and replays the production executable through the service.
+
+### Recording and analysis primitives
+
+`AudioRecordingWriter` publishes a readable end only after it writes complete PCM samples.
+`AudioRecordingReader` uses positional reads. Each reader owns its notification cursor.
+`AudioReaderTask` owns analysis progress and one queued result batch. Notifications can coalesce without losing samples.
+`AudioTimeline` applies authoritative replacements and contiguous seals. Labels have a separate lifetime from PCM.
+
+```text
+writer appends samples [0, 512) -> publish end 512
+writer appends samples [512, 1024) -> publish end 1024
+  reader A at 0   -> reads [0, 1024)
+  reader B at 512 -> reads [512, 1024)
+  both retain the same PCM file; each advances its own cursor
+```
 
 ### Client composition and trust
 

@@ -11,14 +11,17 @@ use crate::output::Output;
 use crate::session::AudioSession;
 use crate::terminal::TerminalInput;
 
+mod analysis;
 mod audio;
 mod assets;
 mod config;
+mod diarization;
 mod document;
 mod editor;
 mod language;
 mod models;
 mod output;
+mod recording;
 mod overlap;
 mod segment;
 mod service;
