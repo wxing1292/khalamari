@@ -10,6 +10,7 @@ For documentation changes, use [technical English](technical_english.md).
 
 | Task | Start here | Add when relevant |
 | --- | --- | --- |
+| Design or review a component/API | [Contract-first design](engineering_conventions.md#design-decision-order) | [Architecture boundaries](high_level.md#core-vs-executor), [public API](engineering_conventions.md#public-api) |
 | Run or integrate the service | [Service](service.md) | [Pi provider](../agent-plugins/pi/README.md) |
 | Change scheduling or cache lifecycle | [Runtime core](core.md) | [Token-budget allocation](token_budget_allocator.md) |
 | Change model execution or replay composition | [Executor architecture](executor.md) | [Qwen executor](executor_qwen.md) and the component below |

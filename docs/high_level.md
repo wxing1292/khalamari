@@ -72,69 +72,17 @@ Do not use busy waiting or block polling.
 
 ## Ownership style
 
-Name the managed object before adding APIs.
-An entity must own a concept, invariant, resource, lifecycle, reusable operation, or material clarity.
-Remove redundant derived state and one-use forwarding helpers.
-Keep stable identity, explicit dtype/tuning choices, and meaningful resource views.
-Derive counts and capacities from the dimensions that own them.
-Recommendation: Use direct data flow. Do not minimize entity count mechanically.
-
-```text
-external input/configuration
-  -> validate owning boundary once
-     positive dimensions -> checked derived counts -> shader domain -> buffer ranges
-  -> trusted private path: ordinary arithmetic + lossless casts -> dispatch
-```
-
-An upstream initialization boundary can establish the same domain.
-The private backend path must not repeat its checks.
-Peer components must use the same owning boundary when their contracts match.
-
-| Domain | Boundary |
-| --- | --- |
-| `u32` shader count | Reject `2^32` |
-| `u32` element index | Exactly `2^32` elements are valid, maximum index `u32::MAX` |
-
-Name assertions/tests for the count or index domain they protect.
-Keep checked arithmetic at real allocation, file, snapshot, narrowing, shader, runtime, and state-version boundaries.
-
-| API | Meaning |
-| --- | --- |
-| `get / get_ref / get_mut`, `set`, `push / pop` | Small object-owned operations |
-| `reset` | Reset the full managed object at that scope |
-| `set_<field>` | Change only that field |
-| `new` | Construct an owner, external access only if its contract requires it |
-| `load` / `unload` | Acquire/release the same resource shape |
-| `load_all` / `unload_all` | Acquire/release every resource in the current domain |
-
-Recommendation: Keep lifecycle pairs symmetric within one owner.
-Do not add hot-path cleanup operations to compensate for unclear ownership.
-
-A mapping/index owns data relationships. The store owns path resolution, mapped-file caches, base directory, and resource lifetime.
-Use `load(model_dir)` or `from_model_dir(model_dir)` for fixed checkpoint layouts.
-Recommendation: Keep `new(model_dir, index)` when callers also need explicit composition.
-Do not hide another resource lifecycle behind the same load/unload pair.
-
-An impossible lifecycle state is an invariant bug, not a recoverable error.
-Change the structure only when valid inputs can break the data flow or the owner cannot enforce the contract.
+Start with business entities, owners, inputs/outputs, state and lifecycle. Then define the invariants, data flow and API.
+Each owner must enforce its contract. Keep state, resources and release authority together at the appropriate scope.
+[Engineering conventions](engineering_conventions.md#design-decision-order) own the detailed entity, interface, data-flow and completion rules.
+[Validation and arithmetic](engineering_conventions.md#validation-and-arithmetic) own boundary checks and internal invariants.
 
 ## Design style
 
-```text
-caller inputs/outputs + ownership + state transitions
-  -> compare peer contracts -> select reusable backend implementation
-  -> verify intended default -> remove obsolete implementation
-```
-
+Correctness and performance have equal priority. Fix root causes at the owning architectural layer, not only at the smallest diff.
+Use the simplest design that satisfies the contract. Match peer contracts and keep real semantic differences explicit.
 Recommendation: Use established libraries when they reduce maintenance or correctness risk.
 Keep project semantics at their owner, such as Qwen response grammar above a generic incremental tokenizer.
-
-| Peer contracts match | Real semantic/lifecycle difference |
-| --- | --- |
-| Parallel names, APIs, ownership, replay and tests | Keep the difference explicit at its owner |
-| Small symmetric entity when it clarifies the contract | No entity only for visual symmetry |
-
-Peer examples include GQA/GDN state tables, dense MLP/MoE, and sampling/rejection sampling.
 
 Reusable backend operators/components own performance optimizations.
 Selection uses dimensions, dtype, quantization, topology, and device capabilities.

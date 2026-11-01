@@ -1,6 +1,6 @@
 # Engineering Conventions
 
-This guide owns naming, shapes/layouts, replay safety, optimization, public APIs, and test style.
+This guide owns contract-first design, API and naming conventions, shapes/layouts, replay safety, optimization, and test style.
 
 [`high_level.md`](high_level.md) defines architecture and ownership boundaries. Each component document defines its
 tensor terms, source owners, and execution paths. [`gpu_execution.md`](gpu_execution.md) defines the shared GPU launch,
@@ -9,18 +9,115 @@ specialization, task, tile, layout, registry, and selection vocabulary.
 ## Design decision order
 
 ```text
-owner + inputs/outputs + resources/lifecycle
-  -> invariant -> compare peer contracts -> smallest semantic entity
-  -> validate external boundary -> direct trusted data flow -> focused owner test
+business entities -> owners + inputs/outputs + state + lifecycle
+  -> invariants + data flow -> peer contracts -> trait/API
+  -> implementation + execution strategy -> focused verification
 ```
 
-Match APIs, source structure, replay policy, and test classification when peer contracts match.
-Keep real state/compute differences. Do not add lifecycle operations for visual symmetry.
-Peer groups include GQA/GDN, dense MLP/sparse MLP/MoE, and Main/MTP/DFlash2 shared role boundaries.
+Fix a problem at the owner that can enforce its contract. Do not select a design only because it gives the smallest diff.
+Correctness and performance have equal priority. Prefer the simplest design that satisfies both.
+For a design review, establish the entities and contracts before debating method names or scheduling details.
 
-Production source may change for real ownership, API, resource, or lifecycle needs.
-It must not change only for test setup or private-detail access.
-[High-level guidance](high_level.md#core-vs-executor) owns the runtime/executor/backend boundary.
+### Entities and state
+
+An entity must own a domain concept, invariant, resource, lifecycle, reusable operation, or material clarity.
+A temporary batch or range does not require a separate entity. Do not minimize entity count mechanically.
+
+| Concept | Required distinction |
+| --- | --- |
+| Data | Content and coordinates, separate from the task that processes it |
+| Owner | Authority over state transitions, resource retention and release |
+| Request/response | Inputs and outputs of the same named operation |
+| Task | Execution and completion, only when these need an independent owner |
+| Configuration | Validated choices and limits, separate from runtime progress |
+
+These concepts do not require one struct each. [GPU work vocabulary](#gpu-work-vocabulary) defines kernel-specific task names.
+
+Keep independent state and explicit tuning choices. Derive values from their owner instead of storing redundant copies.
+A cache must avoid repeated work or retain a required resource. Stable identity, capacity, and meaningful resource views are not redundant state.
+
+Remove a wrapper only when it forwards one-to-one and owns no independent lifetime, slice, resource, or semantic branch.
+Production structure must not exist only to simplify tests or benchmarks.
+
+### Interface contracts
+
+A trait must represent a real behavioral or substitution boundary. A concrete type is sufficient when no such boundary is needed.
+Keep implementation-specific windows, buffers, caches and scheduling inside their owner unless the caller needs them to enforce its contract.
+An implementation's use of another component or preprocessing step does not automatically make that dependency part of the public trait.
+
+Match peer APIs, source structure, ownership, lifecycle and verification when their contracts match. Keep real differences explicit.
+Do not add a type, trait, enum, field, wrapper, or lifecycle operation only for visual symmetry.
+Peer examples include GQA/GDN, dense MLP/MoE, and Main/MTP/DFlash2 roles.
+
+| API | Meaning |
+| --- | --- |
+| `new` | Construct an owner with explicit inputs |
+| `load` / `unload` | Acquire/release the same resource shape |
+| `load_all` / `unload_all` | Acquire/release every resource in the current domain |
+| `start` / `stop` | Start/stop the same ongoing activity |
+| `reset` | Reset the full managed object at that scope |
+| `set_<field>` | Change only the named field |
+| `get / get_ref / get_mut`, `set`, `push / pop` | Small object-owned operations |
+
+Use consistent lifecycle pairs within a contract. Do not alternate `begin/end`, `start/end`, and `start/stop` for the same activity.
+Define whether stop accepts no more input, drains work, or completes output. Add a separate operation only for a real separate transition.
+Do not hide another resource lifecycle behind the same `load` / `unload` pair.
+
+A mapping/index owns relationships. Its store owns paths, mapped-file caches, base directory and resource lifetime.
+Use `load(model_dir)` or `from_model_dir(model_dir)` for fixed checkpoint layouts.
+Recommendation: Keep `new(model_dir, index)` when callers also need explicit composition.
+
+Name methods for the business operation. Explain what a count measures before choosing a shorter name.
+Request and response names must identify the same operation and subject. Follow the owning component's suffix convention, such as `Req` / `Resp`.
+Do not add request/response structs only to rename arguments or a return value.
+
+Implement a production trait method directly in its trait implementation. Do not duplicate it as an inherent forwarding method.
+Keep constructors and other operations in the inherent implementation.
+
+Select `Vec`, iterator, future, stream, or channel from the delivery and lifetime contract. Incremental processing does not require an asynchronous stream.
+A model that emits incremental output does not necessarily accept incremental input. Verify both capabilities separately.
+
+### Data flow and progress
+
+Define the input unit, retained data, processing range, output unit and coordinate system.
+Keep source data, derived results and progress notifications separate. Specify who can read, revise and release each one.
+Use one authoritative coordinate system for each stream. Derive exact timestamps and lengths from existing coordinates instead of keeping a second authority.
+
+At a format boundary, separate external decoding/conversion from the consumer's internal representation.
+The consumer contract determines that representation. Do not impose one model's format on another.
+
+Use shared storage when independent readers need the same retained input. For example:
+
+```text
+writer owns append order -> log bytes [0, 8192)
+  complete write -> publish readable end 8192
+    reader A owns cursor 4096 -> reads [4096, 8192) -> derived labels
+    reader B owns cursor    0 -> reads [0, 8192)    -> archive
+
+notifications can merge; each reader advances its own cursor
+readability, durable storage and consumer completion are separate contracts
+```
+
+This pattern does not require every pipeline to use a log. Choose retention and transport from the consumers' needs.
+
+For an append-only contract, define whether input is disjoint, overlapping, or contiguous. Enforce that invariant at its owner.
+For revisable output, distinguish the range being replaced from the spans or items inside it. Define what an empty replacement means.
+If output can become immutable, define the exact boundary and whether it applies to one pass or the full session.
+
+### Execution and completion
+
+Separate asynchronous orchestration and I/O waits from synchronous computation. An async method alone does not move CPU work off an event loop.
+Keep control and cancellation responsive during initialization, inference and drain. Reuse existing task pools when their contracts match.
+
+Define admission limits, queue capacity and backpressure. Add workers or concurrency only when their ownership and resource use are justified.
+When completion can reorder, define where order is restored and where stale results are rejected.
+Add a revision or epoch only for a concrete stale-output risk. Its owner must allocate and validate it consistently.
+Cancellation must define what stops, what drains, which outputs are discarded, and when resources can be released.
+
+Do not use queued, submitted, ready, completed and consumed as interchangeable states.
+A resource reported as ready must be safe for the specified consumer. An outstanding completion dependency must be explicit in the contract.
+Do not add hot-path cleanup or fallback recovery to compensate for unclear ownership.
+[Validation and arithmetic](#validation-and-arithmetic) define the boundary between recoverable input errors and internal invariant bugs.
 
 ## Rust semantic workflow
 
@@ -274,13 +371,6 @@ They must not derive capacity from the current batch.
 Logical structure has priority. Stable component identity and explicit data-type or tuning choices are not redundant.
 Meaningful resource views are also not redundant because one model uses one value.
 
-Use transferable symmetry across peer components. Use the same owner boundary, API vocabulary, and structure when the
-contracts match. Symmetry does not require identical lifecycle operations or zero duplication. Do not add a type, trait,
-wrapper, field, or operation only to create visual symmetry.
-
-Remove a wrapper only when it forwards one-to-one. The wrapper must own no independent lifetime, slice, resource, or
-semantic branch.
-
 ### Validation and arithmetic
 
 The trust boundary determines validation behavior.
@@ -293,6 +383,16 @@ variant. For example, invalid RPC input must return `InvalidArgument`.
 A constructor or initialization path establishes the trusted domain. It must validate static configuration, topology,
 capacity, layout, narrowing, allocation size, and shader-domain limits that its private paths require. It may use
 checked arithmetic to prove these invariants once.
+
+Distinguish a count from an element index at the shader boundary:
+
+| Domain | Boundary |
+| --- | --- |
+| `u32` shader count | Reject `2^32` |
+| `u32` element index | Exactly `2^32` elements are valid, maximum index `u32::MAX` |
+
+Name assertions and tests for the count or index domain they protect.
+Matching peer contracts must use the same owning validation boundary.
 
 Inside the trust boundary, code manages invariants. Private paths must use ordinary arithmetic and direct lossless
 casts. An invariant violation is a code bug. Use `panic!`, `assert!`, or `debug_assert!` according to the lifecycle and
@@ -453,12 +553,6 @@ execution graphs.
 
 Production source and benchmarks use crate-absolute paths for sibling and ancestor imports. Use `use super::...` only
 in tests.
-
-A trait can be the production interface for a concrete type. In this case, put the method implementation directly in
-the trait implementation.
-
-Keep constructors and other operations in the inherent implementation. Do not duplicate trait methods as inherent
-methods. Do not forward between duplicate methods.
 
 Do not export these items only for convenience:
 
