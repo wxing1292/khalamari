@@ -132,12 +132,23 @@ impl Document {
                 }
             },
             Update::Speakers(line) => {
-                let current = self.lines.get(line.segment as usize);
-                if current.is_none_or(|current| current.start != line.start || current.end != line.end) {
-                    return Err(Error::invalid_argument(
-                        "speaker update must name an existing transcript range",
-                    ));
+                let current = self
+                    .lines
+                    .get(line.segment as usize)
+                    .or_else(|| self.draft.as_ref().filter(|draft| draft.segment == line.segment));
+                if let Some(current) = current {
+                    if line.revision > current.revision
+                        || (line.revision == current.revision
+                            && (line.start != current.start || line.end != current.end || line.text != current.text))
+                    {
+                        return Err(Error::invalid_argument(
+                            "speaker update must preserve the recognized text revision and range",
+                        ));
+                    }
+                } else if self.draft.as_ref().is_none_or(|draft| line.segment >= draft.segment) {
+                    return Err(Error::invalid_argument("speaker update precedes recognized text"));
                 }
+                // Older revisions and displaced drafts cannot change the current projection.
             },
             Update::Partial(_) => {},
         }
@@ -171,7 +182,10 @@ impl Document {
                 true
             },
             Update::Speakers(update) => {
-                let line = self.lines.get_mut(update.segment as usize);
+                let line = self
+                    .lines
+                    .get_mut(update.segment as usize)
+                    .or_else(|| self.draft.as_mut().filter(|draft| draft.segment == update.segment));
                 if let Some(line) = line.filter(|line| {
                     line.revision == update.revision && line.text == update.text && line.turns != update.turns
                 }) {

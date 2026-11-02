@@ -163,8 +163,11 @@ impl AudioTranscriber {
         } else {
             crate::language::plan(job.owned(), job.start, &job.languages, self.language_minimum)
         };
+        // Word alignment and boundary reconciliation belong to the completed hypothesis.
+        // Drafts use owned audio and can appear before the shared CPU model is available.
+        let overlap = if job.is_final() { self.overlap } else { 0 };
         let combined;
-        let plan = if self.overlap > 0 && ranges.len() > 1 {
+        let plan = if overlap > 0 && ranges.len() > 1 {
             combined = vec![LanguageRange {
                 start: job.start,
                 end: job.end,
@@ -179,8 +182,8 @@ impl AudioTranscriber {
         for range in plan {
             let start = (range.start - job.audio_start) as usize;
             let end = (range.end - job.audio_start) as usize;
-            let read_start = start.saturating_sub(self.overlap);
-            let read_end = (end + self.overlap).min(job.audio.len());
+            let read_start = start.saturating_sub(overlap);
+            let read_end = (end + overlap).min(job.audio.len());
             let (mut result, mut retry) = self
                 .recognize(
                     job,
@@ -190,7 +193,7 @@ impl AudioTranscriber {
                     &mut metrics,
                 )
                 .await?;
-            let (metadata, words) = if self.overlap > 0 {
+            let (metadata, words) = if overlap > 0 {
                 let audio_start = job.audio_start + read_start as u64;
                 let audio_end = job.audio_start + read_end as u64;
                 let raw = result.text.clone();
@@ -254,13 +257,15 @@ impl AudioTranscriber {
                     }),
                     words,
                 )
-            } else {
+            } else if job.is_final() {
                 (
                     None,
                     self.align(job, start..end, &result, &mut metrics)
                         .await?
                         .unwrap_or_default(),
                 )
+            } else {
+                (None, Vec::new())
             };
             let span = Span {
                 start: range.start,
@@ -278,7 +283,7 @@ impl AudioTranscriber {
         Ok(AudioSegmentTranscribeResp {
             transcript: AudioTranscript::from_spans(spans),
             transport: self.client.stats(),
-            language_ranges: (self.overlap > 0).then_some(ranges),
+            language_ranges: (overlap > 0).then_some(ranges),
             metrics: Metrics {
                 wait_seconds: started.duration_since(job.created).as_secs_f64(),
                 processing_seconds: started.elapsed().as_secs_f64(),

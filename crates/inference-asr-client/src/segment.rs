@@ -159,7 +159,15 @@ impl AudioSegmenter {
                 self.start_segment(start.max(self.owned_until));
             }
         }
-        if let Some(segment) = &self.active {
+        if let Some(segment) = &mut self.active {
+            // A draft can start before the joint analysis frontier reaches its speech.
+            // Later speaker evidence can extend its left edge to recover VAD misses.
+            if speech && previous < segment.start {
+                segment.start = previous.saturating_sub(self.padding).max(self.owned_until);
+            }
+            if self.end <= segment.start || self.last_voice_end <= segment.start {
+                return Ok(());
+            }
             let window = self.window;
             if self.end - segment.start >= window as u64 {
                 let start = segment.start;
@@ -225,10 +233,16 @@ impl AudioSegmenter {
         let Some(segment) = &self.active else {
             return;
         };
+        if self.last_voice_end <= segment.start {
+            return;
+        }
         let silence = self.end - self.last_voice_end;
         let reason = if silence >= self.silence {
             "silence"
-        } else if segment.stable_end >= self.last_voice_end && silence >= self.sentence_silence {
+        } else if segment.stable_end >= self.last_voice_end
+            && segment.stable_end <= self.end
+            && silence >= self.sentence_silence
+        {
             "sentence"
         } else {
             return;
@@ -260,13 +274,9 @@ impl AudioSegmenter {
         created: Instant,
     ) -> Result<AudioSegmentTranscribeReq> {
         let (start, end) = (range.start, range.end);
-        let overlap = self.overlap;
+        let overlap = if reason == "update" { 0 } else { self.overlap };
         let audio_start = start.saturating_sub(overlap);
-        let available = if reason == "update" {
-            self.end
-        } else {
-            self.recording.end()
-        };
+        let available = self.recording.end();
         let audio_end = available.min(end.saturating_add(overlap));
         Ok(AudioSegmentTranscribeReq {
             segment,
@@ -281,12 +291,15 @@ impl AudioSegmenter {
         })
     }
 
-    /// Allocate a revision only when a free inference slot accepts the job. Finals have priority.
-    pub fn next_request(&mut self, language_end: u64) -> Result<Option<AudioSegmentTranscribeReq>> {
-        if self.pending.front().is_some_and(|range| range.end > language_end) || self.waiting_for_context().is_some() {
-            return Ok(None);
-        }
-        if let Some(range) = self.pending.pop_front() {
+    /// Allocate a revision only when a free inference slot accepts the job. Ready finals have priority.
+    /// Preview speech can advance the draft before joint analysis confirms its boundaries.
+    pub fn next_request(
+        &mut self,
+        language_end: u64,
+        preview: Option<Range<u64>>,
+    ) -> Result<Option<AudioSegmentTranscribeReq>> {
+        if self.pending.front().is_some_and(|range| range.end <= language_end) && self.waiting_for_context().is_none() {
+            let range = self.pending.pop_front().unwrap();
             return self
                 .snapshot(
                     range.segment,
@@ -297,20 +310,30 @@ impl AudioSegmenter {
                 )
                 .map(Some);
         }
-        let end = self.end.min(language_end);
-        if self.pass == AnalysisPass::Live
-            && !self.stopped
-            && let Some(segment) = &mut self.active
-            && end >= segment.start + self.min_partial
-            && self.last_voice_end > segment.last_partial
-            && end >= segment.last_partial + self.interval
-        {
-            segment.last_partial = end;
-            segment.revision += 1;
-            let (id, revision, start) = (segment.id, segment.revision, segment.start);
-            return self
-                .snapshot(id, revision, start..end, "update", Instant::now())
-                .map(Some);
+        if self.pass == AnalysisPass::Live && !self.stopped {
+            if self.active.is_none()
+                && let Some(speech) = &preview
+                && speech.end > self.owned_until
+            {
+                self.start_segment(speech.start.saturating_sub(self.padding).max(self.owned_until));
+            }
+            if let Some(segment) = &mut self.active {
+                let voice_end = preview
+                    .as_ref()
+                    .map_or(self.last_voice_end, |range| range.end.max(self.last_voice_end));
+                let end = self.end.max(voice_end).min(segment.start + self.window as u64);
+                if end >= segment.start + self.min_partial
+                    && voice_end > segment.last_partial
+                    && end >= segment.last_partial + self.interval
+                {
+                    segment.last_partial = end;
+                    segment.revision += 1;
+                    let (id, revision, start) = (segment.id, segment.revision, segment.start);
+                    return self
+                        .snapshot(id, revision, start..end, "update", Instant::now())
+                        .map(Some);
+                }
+            }
         }
         Ok(None)
     }
@@ -384,7 +407,9 @@ impl AudioSegmenter {
         let mut retain = self
             .active
             .as_ref()
-            .map_or(self.end.saturating_sub(self.padding), |s| s.start)
+            .map_or(self.end.saturating_sub(self.padding), |s| {
+                s.start.min(self.end.saturating_sub(self.padding))
+            })
             .saturating_sub(overlap);
         if let Some(first) = self.pending.front() {
             retain = retain.min(first.start.saturating_sub(overlap));

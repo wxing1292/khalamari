@@ -91,7 +91,8 @@ impl AudioRecordingReader {
         self.published.has_changed().is_err()
     }
 
-    fn bytes(&self, range: Range<u64>) -> Result<Vec<u8>> {
+    /// Reads canonical S16LE PCM without an intermediate sample conversion.
+    pub fn read_bytes(&self, range: Range<u64>) -> Result<Vec<u8>> {
         // This boundary accepts independently scheduled readers, including retained older ranges.
         if range.start > range.end || range.end > self.end() {
             return Err(Error::invalid_argument(
@@ -110,7 +111,7 @@ impl AudioRecordingReader {
 
     pub fn read(&self, range: Range<u64>) -> Result<Vec<i16>> {
         Ok(self
-            .bytes(range)?
+            .read_bytes(range)?
             .as_chunks::<2>()
             .0
             .iter()
@@ -177,7 +178,7 @@ pub async fn archive(mut recording: AudioRecordingReader, ffmpeg: &str, destinat
             break;
         }
         input
-            .write_all(&recording.bytes(cursor..end)?)
+            .write_all(&recording.read_bytes(cursor..end)?)
             .await
             .map_err(recording_error)?;
         cursor = end;

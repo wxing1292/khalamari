@@ -368,7 +368,9 @@ async fn replay(binary: &Path, flags: &[String], seconds: f64) -> Result<Replay>
                         if let Some(stats) = line.strip_prefix("Audio transport: ") {
                             result.transport = serde_json::from_str(stats).map_err(external)?;
                         }
-                        if result.capture_start.is_none() && line.starts_with("Recording. Press Enter to stop") {
+                        if result.capture_start.is_none()
+                            && (line.starts_with("Recording. Press Enter to stop") || line.starts_with("Reading audio file."))
+                        {
                             result.capture_start = Some(started.elapsed().as_secs_f64());
                         }
                         diagnostics.push_str(&line);
@@ -420,6 +422,7 @@ fn verify(case: &Case, replay: &Replay, frames: u64) -> Result<String> {
     integer(&replay.transport["requested_samples"])?;
     let mut revisions = BTreeMap::new();
     let mut finals = BTreeMap::new();
+    let mut hypotheses = BTreeMap::new();
     let mut next_final = 0;
     let mut final_end = 0;
     for event in &replay.events {
@@ -433,14 +436,14 @@ fn verify(case: &Case, replay: &Replay, frames: u64) -> Result<String> {
         let start = integer(&event["start_sample"])?;
         let end = integer(&event["end_sample"])?;
         if event["type"] == "speakers" {
-            let previous: &&Value = finals
+            let previous: &&Value = hypotheses
                 .get(&segment)
-                .ok_or_else(|| Error::invalid_argument("speaker update precedes final"))?;
+                .ok_or_else(|| Error::invalid_argument("speaker update precedes recognized text"))?;
             check(
                 ["revision", "start_sample", "end_sample", "text"]
                     .iter()
                     .all(|key| previous[*key] == event[*key]),
-                "speaker update changed finalized text or coordinates",
+                "speaker update changed recognized text or coordinates",
             )?;
         } else {
             check(segment >= next_final, "event after final")?;
@@ -449,6 +452,7 @@ fn verify(case: &Case, replay: &Replay, frames: u64) -> Result<String> {
                 "revision did not advance",
             )?;
             revisions.insert(segment, revision);
+            hypotheses.insert(segment, event);
         }
         check(start < end && end <= frames, "invalid audio range")?;
         let mut cursor = start;

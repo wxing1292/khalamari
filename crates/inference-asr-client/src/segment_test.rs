@@ -5,7 +5,7 @@ fn test_feed_silence() {
     let (mut recording, mut session) = fixture_segmenter(&fixture_config());
     feed(&mut recording, &mut session, 10000, false);
     feed(&mut recording, &mut session, 32, true);
-    let job = session.next_request(u64::MAX).unwrap().unwrap();
+    let job = session.next_request(u64::MAX, None).unwrap().unwrap();
     assert!(job.start > 5_000_000);
     assert_eq!(job.audio.len() as u64, job.end - job.start);
 }
@@ -14,12 +14,12 @@ fn test_feed_silence() {
 fn test_feed_limit() {
     let (mut recording, mut session) = fixture_segmenter(&fixture_config());
     feed(&mut recording, &mut session, 63, true);
-    let first = session.next_request(u64::MAX).unwrap().unwrap();
+    let first = session.next_request(u64::MAX, None).unwrap().unwrap();
     assert_eq!((first.start, first.end, first.reason), (0, 32000, "limit"));
     session.accept(&first, fixture_transcript("a")).unwrap();
     feed(&mut recording, &mut session, 20, true);
     session.stop();
-    let second = session.next_request(u64::MAX).unwrap().unwrap();
+    let second = session.next_request(u64::MAX, None).unwrap().unwrap();
     assert_eq!(second.start, first.end);
     assert_eq!(second.end, 83 * 512);
 }
@@ -40,7 +40,7 @@ fn test_limit_cuts_at_the_quiet_interval_on_the_recording_clock() {
             .unwrap();
         session.feed(session.end() + frame.len() as u64, true, None).unwrap();
     }
-    let job = session.next_request(u64::MAX).unwrap().unwrap();
+    let job = session.next_request(u64::MAX, None).unwrap().unwrap();
     assert_eq!((job.reason, job.end), ("limit", 139_200));
 }
 
@@ -55,10 +55,10 @@ fn test_offline_cut_retains_suffix() {
         VecDeque::from([25_600]),
     );
     feed(&mut recording, &mut session, 63, true);
-    let prefix = session.next_request(u64::MAX).unwrap().unwrap();
+    let prefix = session.next_request(u64::MAX, None).unwrap().unwrap();
     assert_eq!((prefix.start, prefix.end, prefix.reason), (0, 25_600, "limit"));
     session.stop();
-    let suffix = session.next_request(u64::MAX).unwrap().unwrap();
+    let suffix = session.next_request(u64::MAX, None).unwrap().unwrap();
     assert_eq!((suffix.start, suffix.end), (prefix.end, 63 * 512));
 }
 
@@ -70,9 +70,9 @@ fn test_next_request_overlap() {
     let (mut recording, mut session) = fixture_segmenter(&cfg);
     feed(&mut recording, &mut session, 32, true);
     feed(&mut recording, &mut session, 16, false);
-    assert!(session.next_request(u64::MAX).unwrap().is_none());
+    assert!(session.next_request(u64::MAX, None).unwrap().is_none());
     session.stop();
-    let job = session.next_request(u64::MAX).unwrap().unwrap();
+    let job = session.next_request(u64::MAX, None).unwrap().unwrap();
     assert!(job.is_final());
     assert_eq!(
         (job.start, job.end, job.audio_start, job.audio.len()),
@@ -90,7 +90,7 @@ fn test_final_reads_published_right_context() {
     let processed = session.end();
     let required = session.waiting_for_context().unwrap();
     recording.append(&vec![0; (required - processed) as usize * 2]).unwrap();
-    let job = session.next_request(u64::MAX).unwrap().unwrap();
+    let job = session.next_request(u64::MAX, None).unwrap().unwrap();
     assert!(job.is_final());
     assert_eq!(job.audio_start + job.audio.len() as u64, required);
     assert_eq!(session.end(), processed);
@@ -102,9 +102,9 @@ fn test_next_request_final_priority() {
     feed(&mut recording, &mut session, 32, true);
     feed(&mut recording, &mut session, 16, false);
     feed(&mut recording, &mut session, 32, true);
-    let first = session.next_request(u64::MAX).unwrap().unwrap();
+    let first = session.next_request(u64::MAX, None).unwrap().unwrap();
     assert!(first.is_final());
-    let second = session.next_request(u64::MAX).unwrap().unwrap();
+    let second = session.next_request(u64::MAX, None).unwrap().unwrap();
     assert!(!second.is_final());
     assert!(second.segment > first.segment);
     assert!(second.start >= first.end);
@@ -116,25 +116,50 @@ fn test_accept_sentence() {
     cfg.window_seconds = 10.0;
     let (mut recording, mut session) = fixture_segmenter(&cfg);
     feed(&mut recording, &mut session, 32, true);
-    let first = session.next_request(u64::MAX).unwrap().unwrap();
+    let first = session.next_request(u64::MAX, None).unwrap().unwrap();
     session.accept(&first, fixture_transcript("你好 hello.")).unwrap();
     feed(&mut recording, &mut session, 32, true);
-    let second = session.next_request(u64::MAX).unwrap().unwrap();
+    let second = session.next_request(u64::MAX, None).unwrap().unwrap();
     session.accept(&second, fixture_transcript("你好 hello.")).unwrap();
     feed(&mut recording, &mut session, 8, false);
-    let final_job = session.next_request(u64::MAX).unwrap().unwrap();
+    let final_job = session.next_request(u64::MAX, None).unwrap().unwrap();
     assert_eq!(final_job.reason, "sentence");
     assert_eq!(final_job.end, 64 * 512 + 3200);
     feed(&mut recording, &mut session, 32, true);
-    let next = session.next_request(u64::MAX).unwrap().unwrap();
+    let next = session.next_request(u64::MAX, None).unwrap().unwrap();
     assert_eq!(next.start, final_job.end);
+}
+
+#[test]
+fn test_sentence_evidence_waits_for_the_analysis_cursor() {
+    let cfg = StreamConfig {
+        window_seconds: 10.0,
+        ..fixture_config()
+    };
+    let (mut recording, mut segmenter) = fixture_segmenter(&cfg);
+    feed(&mut recording, &mut segmenter, 32, true);
+    recording.append(&1000i16.to_le_bytes().repeat(64 * 512)).unwrap();
+    let first = segmenter.next_request(0, Some(0..32_768)).unwrap().unwrap();
+    segmenter.accept(&first, fixture_transcript("你好 hello.")).unwrap();
+    let second = segmenter.next_request(0, Some(0..49_152)).unwrap().unwrap();
+    segmenter.accept(&second, fixture_transcript("你好 hello.")).unwrap();
+    segmenter.feed(40 * 512, false, None).unwrap();
+    assert!(
+        !segmenter.has_pending(),
+        "future punctuation cannot close an earlier pause"
+    );
+    segmenter.feed(49_152, true, None).unwrap();
+    recording.append(&0i16.to_le_bytes().repeat(4_096)).unwrap();
+    segmenter.feed(49_152 + 4_096, false, None).unwrap();
+    let final_job = segmenter.next_request(u64::MAX, None).unwrap().unwrap();
+    assert_eq!((final_job.reason, final_job.end), ("sentence", 49_152 + 3_200));
 }
 
 #[test]
 fn test_accept_closed_segment() {
     let (mut recording, mut session) = fixture_segmenter(&fixture_config());
     feed(&mut recording, &mut session, 32, true);
-    let first = session.next_request(u64::MAX).unwrap().unwrap();
+    let first = session.next_request(u64::MAX, None).unwrap().unwrap();
     feed(&mut recording, &mut session, 16, false);
     feed(&mut recording, &mut session, 32, true);
     session.accept(&first, fixture_transcript("Old sentence.")).unwrap();
@@ -145,11 +170,11 @@ fn test_accept_closed_segment() {
 fn test_snapshot_ownership() {
     let (mut recording, mut session) = fixture_segmenter(&fixture_config());
     feed(&mut recording, &mut session, 32, true);
-    let job = session.next_request(u64::MAX).unwrap().unwrap();
+    let job = session.next_request(u64::MAX, None).unwrap().unwrap();
     recording.append(&2000i16.to_le_bytes().repeat(512)).unwrap();
     session.feed(session.end() + 512, true, None).unwrap();
     feed(&mut recording, &mut session, 16, false);
-    let final_job = session.next_request(u64::MAX).unwrap().unwrap();
+    let final_job = session.next_request(u64::MAX, None).unwrap().unwrap();
     assert!(final_job.is_final());
     feed(&mut recording, &mut session, 1000, false);
     assert_eq!(&*job.audio, vec![1000; 32 * 512]);
@@ -163,14 +188,14 @@ fn test_finish_full_queue() {
     let (mut recording, mut session) = fixture_segmenter(&cfg);
     feed(&mut recording, &mut session, 63, true);
     assert!(!session.can_feed());
-    let first = session.next_request(u64::MAX).unwrap().unwrap();
+    let first = session.next_request(u64::MAX, None).unwrap().unwrap();
     assert!(session.can_feed());
     session.stop();
-    let second = session.next_request(u64::MAX).unwrap().unwrap();
+    let second = session.next_request(u64::MAX, None).unwrap().unwrap();
     assert_eq!(first.end, second.start);
     assert_eq!(second.end, 63 * 512);
     assert!(first.is_final() && second.is_final());
-    assert!(session.next_request(u64::MAX).unwrap().is_none());
+    assert!(session.next_request(u64::MAX, None).unwrap().is_none());
 }
 
 #[test]
@@ -179,11 +204,11 @@ fn test_accept_revision_order() {
     cfg.window_seconds = 10.0;
     let (mut recording, mut session) = fixture_segmenter(&cfg);
     feed(&mut recording, &mut session, 32, true);
-    let first = session.next_request(u64::MAX).unwrap().unwrap();
+    let first = session.next_request(u64::MAX, None).unwrap().unwrap();
     feed(&mut recording, &mut session, 20, true);
-    assert!(session.next_request(u64::MAX).unwrap().is_none());
+    assert!(session.next_request(u64::MAX, None).unwrap().is_none());
     feed(&mut recording, &mut session, 12, true);
-    let second = session.next_request(u64::MAX).unwrap().unwrap();
+    let second = session.next_request(u64::MAX, None).unwrap().unwrap();
     assert_eq!((first.revision, second.revision), (1, 2));
     let event = session
         .accept(&second, fixture_transcript("new 中文"))
@@ -197,7 +222,7 @@ fn test_accept_revision_order() {
             .is_none()
     );
     feed(&mut recording, &mut session, 16, false);
-    let final_job = session.next_request(u64::MAX).unwrap().unwrap();
+    let final_job = session.next_request(u64::MAX, None).unwrap().unwrap();
     assert_eq!(final_job.revision, 3);
     let event = session
         .accept(&final_job, fixture_transcript("final 中文"))
@@ -212,12 +237,89 @@ fn test_accept_revision_order() {
             .unwrap()
             .is_none()
     );
-    assert!(session.next_request(u64::MAX).unwrap().is_none());
+    assert!(session.next_request(u64::MAX, None).unwrap().is_none());
+}
+
+#[test]
+fn test_drafts_advance_past_unready_language_and_coalesce_new_audio() {
+    let cfg = StreamConfig {
+        window_seconds: 10.0,
+        ..fixture_config()
+    };
+    let (mut recording, mut segmenter) = fixture_segmenter(&cfg);
+    feed(&mut recording, &mut segmenter, 32, true);
+    let first = segmenter.next_request(0, None).unwrap().unwrap();
+    assert_eq!((first.end, first.revision), (32 * 512, 1));
+    feed(&mut recording, &mut segmenter, 64, true);
+    let latest = segmenter.next_request(0, None).unwrap().unwrap();
+    assert_eq!((latest.end, latest.revision), (96 * 512, 2));
+    assert!(segmenter.next_request(0, None).unwrap().is_none());
+    // A newer submitted job does not hide a useful completed result.
+    assert!(
+        segmenter
+            .accept(&first, fixture_transcript("first 中文"))
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        segmenter
+            .accept(&latest, fixture_transcript("latest 中文"))
+            .unwrap()
+            .is_some()
+    );
+    assert!(!segmenter.is_current(&first));
+    feed(&mut recording, &mut segmenter, 16, false);
+    feed(&mut recording, &mut segmenter, 32, true);
+    let draft = segmenter.next_request(0, None).unwrap().unwrap();
+    assert!(!draft.is_final());
+    assert_eq!(draft.segment, 1);
+    let final_job = segmenter.next_request(u64::MAX, None).unwrap().unwrap();
+    assert!(final_job.is_final());
+    assert_eq!(final_job.segment, 0);
+    assert!(final_job.end <= draft.start);
+}
+
+#[test]
+fn test_preview_precedes_analysis_without_changing_final_boundaries() {
+    let cfg = StreamConfig {
+        window_seconds: 10.0,
+        ..fixture_config()
+    };
+    for (early_speech, expected_start) in [(true, 896), (false, 12_800)] {
+        let (mut recording, mut segmenter) = fixture_segmenter(&cfg);
+        recording.append(&1000i16.to_le_bytes().repeat(64 * 512)).unwrap();
+        let draft = segmenter.next_request(0, Some(16_000..32_000)).unwrap().unwrap();
+        assert_eq!(segmenter.end(), 0);
+        assert_eq!((draft.start, draft.end), (12_800, 32_000));
+        assert_eq!(segmenter.retained_sample(), 0);
+        segmenter.feed(4_096, false, None).unwrap();
+        if early_speech {
+            // Speaker evidence recovers speech before the VAD onset.
+            segmenter.feed(8_192, true, None).unwrap();
+        } else {
+            // Draft padding is not a confirmed pause before its speech arrives.
+            segmenter.feed(13_000, false, None).unwrap();
+        }
+        segmenter.accept(&draft, fixture_transcript("hello 中文.")).unwrap();
+        assert!(!segmenter.has_pending());
+        segmenter.feed(16_384, true, None).unwrap();
+        segmenter.feed(32_768, true, None).unwrap();
+        segmenter.stop();
+        let final_job = segmenter.next_request(u64::MAX, None).unwrap().unwrap();
+        assert_eq!(
+            (final_job.segment, final_job.start, final_job.end),
+            (draft.segment, expected_start, 32_768)
+        );
+        assert!(final_job.revision > draft.revision);
+        assert_eq!(final_job.audio.len() as u64, final_job.end - final_job.start);
+        assert!(!segmenter.is_current(&draft));
+    }
 }
 
 fn fixture_config() -> StreamConfig {
     StreamConfig {
         sentence_silence_seconds: 0.25,
+        interval: 1.0,
         window_seconds: 2.0,
         ..StreamConfig::default()
     }

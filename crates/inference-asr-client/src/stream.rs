@@ -219,12 +219,20 @@ impl AudioStream {
                 task.abort();
             }
         }
+        let mut speech = self.voices.spans.iter().filter(|span| span.end > self.segmenter.end());
+        let preview = speech
+            .clone()
+            .next()
+            .map(|first| first.start..speech.next_back().unwrap().end);
         while self.tasks.len() + self.completed.len() < self.capacity {
-            let Some(job) = self.segmenter.next_request(if self.lid.is_some() {
-                self.languages.sealed
-            } else {
-                u64::MAX
-            })?
+            let Some(job) = self.segmenter.next_request(
+                if self.lid.is_some() {
+                    self.languages.sealed
+                } else {
+                    u64::MAX
+                },
+                preview.clone(),
+            )?
             else {
                 break;
             };
@@ -248,6 +256,7 @@ impl AudioStream {
         loop {
             self.schedule()?;
             if self.segmenter.is_stopped()
+                && self.diarizer.is_stopped()
                 && self.lid.as_ref().is_none_or(AudioReaderTask::is_stopped)
                 && self.tasks.is_empty()
                 && !self.segmenter.has_pending()
@@ -321,7 +330,10 @@ impl AudioStream {
                         for event in &mut events {
                             event.result.transcript.attribute(&self.speakers.spans);
                             self.commit(event);
-                            if event.kind == "final" && event.end > self.speakers.sealed {
+                            if event.kind == "partial" {
+                                self.pending_speakers.retain(|_, previous| previous.kind == "final");
+                            }
+                            if event.end > self.speakers.sealed {
                                 self.pending_speakers.insert(event.segment, event.clone());
                             } else {
                                 self.pending_speakers.remove(&event.segment);
@@ -369,12 +381,30 @@ impl AudioStream {
                 }
             })
             .collect();
+        // An unfinished LID prefix must not force its last language onto new mixed speech.
+        let unknown = self.languages.sealed.max(job.start);
+        if self.lid.is_some() && unknown < job.end {
+            job.languages.push(LanguageRange {
+                start: unknown,
+                end: job.end,
+                language_hint: String::new(),
+                chinese_observed: false,
+            });
+        }
+        debug_assert!(
+            job.audio_start >= self.released_until,
+            "a request retains all of its PCM"
+        );
         self.release(self.retained_sample().min(job.audio_start))?;
-        let start = self.uploaded_until.max(job.audio_start);
+        // Submitted jobs already own fully uploaded ranges. Only unsubmitted ranges
+        // can need PCM between the previous upload and this job.
+        let required = self.segmenter.retained_sample().min(job.audio_start);
+        let start = self.uploaded_until.max(required);
         let end = job.audio_start + job.audio.len() as u64;
         if start < end {
-            self.client
-                .append(start, &job.audio[(start - job.audio_start) as usize..])?;
+            // Preserve all potentially needed PCM behind a leading draft. Confirmed,
+            // unneeded prefixes can remain gaps, including arbitrarily long silence.
+            self.client.append(&self.recording, start..end)?;
             self.uploaded_until = end;
         }
         let transcriber = self.transcriber.clone();

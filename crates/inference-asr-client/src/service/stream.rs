@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::ops::Range;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicU64;
@@ -31,10 +32,14 @@ use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tonic::Status;
 use tonic::transport::Endpoint;
 
-use super::AudioTranscribeResp;
-use super::grpc_error;
+use crate::audio::SAMPLE_RATE;
 use crate::config::ServiceConfig;
 use crate::config::Transport;
+use crate::recording::AudioRecordingReader;
+use crate::service::AudioTranscribeResp;
+use crate::service::grpc_error;
+
+const MAX_APPEND_SAMPLES: u64 = 30 * SAMPLE_RATE as u64;
 
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct AudioTransportStats {
@@ -48,6 +53,7 @@ type Reply = oneshot::Sender<std::result::Result<AudioStreamResp, Status>>;
 
 enum Command {
     Send(AudioStreamReq),
+    Append(AudioRecordingReader, Range<u64>),
     Transcribe(AudioRangeTranscribe, Reply),
     Finish(Reply),
 }
@@ -150,26 +156,23 @@ impl AudioStreamClient {
         self.config.language.as_deref()
     }
 
-    fn send(&self, command: AudioCommand) -> Result<()> {
-        self.input
-            .try_send(Command::Send(AudioStreamReq { command: Some(command) }))
-            .map_err(|error| {
-                match error {
-                    mpsc::error::TrySendError::Full(_) => Error::resource_exhausted("audio transport cannot keep up"),
-                    mpsc::error::TrySendError::Closed(_) => Error::unavailable("audio connection closed"),
-                }
-            })
+    fn send(&self, command: Command) -> Result<()> {
+        self.input.try_send(command).map_err(|error| {
+            match error {
+                mpsc::error::TrySendError::Full(_) => Error::resource_exhausted("audio transport cannot keep up"),
+                mpsc::error::TrySendError::Closed(_) => Error::unavailable("audio connection closed"),
+            }
+        })
     }
 
-    pub fn append(&self, start_sample: u64, pcm: &[i16]) -> Result<()> {
-        self.send(AudioCommand::Append(AudioAppend {
-            start_sample,
-            pcm_s16le: pcm.iter().flat_map(|sample| sample.to_le_bytes()).collect(),
-        }))
+    pub fn append(&self, recording: &AudioRecordingReader, range: Range<u64>) -> Result<()> {
+        self.send(Command::Append(recording.clone(), range))
     }
 
     pub fn release(&self, before: u64) -> Result<()> {
-        self.send(AudioCommand::ReleaseBeforeSample(before))
+        self.send(Command::Send(AudioStreamReq {
+            command: Some(AudioCommand::ReleaseBeforeSample(before)),
+        }))
     }
 
     pub fn stats(&self) -> AudioTransportStats {
@@ -288,6 +291,27 @@ async fn run(
     let send = async {
         while let Some(command) = commands.recv().await {
             let request = match command {
+                Command::Append(recording, range) => {
+                    // One queued range retains log access. Network backpressure bounds PCM allocation.
+                    for start_sample in (range.start..range.end).step_by(MAX_APPEND_SAMPLES as usize) {
+                        let end = range.end.min(start_sample + MAX_APPEND_SAMPLES);
+                        let reader = recording.clone();
+                        let pcm_s16le = tokio::task::spawn_blocking(move || reader.read_bytes(start_sample..end))
+                            .await
+                            .expect("recording read task must not panic")
+                            .map_err(|error| Status::unavailable(error.to_string()))?;
+                        let request = AudioStreamReq {
+                            command: Some(AudioCommand::Append(AudioAppend {
+                                start_sample,
+                                pcm_s16le,
+                            })),
+                        };
+                        tokio::time::timeout(timeout, sink.send(request))
+                            .await
+                            .map_err(|_| Status::deadline_exceeded("audio transport send timed out"))??;
+                    }
+                    continue;
+                },
                 Command::Send(request) => {
                     if let Some(AudioCommand::CancelRequestId(id)) = &request.command {
                         pending.lock().unwrap().remove(id);
@@ -377,3 +401,7 @@ async fn run(
         },
     }
 }
+
+#[cfg(test)]
+#[path = "stream_test.rs"]
+mod tests;

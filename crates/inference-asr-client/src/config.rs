@@ -269,7 +269,7 @@ impl Default for StreamConfig {
         Self {
             reprocess: true,
             window_seconds: 24.0,
-            interval: 1.0,
+            interval: 0.5,
             silence_seconds,
             sentence_silence_seconds: sentence_silence(silence_seconds),
             lookback_seconds: 3.0,

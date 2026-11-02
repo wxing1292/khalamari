@@ -79,14 +79,11 @@ impl Output {
         if *tty {
             clear_draft(&mut output, draft_visible)?;
         }
-        let line = if event.kind == "partial" {
-            document.draft().expect("accepted partial owns the current draft")
-        } else {
-            &document.lines()[event.segment as usize]
-        };
-        if !*tty || event.kind != "partial" {
+        let draft = document.draft().filter(|draft| draft.segment == event.segment);
+        let line = draft.unwrap_or_else(|| &document.lines()[event.segment as usize]);
+        if !*tty || draft.is_none() {
             let prefix = line_prefix(event.kind, *pass, line);
-            let text = line.display(if event.kind == "partial" { " | " } else { "\n" });
+            let text = line.display(if draft.is_some() { " | " } else { "\n" });
             writeln!(output, "{prefix}{text}").map_err(output_error)?;
         }
         if *tty {

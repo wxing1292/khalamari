@@ -118,7 +118,9 @@ The log retains acoustic spans and metrics. The document retains only text, revi
 Both terminal views use `Document` for the current text and speaker turns.
 The plain view tracks whether a draft row is visible. It renders the current draft from `Document` after each accepted update.
 It starts a fresh document for each analysis pass. It does not cache a second formatted copy of the draft.
-Both views suppress speaker updates that do not change the document. The raw JSONL log retains these updates.
+Both views suppress speaker updates that do not change the document. The raw JSONL log retains revised activity boundaries.
+The stream retains one displayed draft and the unsealed finals for speaker revisions. A newer displayed draft releases the displaced draft.
+Replay ignores older text revisions and displaced drafts. An update to a current revision must preserve its text and range.
 Status messages clear the visible draft row before writing and then restore it from the document.
 The complete draft render fits one physical row, including metadata and wide Unicode characters.
 If metadata leaves no room for useful text, the draft shows the transcript suffix without the metadata prefix.
@@ -189,13 +191,13 @@ PCM log R[0:N), 16000 Hz, mono i16
                                 |
        AudioSegmentTranscribeReq(segment,revision,immutable PCM,language evidence)
                                 |
-                  Qwen RPC -> fixed-text alignment
+                  Qwen RPC -> draft text; final -> fixed-text alignment
                                 |
               ordered final or current partial
                                 |
        latest speaker timeline -> turns -> JSONL / terminal / Document
 
-speaker Replace after text final -> speakers event for the same text revision
+speaker Replace after text -> speakers event for the same text revision
                                     -> update turns, preserve manual edits
 ```
 
@@ -226,7 +228,13 @@ snapshot for an admitted request: shared byte views -> CPU preparation -> model 
 ```
 
 The client uploads audio only when it submits a segment job.
-It appends the unseen suffix of that job's read range. Long silence can remain an explicit gap in the sample timeline.
+It uploads a continuous suffix from the earliest unsubmitted range through the submitted job's read end.
+A newer draft cannot skip PCM that an older pending final can still require.
+Confirmed, unneeded prefixes remain gaps, including long silence before the first speech or between segments.
+Admitted jobs already have complete uploads. Their retention cannot force uploads across gaps between closed segments.
+The bounded command queue retains recording readers and ranges. It does not copy those ranges into queued PCM allocations.
+The transport worker reads canonical bytes from the log on the blocking pool, at most 30 seconds per message.
+It waits for each network send before reading the next piece. Release and recognition commands follow their preceding appends.
 Appends must be nonempty, aligned S16LE, ordered and disjoint. Each append must fit 30 seconds.
 Recognition ranges must be nonempty, fully uploaded, retained and at most 30 seconds.
 The service rejects a range that crosses an omitted gap. It does not synthesize silence.
@@ -238,6 +246,20 @@ This includes jobs that are still waiting for LID or may need overlap recovery.
 The service prunes released prefixes. Admitted model jobs retain their own shared byte views until preparation completes.
 Decoded appends own compact PCM allocations. Range snapshots share those allocations without retaining unrelated network-frame bytes.
 The client command queue is bounded by its configured job capacity. Transport overload returns an explicit error.
+
+```text
+recording R[0:672000), 16000 Hz, mono S16LE
+  [0:560000) confirmed silence; job reads [560000:643200)
+    scheduler skips the unneeded prefix
+      queue owns (reader, [560000:643200)), with no PCM copy
+        blocking read -> 166400 bytes -> network send -> recognition
+  if an older unsubmitted final can still read from 544000:
+    retain and upload [544000:643200), including the gap it can require
+  a queued range longer than 480000 samples:
+    read <= 480000 -> send -> read remaining samples -> send
+
+the archive reader independently preserves every sample in R[0:672000)
+```
 
 Connection request IDs correlate service calls. They are separate from segment IDs and transcript revisions.
 Cancelling a partial sends a cancellation command for its active service call.
@@ -596,7 +618,7 @@ A single resulting turn uses its transcript span's range. Its times have span pr
 These rules do not change word times or claim recovery of every overlapping voice.
 The terminal, editor and JSONL show `[start, end)` speaker text turns.
 
-A `speakers` event revises attribution for an existing final text revision.
+A `speakers` event revises attribution for an existing draft or final text revision.
 It does not repeat transcription or allocate a new text revision.
 Raw activity boundaries can change without changing the displayed turns. JSONL retains those changes; terminal views do not repeat the same document.
 
@@ -618,7 +640,7 @@ A replacement that leaves the clipped speaker labels unchanged emits no transcri
 An empty replacement still clears prior attribution. Label timelines stay ordered by start sample.
 Scheduling and attribution stop scanning at the requested end, without traversing future labels.
 Overlapping spans of the same speaker represent one active voice.
-Only finals whose speaker ranges remain unsealed need retained attribution state.
+Only current hypotheses whose speaker ranges remain unsealed need retained attribution state.
 Speaker revisions do not extend the lifetime of language observations; each timeline retains only its own consumers' ranges.
 VAD-negative audio stays in the recording. Positive speaker evidence can preserve speech for segmentation.
 Late speaker revisions update attribution. They do not re-run completed ASR ranges or backfill old VAD-negative ranges.
@@ -853,12 +875,54 @@ AudioSegmenter -> raw final[segment=7, revision=3] -> event log, unchanged
 replay: saved events -> validate coordinates, commit order, correction base -> same Document
 ```
 
-The partial interval defaults to one second of new audio.
+The partial interval defaults to 0.5 seconds of new audio.
 The ordinary VAD pause defaults to 0.5 seconds.
 Two matching sentence-ending drafts can close a segment after 0.25 seconds.
 The latest matching snapshot must cover the most recent speech.
 `streaming.silence_seconds` and `streaming.sentence_silence_seconds` configure these heuristics.
 These thresholds are policy choices, not calibrated model requirements.
+
+### Draft latency and completion
+
+Live drafts can follow VAD speech ahead of the joint analysis cursor.
+Both passes select final boundaries from VAD and speaker coverage. Positive speaker evidence can recover VAD-negative speech before segmentation advances.
+A provisional draft does not confirm a pause in its leading padding. Speaker evidence can extend its start to recover earlier speech.
+The segmenter retains the joint cursor's PCM until final ranges are known.
+Sentence-ending text from a leading draft cannot close an earlier pause. The joint cursor must first cover the matching hypothesis.
+The client uploads a continuous suffix for unsubmitted ranges. It skips only prefixes that those ranges cannot require.
+A newer draft cannot create a cache hole needed by an older pending final.
+Both passes must drain the required diarizer before completion.
+
+A live request uses all current audio in its active range, up to the configured range limit.
+Available LID observations guide recognition. An unfinished language prefix leaves the uncovered range unknown.
+The segmenter does not apply the prefix's last language to unseen speech.
+Final requests retain the complete language-routing, Mandarin recovery, word-alignment and overlap paths.
+Drafts use owned audio and span timing. They do not repeat word alignment or cross-segment overlap reconciliation.
+The finalized hypothesis supplies word timing.
+
+```text
+same recording R[0:96000), 16000 Hz; VAD covers 6 s; LID covers 4 s; speaker labels cover 2 s
+  joint analysis cursor: 2 s; final boundaries still use both speech sources
+  before: draft limited to 2 s -> wait for LID -> Qwen -> wait for word alignment -> display
+  current:
+    draft R[start:96000) + known LID + unknown [64000:96000)
+      -> bounded Qwen request -> replace current draft immediately
+    speaker reader -> Replace activity -> revise matching draft/final turns
+    joint analysis closes range -> complete LID -> Qwen -> word alignment -> ordered final
+
+capacity full -> advance the existing audio range, without allocating queued snapshots
+  slot free -> submit the latest range and allocate its revision
+  r2 finishes before r1 -> display r2; discard r1
+  r1 finishes while r2 runs -> display r1; replace it when r2 completes
+```
+
+The in-flight limit bounds concurrent jobs and completed finals. Ready finals have admission priority.
+A final waiting for language evidence does not block a newer active draft.
+A submitted newer revision does not invalidate a useful older completion. An accepted newer revision does.
+This policy prevents starvation during continuous speech. Closed ranges still reject late drafts.
+The update interval controls admission eligibility. It does not guarantee display latency or native model-state reuse.
+
+### Analysis windows and scheduling
 
 The maximum owned range defaults to 24 seconds.
 A duration cut searches the preceding three seconds for at least 80 ms of sustained quiet.

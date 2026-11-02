@@ -640,9 +640,10 @@ After capture ends, `--mode stream` automatically runs the full offline pipeline
 `--mode offline` waits for capture to end and runs that same offline pipeline once, with no live drafts.
 `--mode offline --input PATH` selects the same analysis without real-time file pacing.
 All modes use the same final-event schema, language routing, word alignment, and speaker attribution.
-The default partial interval is one second of new audio. This interval is not a latency guarantee.
+The default partial interval is 0.5 seconds of new audio. This interval is not a latency guarantee.
 A 0.5-second VAD speech pause closes a segment. `streaming.silence_seconds` changes this threshold.
 Two consecutive matching drafts with sentence-ending punctuation can close the segment after a shorter pause.
+The analysis cursor must first cover that hypothesis. A leading draft cannot close a pause in earlier audio.
 The latest matching snapshot must cover the most recent detected speech. New speech makes older punctuation insufficient.
 `streaming.sentence_silence_seconds` selects this shorter threshold. Its default is half `streaming.silence_seconds`, with a 0.1-second minimum.
 The default shorter threshold is 0.25 seconds. Set both thresholds equal to use only the ordinary pause threshold.
@@ -698,10 +699,17 @@ target/release/asr --mode stream --input /absolute/path/to/recording.wav --json
 ```
 
 A segment is one bounded speech interval. One interval can contain several languages.
+Live drafts use the VAD frontier and current language evidence. They do not wait for diarization or LID coverage.
+Final boundaries still use both VAD and speaker evidence. Drafts can advance ahead of that analysis cursor.
+An uncovered language range uses automatic detection. Final requests still wait for complete language evidence.
+Drafts use segment timing. Finals perform word alignment and overlap reconciliation.
+Diarization remains required. Speaker updates can revise a draft or final of the same text revision.
 Each `partial` replaces that segment's complete draft. Each `final` commits the segment exactly once.
 Final `reason` values are `sentence`, `silence`, `speaker`, `limit`, or `end`.
 The client allocates `revision` when it submits a job. Emitted revisions increase and can have gaps after discarded drafts.
 A recognition consumer must ignore older revisions and further recognition events after final.
+Replay also ignores speaker updates for superseded revisions or displaced drafts.
+A current speaker update must preserve its recognized text, revision and range.
 The optional editor accepts explicit corrections after final, as described below.
 `--max-in-flight` bounds concurrent jobs and completed finals waiting for ordered commit. Its default is four.
 The event loop commits finals in source order. Closing a segment cancels its remaining partial jobs.
@@ -734,6 +742,9 @@ This guard does not detect every partial translation or recognition error.
 
 The Rust client owns each run in `session.rs`. `recording.rs` owns audio publication. `segment.rs` owns segments and revisions.
 Both modes upload each new PCM range once over one duplex connection per analysis pass.
+The client skips confirmed, unneeded prefixes, including long silence. The archive still preserves the complete recording.
+The bounded transport queue holds log ranges. Its worker reads and sends at most 30 seconds per append before reading more.
+It preserves all PCM that pending jobs can still require, including older finals behind a leading draft.
 `stream.rs` owns the VAD, segmenter, task capacity and ordered completion for one recording.
 The service retains uploaded PCM for range requests. Model inference remains independent for each request.
 Bounded tasks run concurrent ASR requests while microphone capture continues.
