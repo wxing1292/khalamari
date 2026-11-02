@@ -89,19 +89,16 @@ Start a [Qwen3-ASR service](docs/service.md#binaries-and-checkpoints) first.
 The client requires FFmpeg on `PATH`, CMake, and a C++ compiler.
 Run the commands from the repository root.
 
-Build the Rust client and prepare the external Whisper-tiny checkpoint once:
+Start continuous transcription from the default microphone:
 
 ```sh
-cargo build --release --bin asr
-target/release/asr --setup-models
+cargo run --release --bin asr -- --mode stream
 ```
 
-Prepare the [experimental Community-1 reader](docs/qwen3_asr.md#speaker-reader-protocol) with its native CPU checkpoint in the adjacent `models/` directory.
-Then start continuous transcription from the default microphone:
-
-```sh
-target/release/asr --mode stream
-```
+Before capture starts, the client automatically downloads pinned CPU models and builds the native Community-1 reader when needed.
+On macOS, it keeps these assets in `~/Library/Caches/khalamari/asr/`. `cargo clean` does not remove this cache.
+The first run requires network access, Git and Cargo. Later runs reuse verified assets without downloading or rebuilding them.
+`--model-cache PATH` selects another cache directory. Explicit checkpoint and reader overrides remain caller-owned.
 
 The default service URL is `http://127.0.0.1:8000/v1/audio/transcriptions`.
 Leave `--language` unset for English, Chinese, and mixed-language speech.

@@ -45,7 +45,7 @@ The executable owns capture, streaming and external checkpoint preparation. The 
 | `analysis.rs` | Shared append/replace/seal contracts, label timelines, bounded CPU processors and reader tasks |
 | `vad.rs` | Speech-detector contract and stateful Silero implementation |
 | `diarization.rs`, `diarization/process.rs` | Diarizer contract, external process lifetime and validated activity updates |
-| `assets.rs` | Pinned external checkpoints, byte and SHA-256 validation, atomic publication |
+| `assets.rs`, `assets/reader.rs` | `SpeechAssets`: resolved checkpoint and reader paths, pinned preparation, cache lock and verified publication |
 | `config.rs` | One Serde/Clap schema, defaults, explicit CLI precedence and external validation |
 | `session.rs` | `AudioSession`: capture, processing, output and recording lifetime |
 | `segment.rs` | `AudioSegmenter`: analysis cursor, immutable `AudioSegmentTranscribeReq` snapshots, endpoints and revisions |
@@ -528,8 +528,8 @@ source samples [0, N) -> one writer -> PCM log + compressed archive
 
 ### Speaker reader protocol
 
-`--speaker-command PATH` (`models.speaker_command`) selects the reader for both passes.
-The default path is `target/asr-readers/community-1/reader` under the repository root.
+The client automatically prepares the built-in reader in its persistent cache before capture.
+`--speaker-command PATH` (`models.speaker_command`) selects a caller-managed replacement for both passes.
 The client starts one process per pass with `--recording PATH --pass live|offline`.
 The reader opens the canonical PCM log read-only. It must read only announced sample ranges.
 Standard input and output carry newline-delimited JSON. Standard error carries diagnostics.
@@ -555,27 +555,25 @@ The process adapter validates these external contracts before passing updates to
 Cancellation terminates the child and reaps it outside the session event loop.
 The archive remains independent of process success.
 
-The [Community-1 reader](../crates/inference-asr-client/examples/readers/community_1.rs) is an experimental backend.
-Build it in the pinned [speakrs checkout](https://github.com/avencera/speakrs/tree/5a8f5804c189defe597e8aebb6a82bbfedde9f48).
-It adds no dependency to the main Cargo workspace.
+The client bundles the [Community-1 reader source](../crates/inference-asr-client/examples/readers/community_1.rs).
+It builds this source against the pinned [speakrs checkout](https://github.com/avencera/speakrs/tree/5a8f5804c189defe597e8aebb6a82bbfedde9f48).
+The build selects native CPU inference without default features. It adds no dependency to the main Cargo workspace.
+The reader cache key includes the source checksum, speakrs revision, operating system and architecture.
+The model files have a separate pinned revision. Preparation checks every file's byte count and SHA-256 before publication.
+See [automatic asset preparation](#native-model-setup) for cache ownership and cancellation.
 
-Set `SPEAKRS` to that checkout directory. Place its prepared native CPU checkpoint beside the installed reader in `models/`.
-The checkpoint must contain segmentation, WeSpeaker embedding and PLDA files, as documented by speakrs.
+For a replacement reader, supply its executable and checkpoint explicitly:
 
 ```sh
-cp crates/inference-asr-client/examples/readers/community_1.rs "$SPEAKRS/examples/khalamari_reader.rs"
-cp crates/inference-asr-client/examples/readers/community_1_test.rs "$SPEAKRS/examples/community_1_test.rs"
-cargo build --release --manifest-path "$SPEAKRS/Cargo.toml" --features cpu --example khalamari_reader
-mkdir -p target/asr-readers/community-1/models
-cp "$SPEAKRS/target/release/examples/khalamari_reader" target/asr-readers/community-1/reader
-cp -R /absolute/path/to/community-1/models/. target/asr-readers/community-1/models/
-target/release/asr --mode stream
+target/release/asr --mode stream \
+  --speaker-command /absolute/path/to/reader \
+  --speaker-model-dir /absolute/path/to/models
 ```
 
-The backend reads native CPU weights and PLDA files from `models/` beside its executable, independent of the working directory.
-`--speaker-model-dir PATH` (`models.speaker_model_dir`) passes an explicit `--model-dir PATH` to the reader.
+The client does not build or download caller-managed readers or checkpoints.
+Without `--speaker-model-dir`, a replacement reader uses its adjacent `models/` directory.
 An invalid override fails instead of loading another checkpoint. No runtime environment variable selects the checkpoint.
-Client setup does not download these files or build the reader.
+Process startup errors include the selected reader path. The archive remains independent after capture starts.
 The previous offline-only RTTM process contract and native diarizer are removed.
 
 ### Speaker attribution
@@ -754,14 +752,50 @@ The E2E reports are under `target/asr-community-e2e/` and `target/asr-community-
 
 ### Native model setup
 
-Build the Rust client and prepare Whisper assets once.
-Also complete the [speaker reader setup](#speaker-reader-protocol) before starting ASR:
+Run the client normally. It prepares missing managed resources before capture:
 
 ```sh
-cargo build --release --bin asr
-target/release/asr --setup-models
-target/release/asr --mode stream
+cargo run --release --bin asr -- --mode stream
 ```
+
+On macOS, the default cache is `~/Library/Caches/khalamari/asr/`.
+Other Unix systems use `~/.cache/khalamari/asr/`. `--model-cache PATH` overrides this root.
+The cache is independent of the repository, worktree and Cargo target directory.
+Git and Cargo must be available for the first reader build. The first model preparation requires network access.
+A healthy cache requires no subsequent downloads or builds.
+The client verifies cached model sizes and checksums. It replaces incomplete or corrupt entries from fixed sources.
+It verifies the cached reader checksum before reuse and restores missing execute permission.
+A changed bundled source selects a new reader entry.
+The session owns the resolved `SpeechAssets`. Model loading and both analysis passes use these paths.
+Preparation does not modify configuration or repeat path selection in model code.
+Preparation serializes concurrent processes with a cache file lock. Waiting for this lock remains cancellable.
+Checksum reads and download writes use asynchronous I/O. Checksum validation reuses one bounded read buffer.
+The client flushes each downloaded file before publication. Namespace publication completes while the cache lock is held.
+Cancellation terminates the preparation process group, including compiler children, and removes staging files.
+Completed files and the published reader remain available to the next invocation.
+
+```text
+normal invocation -> validate configuration -> lock persistent cache
+  model revision -> verify existing files or download + verify -> atomic file publication
+  reader source + platform -> verify cached reader or build pinned source -> atomic directory publication
+    preparation complete -> release lock -> return SpeechAssets (paths)
+      unchanged Config + SpeechAssets -> AudioSession -> capture writer -> PCM log -> independent readers
+    cancellation         -> kill build process group -> remove staging -> release lock; capture stays closed
+
+macOS cache root: ~/Library/Caches/khalamari/asr/
+  .prepare.lock
+  whisper-tiny/<Whisper revision>/              verified CT2 files
+  community-1/models/<model revision>/          verified segmentation, embedding and PLDA files
+  community-1/readers/<revision-platform-hash>/  reader + reader.sha256
+  community-1/build/                            reusable native Cargo artifacts
+
+project target/ -> project build artifacts; cargo clean does not traverse the asset cache
+```
+
+`--lid-model PATH` and `--speaker-command PATH` are explicit caller-owned overrides.
+The client does not replace those files. A reader override also disables automatic Community-1 model preparation.
+`--speaker-model-dir PATH` selects a caller-owned checkpoint for either reader.
+The former manual asset-setup options are removed.
 
 CMake and the Xcode command-line tools are required to build the macOS client.
 Cargo downloads the checksum-pinned ONNX Runtime 1.31 static archive supplied by `ort-sys` during the first build.
@@ -779,18 +813,14 @@ run:   PCM[512] + retained context/state -> embedded Silero on CPU -> speech pro
        external Whisper directory      -> language detection / fixed-text alignment
 ```
 
-`--setup-models` prepares the pinned multilingual CT2 Whisper-tiny checkpoint.
-It checks each file's byte count and SHA-256 before it replaces the destination.
-It validates cached files before reuse and replaces corrupt entries from the pinned source.
-A cancelled or failed preparation removes its temporary file.
-`--whisper-source` copies the same pinned files from a local snapshot instead of downloading them.
-The client does not download models during recording.
-If a checkpoint cannot load, analysis reports the error. Capture continues and retains the recording.
-`--model-cache` selects the shared external model directory.
-`--lid-model` accepts a local CT2 checkpoint directory or a name under that directory.
+The default multilingual Whisper-tiny checkpoint and Community-1 weights use fixed upstream revisions.
+The client does not download models during recording. Preparation completes before the capture writer starts.
+After capture starts, recording and archive publication remain independent of analysis success.
+Other Whisper names select a prepared `whisper-NAME` directory under the cache root.
+An explicit `--lid-model` path selects a caller-managed CT2 checkpoint.
 The former `--vad-model` and `--onnx-runtime` flags and JSON settings are removed.
 Silero explicitly selects CPU execution and retains recurrent state for one recording.
-Initialization runs one silent frame and validates named probability and recurrent-state outputs before capture.
+Silero initialization runs one silent frame and validates named probability and recurrent-state outputs before the VAD reader starts.
 It discards warmup state. The recording starts with zero recurrent state.
 ONNX output order does not define the output roles.
 

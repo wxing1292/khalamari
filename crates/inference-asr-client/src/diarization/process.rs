@@ -49,7 +49,13 @@ impl SpeakerProcess {
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .spawn()
-            .map_err(process_error)?;
+            .map_err(|error| {
+                Error::unavailable(format!(
+                    "speaker reader {}: {error}. See docs/qwen3_asr.md#speaker-reader-protocol for setup or use \
+                     --speaker-command PATH.",
+                    program.display()
+                ))
+            })?;
         let mut diarizer = ProcessDiarizer {
             stdin: child.stdin.take().unwrap(),
             stdout: BufReader::new(child.stdout.take().unwrap()),

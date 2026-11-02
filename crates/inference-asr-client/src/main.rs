@@ -70,13 +70,18 @@ fn cancelled() -> Result<impl std::future::Future<Output = ()>> {
 
 async fn run(cancelled: impl std::future::Future<Output = ()>) -> Result<()> {
     let args = Args::load()?;
-    if args.print_config || args.setup_models || args.list_devices || args.replay.is_some() {
+    if args.print_config || args.list_devices || args.replay.is_some() {
         return tokio::select! {
             result = command(&args) => result,
             _ = cancelled => Err(Error::cancelled("ASR command cancelled")),
         };
     }
-    AudioSession::run(args.config, cancelled).await
+    let mut cancelled = std::pin::pin!(cancelled);
+    let assets = tokio::select! {
+        result = assets::prepare(&args.config.models) => result?,
+        _ = &mut cancelled => return Err(Error::cancelled("asset preparation cancelled")),
+    };
+    AudioSession::run(args.config, assets, cancelled).await
 }
 
 async fn command(args: &Args) -> Result<()> {
@@ -84,9 +89,6 @@ async fn command(args: &Args) -> Result<()> {
     if args.print_config {
         println!("{}", serde_json::to_string_pretty(&config).unwrap());
         return Ok(());
-    }
-    if args.setup_models {
-        return assets::prepare(&config.models.cache, args.whisper_source.as_deref()).await;
     }
     if args.list_devices {
         let output = tokio::process::Command::new(&config.capture.ffmpeg)

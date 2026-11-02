@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use inference_error::Error;
 use inference_error::Result;
 
+use crate::assets::SpeechAssets;
 use crate::audio::AudioCapture;
 use crate::audio::FfmpegSource;
 use crate::config::Config;
@@ -24,6 +25,7 @@ use crate::terminal::TerminalInput;
 /// Capture, analysis, and archive have independent lifetimes and share one recording clock.
 pub struct AudioSession {
     config: Config,
+    assets: SpeechAssets,
     output: Output,
     input: Option<TerminalInput>,
     recording: AudioRecordingReader,
@@ -32,7 +34,11 @@ pub struct AudioSession {
 }
 
 impl AudioSession {
-    pub async fn run(config: Config, cancelled: impl std::future::Future<Output = ()>) -> Result<()> {
+    pub async fn run(
+        config: Config,
+        assets: SpeechAssets,
+        cancelled: impl std::future::Future<Output = ()>,
+    ) -> Result<()> {
         let output = Output::open(&config.output)?;
         let (recording, spool) = AudioRecordingWriter::create()?;
         let reader = recording.reader();
@@ -62,6 +68,7 @@ impl AudioSession {
         let capture = AudioCapture::start(source, recording);
         let mut session = Self {
             config,
+            assets,
             output,
             input,
             recording: reader,
@@ -116,7 +123,8 @@ impl AudioSession {
         self.status("Loading native CPU speech models.")?;
         let models = {
             let config = self.config.clone();
-            self.wait_analysis(SpeechModels::load(&config)).await
+            let whisper = self.assets.whisper.clone();
+            self.wait_analysis(SpeechModels::load(&config, &whisper)).await
         };
         let mut models = match models {
             Ok(models) => models,
@@ -175,11 +183,13 @@ impl AudioSession {
                 .transpose()?;
             let mut stream = {
                 let config = self.config.clone();
+                let assets = self.assets.clone();
                 self.wait_analysis(AudioStream::open(
                     &config,
                     self.recording.clone(),
                     pass,
                     models,
+                    &assets,
                     live_cuts,
                 ))
                 .await?

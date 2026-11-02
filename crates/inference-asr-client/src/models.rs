@@ -20,7 +20,6 @@ use tokenizers::Tokenizer;
 use crate::audio::FRAME_SAMPLES;
 use crate::audio::SAMPLE_RATE;
 use crate::config::LanguageConfig;
-use crate::config::ModelConfig;
 use crate::transcript::Word;
 
 pub const ALIGNMENT_STEP_SAMPLES: u64 = SAMPLE_RATE as u64 / 50;
@@ -178,14 +177,9 @@ pub struct AcousticModel {
 }
 
 impl AcousticModel {
-    pub fn load(config: &ModelConfig, language: &LanguageConfig) -> Result<Self> {
-        let path = if config.whisper.contains('/') {
-            Path::new(&config.whisper).to_path_buf()
-        } else {
-            config.cache.join(format!("whisper-{}", config.whisper))
-        };
+    pub fn load(path: &Path, language: &LanguageConfig) -> Result<Self> {
         let whisper = Whisper::new(
-            &path,
+            path,
             Config {
                 compute_type: ComputeType::INT8,
                 num_threads_per_replica: 2,
@@ -194,8 +188,7 @@ impl AcousticModel {
         )
         .map_err(|error| {
             Error::unavailable(format!(
-                "Whisper checkpoint `{}`: {error}; run `asr --setup-models` or select a prepared checkpoint with \
-                 --lid-model",
+                "Whisper checkpoint `{}`: {error}; select a valid multilingual checkpoint with --lid-model PATH",
                 path.display()
             ))
         })?;

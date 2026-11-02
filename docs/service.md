@@ -567,17 +567,17 @@ See [client ownership and verification](qwen3_asr.md#standalone-client).
 
 #### Continuous microphone transcription
 
-Streaming uses the Rust client, FFmpeg, external Whisper assets and a speaker reader.
-Prepare the [Community-1 reader and models](qwen3_asr.md#speaker-reader-protocol) before starting ASR.
-Build with CMake and a C++ compiler, then prepare assets once:
+Streaming uses the Rust client, FFmpeg, external Whisper assets and a native Community-1 reader.
+Build with CMake and a C++ compiler. The client prepares missing managed assets before it starts capture:
 
 ```sh
-cargo build --release --bin asr
-target/release/asr --setup-models
-target/release/asr --mode stream
+cargo run --release --bin asr -- --mode stream
 ```
 
-The executable also prepares the external Whisper checkpoint. This workflow requires no Python.
+The first run downloads checksum-pinned models and builds the pinned CPU reader with Git and Cargo.
+On macOS, the default cache is `~/Library/Caches/khalamari/asr/`. It survives `cargo clean` in the project.
+Subsequent runs verify and reuse cached assets. Preparation failures or cancellation do not start recording.
+This workflow requires no Python. See [automatic CPU assets](qwen3_asr.md#native-model-setup).
 
 Use the checked-in configuration for a programming discussion:
 
@@ -616,17 +616,18 @@ Boolean settings support explicit overrides such as `--no-json` and `--no-reproc
 
 Copy `scripts/asr.example.json` and edit only the required settings. Resolved settings remain fixed during each session.
 
-`--setup-models` prepares pinned Whisper-tiny files under `--model-cache`.
-It verifies file sizes and SHA-256 values before publication. `--whisper-source` selects a local Whisper snapshot.
+Normal startup prepares the default Whisper-tiny and Community-1 assets automatically.
+`--model-cache` selects their shared persistent cache. No setup command or runtime environment configuration is required.
+`--lid-model PATH` selects a caller-managed multilingual Whisper checkpoint. Other checkpoint names select `whisper-NAME` under that cache.
+An explicit checkpoint path is not downloaded or overwritten.
 The Rust executable statically links ONNX Runtime and embeds Silero v6 for CPU VAD.
 Whisper supplies continuous language observations and approximate fixed-text alignment.
 The existing Qwen3-ASR service produces every transcript.
-`--lid-model` selects a local Whisper checkpoint. JSON uses `models.cache` and `models.whisper`.
-`--speaker-command PATH` or `models.speaker_command` selects one speaker reader for live and offline analysis.
-The default is `target/asr-readers/community-1/reader` under the repository root.
-The reader loads its adjacent `models/` directory by default. `--speaker-model-dir PATH` overrides that directory.
-Prepare the experimental Community-1 reader and its models before starting ASR.
-See the [speaker reader protocol and setup](qwen3_asr.md#speaker-reader-protocol).
+`--speaker-command PATH` selects a caller-managed reader for both passes.
+When this override is set, the client does not build a reader or download its models.
+That reader uses its adjacent `models/` directory unless `--speaker-model-dir PATH` selects another directory.
+With the built-in reader, `--speaker-model-dir PATH` overrides only the checkpoint. Reader preparation remains automatic.
+See the [speaker reader protocol](qwen3_asr.md#speaker-reader-protocol).
 The process reads the shared PCM log. Its pipes carry progress and label updates only.
 Reader initialization failures report their checkpoint path and cause through the readiness response.
 For shorter Whisper language-detection inputs, use `--fast-lid` or `language.fast`. The default uses the full reference input.

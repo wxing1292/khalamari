@@ -181,9 +181,13 @@ pub struct LanguageConfig {
 pub struct ModelConfig {
     #[arg(id = "models.whisper", help = "Whisper checkpoint name or directory", value_name = "NAME_OR_PATH", long = "lid-model", default_value_t = Self::default().whisper)]
     pub whisper: String,
-    #[arg(id = "models.speaker_command", hide_default_value = true, value_name = "PATH", long = "speaker-command", default_value_os_t = Self::default().speaker_command,
-        help = "Speaker reader executable")]
-    pub speaker_command: PathBuf,
+    #[arg(
+        id = "models.speaker_command",
+        value_name = "PATH",
+        long = "speaker-command",
+        help = "Override the automatically prepared Community-1 reader"
+    )]
+    pub speaker_command: Option<PathBuf>,
     #[arg(
         id = "models.speaker_model_dir",
         long = "speaker-model-dir",
@@ -191,7 +195,7 @@ pub struct ModelConfig {
         help = "Override the speaker reader checkpoint directory"
     )]
     pub speaker_model_dir: Option<PathBuf>,
-    #[arg(id = "models.cache", hide_default_value = true, help = "Directory for prepared Whisper checkpoints", value_name = "PATH", long = "model-cache", default_value_os_t = Self::default().cache)]
+    #[arg(id = "models.cache", hide_default_value = true, help = "Persistent cache for automatically prepared ASR assets", value_name = "PATH", long = "model-cache", default_value_os_t = Self::default().cache)]
     pub cache: PathBuf,
 }
 
@@ -199,9 +203,15 @@ impl Default for ModelConfig {
     fn default() -> Self {
         Self {
             whisper: "tiny".into(),
-            speaker_command: Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/asr-readers/community-1/reader"),
+            speaker_command: None,
             speaker_model_dir: None,
-            cache: Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/asr-models"),
+            cache: std::env::home_dir()
+                .expect("the operating system must provide a home directory")
+                .join(if cfg!(target_os = "macos") {
+                    "Library/Caches/khalamari/asr"
+                } else {
+                    ".cache/khalamari/asr"
+                }),
         }
     }
 }
@@ -313,21 +323,7 @@ pub struct Args {
     pub print_config: bool,
     #[arg(long, help_heading = "Setup", help = "List microphone devices and exit")]
     pub list_devices: bool,
-    #[arg(
-        long,
-        help_heading = "Setup",
-        help = "Prepare the pinned Whisper-tiny checkpoint and exit"
-    )]
-    pub setup_models: bool,
-    #[arg(
-        long,
-        requires = "setup_models",
-        value_name = "PATH",
-        help_heading = "Setup",
-        help = "Copy the pinned checkpoint from a local CT2 snapshot"
-    )]
-    pub whisper_source: Option<PathBuf>,
-    #[arg(long, value_name = "PATH", help_heading = "Output", conflicts_with_all = ["capture.input", "mode", "setup_models", "list_devices"])]
+    #[arg(long, value_name = "PATH", help_heading = "Output", conflicts_with_all = ["capture.input", "mode", "list_devices"])]
     pub replay: Option<PathBuf>,
     #[arg(
         long,
@@ -365,6 +361,7 @@ impl Args {
                     &mut config.output.save,
                     &mut config.output.editor,
                     &mut config.models.speaker_model_dir,
+                    &mut config.models.speaker_command,
                 ]
                 .into_iter()
                 .flatten()
@@ -373,11 +370,8 @@ impl Args {
                         *path = directory.join(&*path);
                     }
                 }
-                if config.models.cache.is_relative() {
+                if !config.models.cache.as_os_str().is_empty() && config.models.cache.is_relative() {
                     config.models.cache = directory.join(&config.models.cache);
-                }
-                if config.models.speaker_command.is_relative() {
-                    config.models.speaker_command = directory.join(&config.models.speaker_command);
                 }
                 let model = &mut config.models.whisper;
                 if model.contains('/') && Path::new(model).is_relative() {
@@ -453,10 +447,15 @@ impl Config {
         }
         if self.service.model.trim().is_empty()
             || self.models.whisper.trim().is_empty()
-            || self.models.speaker_command.as_os_str().is_empty()
+            || self.models.cache.as_os_str().is_empty()
+            || self
+                .models
+                .speaker_command
+                .as_ref()
+                .is_some_and(|path| path.as_os_str().is_empty())
             || self.capture.ffmpeg.trim().is_empty()
         {
-            return invalid("model names and executable paths must not be empty");
+            return invalid("model names, cache and executable paths must not be empty");
         }
         if self
             .models

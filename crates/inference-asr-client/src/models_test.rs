@@ -33,13 +33,16 @@ fn test_vad_recurrence() {
 }
 
 #[test]
-#[ignore = "requires native speech assets and KHALAMARI_ASR_ORACLE reference data"]
+#[ignore = "requires KHALAMARI_ASR_ORACLE reference data"]
 fn test_models_migration() {
-    let config = ModelConfig::default();
-    let mut vad = Vad::load(fixture_environment()).unwrap();
-    let mut model = AcousticModel::load(&config, &crate::config::LanguageConfig::default()).unwrap();
     let path = std::env::var("KHALAMARI_ASR_ORACLE").expect("set KHALAMARI_ASR_ORACLE to the migration reference JSON");
     let cases: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    let assets = tokio::runtime::Runtime::new()
+        .unwrap()
+        .block_on(crate::assets::prepare(&crate::config::ModelConfig::default()))
+        .unwrap();
+    let mut vad = Vad::load(fixture_environment()).unwrap();
+    let mut model = AcousticModel::load(&assets.whisper, &crate::config::LanguageConfig::default()).unwrap();
     for case in cases.as_array().unwrap() {
         let bytes = std::fs::read(case["pcm"].as_str().unwrap()).unwrap();
         let pcm: Vec<_> = bytes

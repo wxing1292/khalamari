@@ -1,5 +1,6 @@
 use std::collections::VecDeque;
 use std::ops::Range;
+use std::path::Path;
 
 use inference_error::Result;
 use serde::Serialize;
@@ -9,7 +10,6 @@ use crate::analysis::AudioAnalysisUpdate;
 use crate::analysis::AudioSpan;
 use crate::audio::quiet_cut;
 use crate::config::LanguageConfig;
-use crate::config::ModelConfig;
 use crate::config::samples;
 use crate::models::AcousticModel;
 use crate::models::timed_words;
@@ -69,9 +69,9 @@ pub struct Acoustics {
 }
 
 impl Acoustics {
-    pub fn load(config: &LanguageConfig, models: &ModelConfig) -> Result<Self> {
+    pub fn load(config: &LanguageConfig, whisper: &Path) -> Result<Self> {
         Ok(Self {
-            model: AcousticModel::load(models, config)?,
+            model: AcousticModel::load(whisper, config)?,
             input: None,
             processed: 0,
             hop: samples(config.hop_seconds),

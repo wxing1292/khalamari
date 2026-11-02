@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::VecDeque;
+use std::path::Path;
 use std::sync::Arc;
 
 use inference_error::Error;
@@ -14,6 +15,7 @@ use crate::analysis::AudioAnalysisUpdate;
 use crate::analysis::AudioProcessor;
 use crate::analysis::AudioReaderTask;
 use crate::analysis::AudioTimeline;
+use crate::assets::SpeechAssets;
 use crate::audio::FRAME_SAMPLES;
 use crate::config::Config;
 use crate::config::samples;
@@ -43,7 +45,7 @@ pub struct SpeechModels {
 }
 
 impl SpeechModels {
-    pub async fn load(config: &Config) -> Result<Self> {
+    pub async fn load(config: &Config, whisper: &Path) -> Result<Self> {
         let environment = ort::init()
             .build()
             .map_err(|e| Error::unavailable(format!("CPU speech environment: {e}")))?;
@@ -53,8 +55,8 @@ impl SpeechModels {
         })
         .await?;
         let language = config.language.clone();
-        let models = config.models.clone();
-        let acoustics = AudioProcessor::load(move || Acoustics::load(&language, &models)).await?;
+        let whisper = whisper.to_path_buf();
+        let acoustics = AudioProcessor::load(move || Acoustics::load(&language, &whisper)).await?;
         Ok(Self { vad, acoustics })
     }
 }
@@ -91,11 +93,12 @@ impl AudioStream {
         recording: AudioRecordingReader,
         pass: AnalysisPass,
         models: &mut SpeechModels,
+        assets: &SpeechAssets,
         live_cuts: VecDeque<u64>,
     ) -> Result<Self> {
         let (speaker_process, diarizer) = SpeakerProcess::start(
-            &config.models.speaker_command,
-            config.models.speaker_model_dir.as_deref(),
+            &assets.speaker_command,
+            assets.speaker_model_dir.as_deref(),
             pass,
             recording.clone(),
         )
