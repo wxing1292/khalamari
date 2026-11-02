@@ -77,7 +77,7 @@ The example configuration contains only workload overrides.
 example window: x[0:32000], mono i16, 16000 Hz
 
 FFmpeg -> one writer appends x[0:512], x[512:1024], ... to the recording
-  archive reader -> FLAC
+  archive reader -> M4A/ALAC
   live readers -> independent VAD, LID and diarization timelines -> segment ranges
     immutable job + language evidence -> Qwen service -> aligned text and speaker intervals
       ordered events -> JSONL, terminal or revisable editor
@@ -195,7 +195,7 @@ PCM log R[0:N), 16000 Hz, mono i16
                                 |
               ordered final or current partial
                                 |
-       latest speaker timeline -> turns -> JSONL / terminal / Document
+       latest speaker timeline -> turns -> Document -> terminal / text / optional JSONL
 
 speaker Replace after text -> speakers event for the same text revision
                                     -> update turns, preserve manual edits
@@ -468,14 +468,14 @@ No Python interpreter participates in online audio processing or transcription s
   AudioCapture owns the only AudioRecordingWriter
     append R[0:N) to a temporary PCM file, including silence
     publish N after the complete write
-      +-> archive reader -> FFmpeg FLAC -> atomic publication
+      +-> archive reader -> FFmpeg ALAC/M4A -> atomic publication
       +-> VAD reader -> speech spans
       +-> LID reader -> language spans, including unknown
       +-> speaker reader -> revisable speaker spans
               timelines -> segmenter -> immutable ASR range snapshots
-                Qwen service / shared CPU alignment -> live JSONL and terminal
+                Qwen service -> live draft; final -> shared CPU alignment -> document and terminal
 capture EOF -> sync and seal R -> archive completes independently of ASR
-            -> full-recording analysis with new state -> offline JSONL
+            -> full-recording analysis with new state -> transcript.txt + optional offline JSONL
 ```
 
 `FfmpegSource` owns the child, pipes, incomplete frame and bounded stderr diagnostics.
@@ -490,7 +490,16 @@ Capture completion synchronizes and seals the PCM file. A failed archive keeps t
 Successful archive publication, or explicit discard, permits spool deletion after analysis readers finish.
 
 Enter stops capture and drains analysis. Ctrl-C, SIGTERM, and SIGHUP cancel analysis, then finish capture and archive publication.
-Default files use the capture-start timestamp in the starting directory: `.flac` and one `.<pass>.jsonl` per analysis pass.
+The client creates `asr-<capture-start timestamp>/` in the starting directory.
+The archive reader publishes `recording.m4a` with ALAC lossless compression.
+`live.txt` and `transcript.txt` contain the live and offline finalized documents.
+`--save` overrides only the archive path and supports M4A/ALAC, WAV and FLAC.
+`--json` retains `live.jsonl` and `offline.jsonl` and emits events on stdout. The default creates no JSONL files.
+`Output` owns one raw pass document for terminal rendering and text export.
+The session pairs `start_pass` with `stop_pass`. It closes the text file on pass completion or failure before another pass starts.
+Cancellation closes the active pass during session cleanup. Status-output errors do not bypass that cleanup.
+Text export contains accepted finals at pass closure; it is not an append-only live event feed.
+The editor separately owns user corrections to the live document.
 `--save` selects a new WAV or FLAC destination. `--discard-recording` suppresses the archive and deletes the temporary recording.
 Recording has no default duration limit. `--duration` limits microphone or file capture in either mode.
 Each ASR request still fits the service's 30-second limit.
@@ -502,7 +511,7 @@ ASR regenerates text from the recording. Original live events and manual edits r
 `--mode offline`, including the default invocation, waits for capture to finish and runs the same offline pipeline.
 It uses VAD, LID, language-aware requests, Mandarin recovery, word alignment, and speaker attribution.
 All modes emit the same JSONL event schema. Offline output contains final and speaker updates, without partials.
-The `.offline.jsonl` file contains the final result. Speaker updates replace attribution for the referenced segment revision.
+The `transcript.txt` file contains the final document. JSON mode also saves `offline.jsonl`. Speaker updates replace attribution for the referenced segment revision.
 The client no longer sends a separate unary whole-recording request or retains a separate collected-output path.
 
 ```text
@@ -512,7 +521,7 @@ source samples [0, N) -> one writer -> PCM log + compressed archive
     default / --mode offline / live reprocess
       -> fresh offline readers over [0, N)
       -> bounded language-aware ASR ranges -> aligned text + speaker turns
-      -> final / speakers events in .offline.jsonl
+      -> transcript.txt; optional final / speakers events in offline.jsonl
 ```
 
 `--no-reprocess` suppresses only the second pass after live analysis. It does not disable offline-only analysis.
@@ -850,6 +859,7 @@ A partial can revise every word in its complete draft.
 A final commits once, in segment order.
 A closed segment rejects late partials. A draft cannot supply sentence evidence to a newer segment.
 The terminal replaces one visible draft and shows its latest suffix when width is insufficient.
+Speaker changes can update that draft without a new text revision.
 JSON Lines and final output retain complete text.
 
 The optional editor keeps a separate document after recognition commits.
@@ -921,6 +931,35 @@ A final waiting for language evidence does not block a newer active draft.
 A submitted newer revision does not invalidate a useful older completion. An accepted newer revision does.
 This policy prevents starvation during continuous speech. Closed ranges still reject late drafts.
 The update interval controls admission eligibility. It does not guarantee display latency or native model-state reuse.
+
+#### Matched contract audit replay
+
+One 129.8346875-second Mandarin recording was replayed at source speed through the same Qwen service.
+The machine was Apple M3 Max with 48 GiB RAM and macOS 27.2. Runs were serial and had no concurrent compilation.
+The baseline binary used `b79e7afe8165b5f0ead0c18f75ec525a394e2075`. The candidate used the contract audit with a dirty tree.
+Both used Qwen3-ASR-1.7B-8bit, Whisper tiny INT8, Community-1 CPU, ALAC archives and ordinary wall-clock execution.
+Draft metrics exclude the first 10 source seconds. The service log records initialization and idle hibernation.
+
+```text
+Metric, seconds                         Before audit  After audit
+--------------------------------------  ------------  ------------
+Draft refresh gap, median                     0.55          0.55
+Draft range-end age, median                   1.14          1.13
+Draft range-end age, P95                      1.86          1.85
+Final range-end age, median                   4.32          4.35
+Complete live + offline wall time           173.85        173.91
+```
+
+Range-end age subtracts the hypothesis audio end from its reception time on the capture clock.
+It measures audio coverage freshness, not word timing accuracy. P95 uses the nearest-rank method.
+Both runs emitted six live finals and six offline finals, with one speaker turn per final.
+Both live and offline text were identical. Text equality does not establish word accuracy.
+The timing differences do not establish a throughput change from one run per version.
+The M4A archives decoded to exactly the same 2,077,355 canonical samples as the input.
+A separate output-pipe failure preserved accepted final text after the fix. The earlier binary left the text file empty.
+Both versions preserved the complete recording in that failure case.
+A replay with superseded speaker updates completed after the fix. The earlier binary rejected that valid history.
+Commands, hashes, dirty state, events and metrics are in `target/asr-contract-audit/comparison.json` and its per-run reports.
 
 ### Analysis windows and scheduling
 

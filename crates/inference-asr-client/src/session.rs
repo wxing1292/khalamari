@@ -27,7 +27,7 @@ pub struct AudioSession {
     output: Output,
     input: Option<TerminalInput>,
     recording: AudioRecordingReader,
-    stem: PathBuf,
+    directory: PathBuf,
     capture: Option<AudioCapture>,
 }
 
@@ -37,7 +37,8 @@ impl AudioSession {
         let (recording, spool) = AudioRecordingWriter::create()?;
         let reader = recording.reader();
         let input = TerminalInput::new(config.capture.input.is_none() || output.is_editor(), output.is_editor())?;
-        let stem = std::env::current_dir().map_err(session_error)?.join(file_stem()?);
+        let directory = std::env::current_dir().map_err(session_error)?.join(file_stem()?);
+        std::fs::create_dir(&directory).map_err(session_error)?;
         let destination = if config.output.discard_recording {
             None
         } else {
@@ -46,7 +47,7 @@ impl AudioSession {
                     .output
                     .save
                     .clone()
-                    .unwrap_or_else(|| stem.with_extension("flac")),
+                    .unwrap_or_else(|| directory.join("recording.m4a")),
             )
         };
         let source = FfmpegSource::open(&config)?;
@@ -64,7 +65,7 @@ impl AudioSession {
             output,
             input,
             recording: reader,
-            stem,
+            directory,
             capture: Some(capture),
         };
         let result = tokio::select! {
@@ -75,14 +76,17 @@ impl AudioSession {
         let mut result = captured.and(result);
         if let Some(task) = archive {
             match task.await.expect("recording archive task must not panic") {
-                Ok(destination) => session.status(&format!("Recording saved: {}", destination.display()))?,
+                Ok(destination) => {
+                    result = result.and(session.status(&format!("Recording saved: {}", destination.display())));
+                },
                 Err(error) if session.recording.end() == 0 => result = result.and(Err(error)),
                 Err(error) => {
-                    let path = spool.keep().map_err(session_error)?;
-                    result = Err(Error::unavailable(format!(
-                        "{error}. Recover 16 kHz mono s16le audio at {}",
-                        path.display()
-                    )));
+                    result = spool.keep().map_err(session_error).and_then(|path| {
+                        Err(Error::unavailable(format!(
+                            "{error}. Recover 16 kHz mono s16le audio at {}",
+                            path.display()
+                        )))
+                    });
                 },
             }
         }
@@ -150,39 +154,64 @@ impl AudioSession {
         pass: AnalysisPass,
         live_cuts: VecDeque<u64>,
     ) -> Result<VecDeque<u64>> {
-        let mut log = self.events(pass.name())?;
-        let mut stream = {
-            let config = self.config.clone();
-            self.wait_analysis(AudioStream::open(
-                &config,
-                self.recording.clone(),
-                pass,
-                models,
-                live_cuts,
-            ))
-            .await?
+        let name = if pass == AnalysisPass::Live {
+            "live.txt"
+        } else {
+            "transcript.txt"
         };
-        let mut cuts = VecDeque::new();
-        while let Some(events) = self.wait_analysis(stream.next()).await? {
-            for event in events {
-                if pass == AnalysisPass::Live
-                    && self.config.streaming.reprocess
-                    && event.kind == "final"
-                    && matches!(event.reason, "silence" | "sentence" | "speaker")
-                {
-                    cuts.push_back(event.end);
-                }
-                write_json(&mut log, &event)?;
-                if pass == AnalysisPass::Live || !self.output.is_editor() {
+        let transcript = self.directory.join(name);
+        self.output.start_pass(pass, &transcript)?;
+        let result: Result<_> = async {
+            self.status(&format!("Transcript: {}", transcript.display()))?;
+            let mut log = self
+                .config
+                .output
+                .json
+                .then(|| {
+                    File::create_new(self.directory.join(format!("{}.jsonl", pass.name())))
+                        .map(BufWriter::new)
+                        .map_err(session_error)
+                })
+                .transpose()?;
+            let mut stream = {
+                let config = self.config.clone();
+                self.wait_analysis(AudioStream::open(
+                    &config,
+                    self.recording.clone(),
+                    pass,
+                    models,
+                    live_cuts,
+                ))
+                .await?
+            };
+            let mut cuts = VecDeque::new();
+            while let Some(events) = self.wait_analysis(stream.next()).await? {
+                for event in events {
+                    if pass == AnalysisPass::Live
+                        && self.config.streaming.reprocess
+                        && event.kind == "final"
+                        && matches!(event.reason, "silence" | "sentence" | "speaker")
+                    {
+                        cuts.push_back(event.end);
+                    }
+                    if let Some(log) = &mut log {
+                        write_json(log, &event)?;
+                    }
                     self.output
                         .emit(&event, &self.input.as_ref().map_or(String::new(), TerminalInput::line))?;
                 }
             }
+            let stats = self.wait_analysis(stream.stop()).await?;
+            if self.config.output.json {
+                eprintln!("Audio transport: {}", serde_json::to_string(&stats).unwrap());
+            }
+            Ok(cuts)
         }
-        let stats = self.wait_analysis(stream.stop()).await?;
-        if self.config.output.json {
-            eprintln!("Audio transport: {}", serde_json::to_string(&stats).unwrap());
-        }
+        .await;
+        let saved = self.output.stop_pass();
+        let cuts = result?;
+        saved?;
+        self.status(&format!("Transcript saved: {}", transcript.display()))?;
         Ok(cuts)
     }
 
@@ -243,13 +272,6 @@ impl AudioSession {
     fn status(&mut self, message: &str) -> Result<()> {
         self.output
             .status(message, &self.input.as_ref().map_or(String::new(), TerminalInput::line))
-    }
-
-    fn events(&mut self, pass: &str) -> Result<BufWriter<File>> {
-        let path = self.stem.with_extension(format!("{pass}.jsonl"));
-        let log = BufWriter::new(File::create_new(&path).map_err(session_error)?);
-        self.status(&format!("Transcript events: {}", path.display()))?;
-        Ok(log)
     }
 }
 

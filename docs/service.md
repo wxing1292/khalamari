@@ -552,8 +552,12 @@ target/release/asr --input /absolute/path/to/recording.m4a --json
 `--url` selects the full transcription endpoint. `--language` supplies an explicit checkpoint language name.
 Leave `--language` unset for automatic detection, including mixed-language recordings.
 The client trims the language hint. An empty hint also selects automatic detection.
-The client saves a timestamp-named FLAC in the starting directory by default.
-`--save /absolute/path/to/recording.wav` selects a new WAV or FLAC path.
+The client creates an `asr-<start timestamp>/` directory in the starting directory.
+It saves `recording.m4a` with ALAC lossless compression, `live.txt` for live text, and `transcript.txt` for the offline result.
+The text files contain accepted finalized speaker turns. They do not contain superseded drafts.
+The client fills each text file when its pass ends or fails. Cancellation also closes the active file.
+M4A preserves the canonical 16 kHz mono samples. It does not preserve the device's original sample rate or channels.
+`--save PATH` selects a new M4A, WAV or FLAC archive. Transcript files remain in the session directory.
 `--discard-recording` removes temporary audio after readers finish.
 Recording continues if live inference fails. Archive publication does not depend on inference success.
 If publication fails, the client reports the retained S16LE spool path.
@@ -635,7 +639,7 @@ Plain file input runs to EOF. Ctrl-C cancels analysis and preserves the captured
 Ctrl-C cancels analysis and completes the recording archive.
 Capture failures report an error. The recorded prefix remains recoverable.
 Neither recording mode has a default duration. Use `--duration` for a bounded session.
-After capture ends, `--mode stream` automatically runs the full offline pipeline and saves final events in `.offline.jsonl`.
+After capture ends, `--mode stream` automatically runs the full offline pipeline and saves the final document in `transcript.txt`.
 `--no-reprocess` disables this second pass. Live boundary hints can guide offline segmentation, but offline ASR regenerates the text.
 `--mode offline` waits for capture to end and runs that same offline pipeline once, with no live drafts.
 `--mode offline --input PATH` selects the same analysis without real-time file pacing.
@@ -768,11 +772,13 @@ These durations do not directly measure speech-end-to-final latency. Submitted a
 Event `transport` snapshots and the final JSON-mode stderr `Audio transport: { ... }` report connection work, including cancelled requests.
 `uploaded_samples * 2` gives uploaded PCM bytes. Graceful finish reports zero retained cache samples.
 The default archive includes silence and every captured sample.
-Each analysis pass writes `<start timestamp>.<pass>.jsonl` in the starting directory.
+By default, the client saves human-readable text without JSONL files.
+`--json` also writes `live.jsonl` and `offline.jsonl` inside the session directory and emits events on stdout.
+The editor retains its separate event log for replay and manual corrections.
 Events contain `pass="live"` or `pass="offline"`. Segment identities are local to each pass.
 The second pass runs after capture with larger context and no partial requests. It can reuse live cut positions and exact-range LID observations.
 `--no-reprocess` disables the second pass. `--mode offline --input PATH` processes a complete file without real-time pacing.
-The editor keeps live text and manual edits. Offline events stay in their separate JSONL file. A correction can retain a single speaker at segment precision.
+The editor keeps live text and manual edits. The offline document stays in `transcript.txt`; JSON mode also retains offline events. A correction can retain a single speaker at segment precision.
 Each span includes raw speaker activity intervals and aligned words. The terminal, editor and JSONL show the resulting speaker turns.
 Each timed word selects the speaker with the greatest union of covered samples. Equal coverage retains multiple IDs.
 Raw activity can include secondary speakers that do not own that word. Empty word IDs mean unresolved attribution.

@@ -1,3 +1,5 @@
+use std::fs::File;
+use std::io::BufWriter;
 use std::io::IsTerminal;
 use std::io::Write;
 use std::path::Path;
@@ -19,116 +21,131 @@ use crate::terminal::prefix;
 use crate::terminal::size;
 use crate::terminal::visible_suffix;
 
-pub enum Output {
+/// The current pass owns one raw document for both rendering and saved text.
+/// The editor separately owns explicit user corrections to the live document.
+pub struct Output {
+    view: View,
+    document: Document,
+    pass: AnalysisPass,
+    transcript: Option<BufWriter<File>>,
+}
+
+enum View {
     Json,
-    Text {
-        tty: bool,
-        draft_visible: bool,
-        document: Document,
-        pass: AnalysisPass,
-    },
+    Text { tty: bool, draft_visible: bool },
     Editor(Box<Editor>),
 }
 
 impl Output {
     pub fn open(config: &OutputConfig) -> Result<Self> {
-        Ok(if let Some(path) = &config.editor {
-            Self::Editor(Box::new(Editor::open(path)?))
+        let view = if let Some(path) = &config.editor {
+            View::Editor(Box::new(Editor::open(path)?))
         } else if config.json {
-            Self::Json
+            View::Json
         } else {
-            Self::Text {
+            View::Text {
                 tty: std::io::stdout().is_terminal(),
                 draft_visible: false,
-                document: Document::default(),
-                pass: AnalysisPass::Live,
             }
+        };
+        Ok(Self {
+            view,
+            document: Document::default(),
+            pass: AnalysisPass::Live,
+            transcript: None,
         })
     }
 
+    pub fn start_pass(&mut self, pass: AnalysisPass, path: &Path) -> Result<()> {
+        assert!(
+            self.transcript.is_none(),
+            "analysis passes must close before another starts"
+        );
+        self.pass = pass;
+        self.document = Document::default();
+        self.transcript = Some(BufWriter::new(File::create_new(path).map_err(output_error)?));
+        Ok(())
+    }
+
+    pub fn stop_pass(&mut self) -> Result<()> {
+        if let Some(mut transcript) = self.transcript.take() {
+            self.document.write(&mut transcript)?;
+            transcript.flush().map_err(output_error)?;
+        }
+        Ok(())
+    }
+
     pub fn is_editor(&self) -> bool {
-        matches!(self, Self::Editor(_))
+        matches!(self.view, View::Editor(_))
     }
 
     pub fn emit(&mut self, event: &AudioEvent, command: &str) -> Result<()> {
-        let (tty, draft_visible, document, pass) = match self {
-            Self::Json => return write_json(&mut std::io::stdout().lock(), event),
-            Self::Editor(editor) => {
-                if editor.emit(event)? {
+        let changed = self.document.observe(event);
+        let (tty, draft_visible) = match &mut self.view {
+            View::Json => return write_json(&mut std::io::stdout().lock(), event),
+            View::Editor(editor) => {
+                if event.pass == AnalysisPass::Live && editor.emit(event)? {
                     editor.render(command)?;
                 }
                 return Ok(());
             },
-            Self::Text {
-                tty,
-                draft_visible,
-                document,
-                pass,
-            } => {
-                if *pass != event.pass {
-                    *document = Document::default();
-                    *pass = event.pass;
-                }
-                if !document.observe(event) {
-                    return Ok(());
-                }
-                (tty, draft_visible, document, pass)
-            },
+            View::Text { tty, draft_visible } => (tty, draft_visible),
         };
+        if !changed {
+            return Ok(());
+        }
         let mut output = std::io::stdout().lock();
         if *tty {
             clear_draft(&mut output, draft_visible)?;
         }
-        let draft = document.draft().filter(|draft| draft.segment == event.segment);
-        let line = draft.unwrap_or_else(|| &document.lines()[event.segment as usize]);
+        let draft = self.document.draft().filter(|draft| draft.segment == event.segment);
+        let line = draft.unwrap_or_else(|| &self.document.lines()[event.segment as usize]);
         if !*tty || draft.is_none() {
-            let prefix = line_prefix(event.kind, *pass, line);
+            let prefix = line_prefix(event.kind, self.pass, line);
             let text = line.display(if draft.is_some() { " | " } else { "\n" });
             writeln!(output, "{prefix}{text}").map_err(output_error)?;
         }
         if *tty {
-            render_draft(&mut output, draft_visible, document, *pass)?;
+            render_draft(&mut output, draft_visible, &self.document, self.pass)?;
         }
         output.flush().map_err(output_error)
     }
 
     pub fn input(&mut self, command: Option<String>, draft: &str) -> Result<bool> {
-        match self {
-            Self::Editor(editor) => editor.input(command.as_deref(), draft),
+        match &mut self.view {
+            View::Editor(editor) => editor.input(command.as_deref(), draft),
             _ => Ok(true),
         }
     }
 
     pub fn status(&mut self, status: &str, command: &str) -> Result<()> {
-        if let Self::Editor(editor) = self {
+        if let View::Editor(editor) = &mut self.view {
             editor.status(status);
             return editor.render(command);
         }
         let mut output = std::io::stdout().lock();
-        if let Self::Text {
+        if let View::Text {
             tty: true,
             draft_visible,
             ..
-        } = self
+        } = &mut self.view
         {
             clear_draft(&mut output, draft_visible)?;
         }
         output.flush().map_err(output_error)?;
         writeln!(std::io::stderr().lock(), "{}", display_text(status)).map_err(output_error)?;
-        if let Self::Text {
+        if let View::Text {
             tty: true,
             draft_visible,
-            document,
-            pass,
-        } = self
+        } = &mut self.view
         {
-            render_draft(&mut output, draft_visible, document, *pass)?;
+            render_draft(&mut output, draft_visible, &self.document, self.pass)?;
         }
         output.flush().map_err(output_error)
     }
 
     pub fn replay(&mut self, path: &Path) -> Result<()> {
-        let Self::Editor(editor) = self else {
+        let View::Editor(editor) = &mut self.view else {
             unreachable!("replay configuration requires an editor")
         };
         editor.replay(path)
@@ -144,27 +161,28 @@ impl Output {
     }
 
     pub fn finish(&mut self) -> Result<()> {
-        if let Self::Editor(editor) = self {
+        let saved = self.stop_pass();
+        if let View::Editor(editor) = &mut self.view {
             editor.finish()?;
-        } else if let Self::Text {
+        } else if let View::Text {
             tty: true,
             draft_visible,
             ..
-        } = self
+        } = &mut self.view
         {
             let mut output = std::io::stdout().lock();
             clear_draft(&mut output, draft_visible)?;
             output.flush().map_err(output_error)?;
         }
-        Ok(())
+        saved
     }
 }
 
 impl Drop for Output {
     fn drop(&mut self) {
         if matches!(
-            self,
-            Self::Text {
+            self.view,
+            View::Text {
                 draft_visible: true,
                 ..
             }

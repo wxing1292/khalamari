@@ -1,3 +1,5 @@
+use std::io::Write;
+
 use inference_error::Error;
 use inference_error::Result;
 use serde::Deserialize;
@@ -212,6 +214,14 @@ impl Document {
                 true
             },
         }
+    }
+
+    pub fn write(&self, output: &mut impl Write) -> Result<()> {
+        for line in &self.lines {
+            writeln!(output, "{}\n", line.display("\n"))
+                .map_err(|error| Error::unavailable(format!("transcript output: {error}")))?;
+        }
+        Ok(())
     }
 
     pub fn correction(&self, segment: u64, text: String) -> Result<Correction> {

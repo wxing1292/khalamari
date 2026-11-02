@@ -106,11 +106,12 @@ target/release/asr --mode stream
 The default service URL is `http://127.0.0.1:8000/v1/audio/transcriptions`.
 Leave `--language` unset for English, Chinese, and mixed-language speech.
 Press Enter to stop capture and finish pending transcription. Ctrl-C cancels analysis and saves the recorded prefix.
-The client saves timestamp-named FLAC and JSONL files in the starting directory.
 After live transcription, it runs a separate offline pass. `--no-reprocess` disables that second pass.
 The default mode is `offline`. `--mode offline` records first, then runs the same offline pipeline without live drafts.
 Recording has no default duration limit. `--duration` limits capture in either mode.
-Use `--mode offline --input /absolute/path/to/recording.flac` for unpaced full-recording processing.
+Use `--mode offline --input /absolute/path/to/recording.m4a` for unpaced full-recording processing.
+The client saves an `asr-<start timestamp>/` directory with a lossless `recording.m4a`, `live.txt` and offline `transcript.txt`.
+Use `--json` to also retain machine-readable events. The default output is human-readable.
 Use `--discard-recording` to delete temporary audio instead of keeping an archive.
 The terminal and JSONL show recording-relative intervals, speaker IDs and text.
 Speaker IDs apply to one pass. Quiet or simultaneous voices can remain unresolved.

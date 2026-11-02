@@ -218,7 +218,7 @@ pub struct OutputConfig {
     pub json: bool,
     #[arg(
         id = "output.save",
-        help = "Save complete audio to a new WAV or FLAC file",
+        help = "Save complete audio to a new M4A (ALAC), WAV or FLAC file",
         value_name = "PATH",
         long = "save"
     )]
@@ -484,9 +484,9 @@ impl Config {
             .output
             .save
             .as_ref()
-            .is_some_and(|p| !p.extension().is_some_and(|e| e == "flac" || e == "wav"))
+            .is_some_and(|p| !p.extension().is_some_and(|e| e == "flac" || e == "wav" || e == "m4a"))
         {
-            return invalid("save must use a .flac or .wav extension");
+            return invalid("save must use a .m4a, .flac or .wav extension");
         }
         if !(0.01..=s.window_seconds).contains(&s.interval) || !(2.0..=30.0).contains(&s.window_seconds) {
             return invalid("invalid partial interval or window (analysis window: 2..30 seconds)");

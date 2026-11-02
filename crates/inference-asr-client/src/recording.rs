@@ -138,7 +138,13 @@ pub async fn archive(mut recording: AudioRecordingReader, ffmpeg: &str, destinat
         .prefix(".khalamari-recording-")
         .tempfile_in(directory)
         .map_err(recording_error)?;
-    let wav = destination.extension().is_some_and(|extension| extension == "wav");
+    // Configuration validates the extension before capture starts.
+    let (codec, format) = match destination.extension().unwrap().to_str().unwrap() {
+        "wav" => ("pcm_s16le", "wav"),
+        "flac" => ("flac", "flac"),
+        "m4a" => ("alac", "ipod"),
+        _ => unreachable!("validated archive format"),
+    };
     let mut command = Command::new(ffmpeg);
     command.args([
         "-hide_banner",
@@ -155,11 +161,11 @@ pub async fn archive(mut recording: AudioRecordingReader, ffmpeg: &str, destinat
         "-i",
         "pipe:0",
         "-c:a",
-        if wav { "pcm_s16le" } else { "flac" },
+        codec,
         "-f",
-        if wav { "wav" } else { "flac" },
+        format,
     ]);
-    if wav {
+    if format == "wav" {
         command.args(["-rf64", "auto"]);
     }
     let mut child = command

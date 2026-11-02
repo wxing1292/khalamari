@@ -201,9 +201,7 @@ impl Editor {
 
     fn save(&mut self) -> Result<()> {
         if let Some(mut transcript) = self.transcript.take() {
-            for line in self.document.lines() {
-                writeln!(transcript, "{}", line.display(" | ")).map_err(editor_error)?;
-            }
+            self.document.write(&mut transcript)?;
             transcript.flush().map_err(editor_error)?;
         }
         self.events.flush().map_err(editor_error)
